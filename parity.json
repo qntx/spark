@@ -70,6 +70,48 @@
         }
       },
       "vectors": ["vectors/bolt11.json"]
+    },
+    {
+      "id": "bitcoin-transactions",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/bitcoin.rs",
+          "tests": ["crates/interop/tests/bitcoin.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/bitcoin/transactions.ts",
+          "tests": ["packages/spark/tests/bitcoin.test.ts"]
+        }
+      },
+      "vectors": ["vectors/transactions.json"]
+    },
+    {
+      "id": "bitcoin-htlc",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/bitcoin.rs",
+          "tests": ["crates/interop/tests/bitcoin.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/bitcoin/htlc.ts",
+          "tests": ["packages/spark/tests/bitcoin.test.ts"]
+        }
+      },
+      "vectors": ["vectors/transactions.json"]
+    },
+    {
+      "id": "bitcoin-sighash",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/bitcoin.rs",
+          "tests": ["crates/interop/tests/bitcoin.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/bitcoin/sighash.ts",
+          "tests": ["packages/spark/tests/bitcoin.test.ts"]
+        }
+      },
+      "vectors": ["vectors/transactions.json"]
     }
   ]
 }

@@ -31,8 +31,10 @@ Every file here (except this README) must be referenced by a capability in
 | `vss.json`           | secret, threshold, count, `random` → proofs + shares; upstream-validated       | `crates/interop`                                                 |
 | `address.json`       | fixed Spark address strings → decoded fields; legacy HRPs re-encode modern     | upstream spark-sdk address tests                                 |
 | `bolt11.json`        | every valid/invalid example invoice from the BOLT #11 spec document            | `lightning/bolts` 11-payment-encoding.md (pinned commit)         |
+| `transactions.json`  | sequence helpers, node/refund tx pairs/trios, HTLC tx + spends, sighashes      | upstream `spark-frost` via `crates/interop` (`--test bitcoin`)   |
 
 Regenerate with `SPARK_WRITE_VECTORS=1 cargo test -p qntx-spark-interop --test vectors`
+(and `--test bitcoin` for `transactions.json`)
 inside `crates/interop` (needs `protoc` for the upstream crate's build).
 `spark-crypto/tests/vectors.rs` replays the same files without upstream
 dependencies, and `crates/interop` re-verifies them against upstream.
