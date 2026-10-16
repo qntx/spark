@@ -31,3 +31,24 @@ export class SparkInputError extends SparkError {
     this.name = "SparkInputError";
   }
 }
+
+/**
+ * A request to a signing operator or the SSP failed. `code` is the Connect error code name (for
+ * example "unauthenticated", "unavailable") when the server returned one; `operator` is the FROST
+ * identifier of the operator that failed, when the failure came from an operator. The message
+ * carries the server's own message — never request bodies.
+ */
+export class SparkRequestError extends SparkError {
+  readonly code?: string | undefined;
+  readonly operator?: string | undefined;
+
+  constructor(
+    message: string,
+    options?: ErrorOptions & { readonly code?: string; readonly operator?: string },
+  ) {
+    super(message, options);
+    this.name = "SparkRequestError";
+    this.code = options?.code;
+    this.operator = options?.operator;
+  }
+}

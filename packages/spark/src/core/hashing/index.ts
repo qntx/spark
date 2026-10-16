@@ -25,6 +25,7 @@ export {
   instantStaticDepositStatementDigest,
   proofOfPossessionDigest,
   sendLeafSigningDigest,
+  sspChallengeDigest,
   staticDepositStatementDigest,
   transferPackageDigest,
   watchtowerRecoveryStatementDigest,
