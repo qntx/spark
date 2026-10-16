@@ -1,0 +1,21 @@
+name: Hermes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    uses: qntx/workflows/.github/workflows/ci-hermes.yml@v2
+    permissions:
+      contents: read
+    with:
+      # Tracks React Native 0.88 (react-native/sdks/.hermesv1version).
+      hermes-commit: d412d3bd851278712c20cca25d094e32641a0465
+      script: smoke:hermes
+      working-directory: packages/spark

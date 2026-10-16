@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // tests/hermes imports the packed dist/ builds; those files exist only after
+  // `vp pack`, so the smoke harness is excluded from the typecheck program.
+  "include": ["src", "tests", "scripts", "vite.config.ts"],
+  "exclude": ["tests/hermes"]
+}
