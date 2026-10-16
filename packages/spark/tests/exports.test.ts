@@ -52,7 +52,7 @@ test("root runtime exports are exactly the core surface", () => {
 });
 
 test("crypto runtime exports are exactly the backend contract", () => {
-  expect(names(crypto)).toStrictEqual(["SPARK_ABI_VERSION", "SparkCryptoError"]);
+  expect(names(crypto)).toStrictEqual(["SPARK_ABI_VERSION", "SparkCryptoError", "SparkError"]);
   expect(crypto.SPARK_ABI_VERSION).toBe(1);
 });
 

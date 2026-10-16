@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+// Wire format of the batched FROST requests exchanged through the qntx_spark
+// C ABI (qs_frost_sign / qs_frost_aggregate). Defined by this repository — it
+// is not an upstream Spark proto. Field numbers are part of the ABI contract;
+// cross-language parity with the hand-written prost structs in
+// crates/spark-ffi/src/messages.rs is enforced by the ffi vectors.
+package qntx.spark.ffi;
+
+// Compressed hiding‖binding nonce-commitment points, 33 bytes each.
+message Commitment {
+  bytes hiding = 1;
+  bytes binding = 2;
+}
+
+// One operator's round-1 commitment; identifier is the 32-byte serialized
+// FROST identifier scalar.
+message OperatorCommitment {
+  bytes identifier = 1;
+  Commitment commitment = 2;
+}
+
+message FrostSignJob {
+  // Message bytes to sign (a 32-byte sighash upstream).
+  bytes message = 1;
+  // The user's private key (upstream key_package.secret_share).
+  bytes secret_key = 2;
+  // The combined verifying key, compressed.
+  bytes verifying_key = 3;
+  // The user's hiding‖binding nonces from qs_frost_commit, 64 bytes.
+  bytes nonce = 4;
+  // The user's compressed hiding‖binding commitments.
+  Commitment user_commitment = 5;
+  // The participating operators' commitments.
+  repeated OperatorCommitment operator_commitments = 6;
+  // Optional adaptor point, compressed; empty means no adaptor.
+  bytes adaptor_public_key = 7;
+}
+
+message FrostSignRequest {
+  repeated FrostSignJob jobs = 1;
+}
+
+message FrostSignResponse {
+  // One 32-byte signature share per job, in job order.
+  repeated bytes signature_shares = 1;
+}
+
+message OperatorShare {
+  bytes identifier = 1;
+  Commitment commitment = 2;
+  // The operator's 32-byte signature share.
+  bytes signature_share = 3;
+  // The operator's verifying share, compressed.
+  bytes public_key = 4;
+}
+
+message FrostAggregateJob {
+  bytes message = 1;
+  bytes verifying_key = 2;
+  Commitment user_commitment = 3;
+  // The user's verifying share, compressed.
+  bytes user_public_key = 4;
+  // The user's 32-byte signature share.
+  bytes user_signature_share = 5;
+  repeated OperatorShare operators = 6;
+  bytes adaptor_public_key = 7;
+}
+
+message FrostAggregateRequest {
+  repeated FrostAggregateJob jobs = 1;
+}
+
+message FrostAggregateResponse {
+  // One 64-byte Schnorr signature per job, in job order.
+  repeated bytes signatures = 1;
+}

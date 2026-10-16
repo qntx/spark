@@ -1,0 +1,8 @@
+{
+  // Pack dts generation resolves @qntx/spark through node_modules to the built
+  // sibling (check:pkg runs @qntx/spark#build first). Inheriting the dev
+  // `paths` mapping into ../spark/src would make tsgo emit stray .d.ts files
+  // next to the sibling's sources.
+  "extends": "../../tsconfig.base.json",
+  "include": ["src"]
+}

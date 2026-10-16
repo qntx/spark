@@ -35,6 +35,8 @@ Run before opening a pull request:
 bun run lint && bun run typecheck && bun run test   # lint includes taplo, version,
                                                     # layer, parity and cbindgen checks
 bun run test:parity                                 # seeded TS→Rust differential replay
+bun run test:ffi-host                               # C host over the shared vectors
+bun run --cwd packages/spark-wasm build:wasm        # spark.wasm artifact + integrity
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features -- -D warnings

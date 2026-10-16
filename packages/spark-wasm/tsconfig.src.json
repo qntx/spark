@@ -1,0 +1,9 @@
+{
+  // Same ES2022 floor as @qntx/spark: the loader code must not rely on
+  // ES2023+ builtins.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2022"]
+  },
+  "include": ["src"]
+}

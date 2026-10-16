@@ -23,3 +23,130 @@
  * Returns the C ABI version implemented by this library (`crate::ABI_VERSION`).
  */
 uint32_t qs_abi_version(void);
+
+/**
+ * Allocates a zeroed `len`-byte buffer for the caller.
+ *
+ * `len == 0` returns NULL. Free with `qs_free`.
+ */
+uint8_t *qs_alloc(size_t len);
+
+/**
+ * Wipes then frees a buffer produced by `qs_alloc` or a `qs_*` out-param.
+ *
+ * `qs_free(NULL, 0)` is a no-op.
+ *
+ * # Safety
+ * `ptr`/`len` must be a pair previously returned by `qs_alloc` or a
+ * successful `qs_*` output, and must not be used afterwards.
+ */
+void qs_free(uint8_t *ptr, size_t len);
+
+/**
+ * FROST signing nonces and commitments.
+ *
+ * `hedge` is 32 bytes, `random` is a positive multiple of 32 up to
+ * `256 * 32` bytes. Output is `n * 130` bytes (`nonces(64) ‖
+ * commitments(66)` per item).
+ *
+ * Errors: `1` wrong `hedge`/`random` length or null out-params, `2` invalid
+ * hedge scalar, `5` `random` longer than the cap.
+ *
+ * # Safety
+ * `qntx_spark.h` `(pointer, len)` and out-param contract.
+ */
+int32_t qs_frost_commit(const uint8_t *hedge,
+                        size_t hedge_len,
+                        const uint8_t *random,
+                        size_t random_len,
+                        uint8_t **out,
+                        size_t *out_len);
+
+/**
+ * User-side FROST signature shares.
+ *
+ * `req` is a protobuf `qntx.spark.ffi.FrostSignRequest`; output is a
+ * `FrostSignResponse` with one 32-byte share per job, in job order.
+ *
+ * Errors: `1` wrong field length or null out-params, `2` invalid scalar,
+ * `3` invalid point, `4` protobuf decode failure, `5` zero or more than
+ * 256 jobs, `6` FROST failure.
+ *
+ * # Safety
+ * `qntx_spark.h` `(pointer, len)` and out-param contract.
+ */
+int32_t qs_frost_sign(const uint8_t *req, size_t req_len, uint8_t **out, size_t *out_len);
+
+/**
+ * FROST aggregate signatures.
+ *
+ * `req` is a protobuf `qntx.spark.ffi.FrostAggregateRequest`; output is a
+ * `FrostAggregateResponse` with one 64-byte signature per job, in job
+ * order. Same error vocabulary as `qs_frost_sign`.
+ *
+ * # Safety
+ * `qntx_spark.h` `(pointer, len)` and out-param contract.
+ */
+int32_t qs_frost_aggregate(const uint8_t *req, size_t req_len, uint8_t **out, size_t *out_len);
+
+/**
+ * ECIES encryption compatible with `ecies` 0.2 defaults.
+ *
+ * `pk` is a 33- or 65-byte public key, `random` is 32 bytes; output is
+ * `ephemeralPk(65) ‖ nonce(16) ‖ tag(16) ‖ ciphertext`.
+ *
+ * Errors: `1` wrong `pk`/`random` length or null out-params, `3` invalid
+ * point, `8` internal.
+ *
+ * # Safety
+ * `qntx_spark.h` `(pointer, len)` and out-param contract.
+ */
+int32_t qs_ecies_encrypt(const uint8_t *pk,
+                         size_t pk_len,
+                         const uint8_t *msg,
+                         size_t msg_len,
+                         const uint8_t *random,
+                         size_t random_len,
+                         uint8_t **out,
+                         size_t *out_len);
+
+/**
+ * ECIES decryption.
+ *
+ * `sk` is 32 bytes; output is the plaintext.
+ *
+ * Errors: `1` wrong `sk` length, too-short ciphertext or null out-params,
+ * `2` invalid scalar, `3` invalid point, `7` decryption authentication
+ * failure.
+ *
+ * # Safety
+ * `qntx_spark.h` `(pointer, len)` and out-param contract.
+ */
+int32_t qs_ecies_decrypt(const uint8_t *sk,
+                         size_t sk_len,
+                         const uint8_t *ct,
+                         size_t ct_len,
+                         uint8_t **out,
+                         size_t *out_len);
+
+/**
+ * Feldman VSS split.
+ *
+ * `secret` and `random` are 32 bytes each, `threshold` t ≥ 2 and `shares` n
+ * satisfy t ≤ n ≤ 255. Output is `t×33` proof bytes followed by `n×32`
+ * share bytes; share indexes run 1..n.
+ *
+ * Errors: `1` wrong `secret`/`random` length or null out-params, `2`
+ * invalid secret scalar, `5` threshold/share range, `8` internal.
+ *
+ * # Safety
+ * `qntx_spark.h` `(pointer, len)` and out-param contract.
+ */
+int32_t qs_split_secret_with_proofs(const uint8_t *secret,
+                                    size_t secret_len,
+                                    uint32_t threshold,
+                                    uint32_t shares,
+                                    const uint8_t *random,
+                                    size_t random_len,
+                                    uint8_t **out,
+                                    size_t *out_len);

@@ -21,6 +21,23 @@ const platformNeutralImports = {
   ],
 };
 
+// The SparkCrypto backend packages (spark-wasm, later spark-native) may reach
+// into @qntx/spark only through the crypto leaf.
+const sparkCryptoOnlyImports = {
+  paths: [
+    {
+      name: "@qntx/spark",
+      message: "the backend packages may only import @qntx/spark/crypto",
+    },
+  ],
+  patterns: [
+    {
+      group: ["@qntx/spark/**", "!@qntx/spark/crypto"],
+      message: "the backend packages may only import @qntx/spark/crypto",
+    },
+  ],
+};
+
 const config: UserConfig = defineConfig({
   defaultPackage: {
     pack: "./packages/spark",
@@ -60,8 +77,14 @@ const config: UserConfig = defineConfig({
     },
     overrides: [
       {
-        // Bit manipulation is intrinsic to the cryptographic code.
-        files: ["packages/spark/src/**", "packages/spark/tests/**"],
+        // Bit manipulation is intrinsic to the cryptographic code (the u32
+        // wasm ABI included).
+        files: [
+          "packages/spark/src/**",
+          "packages/spark/tests/**",
+          "packages/spark-wasm/src/abi.ts",
+          "packages/spark-wasm/tests/**",
+        ],
         rules: { "eslint/no-bitwise": "off" },
       },
       {
@@ -101,6 +124,26 @@ const config: UserConfig = defineConfig({
             { name: "sessionStorage", message: "browser-only global — inject a store" },
           ],
           "eslint/no-restricted-imports": ["error", platformNeutralImports],
+        },
+      },
+      {
+        files: ["packages/spark-wasm/src/**"],
+        rules: {
+          "eslint/no-restricted-imports": [
+            "error",
+            {
+              paths: [...platformNeutralImports.paths, ...sparkCryptoOnlyImports.paths],
+              patterns: [...platformNeutralImports.patterns, ...sparkCryptoOnlyImports.patterns],
+            },
+          ],
+        },
+      },
+      {
+        // Platform shim: wasm loading under Node legitimately needs builtins
+        // (still bound to the @qntx/spark/crypto boundary).
+        files: ["packages/spark-wasm/src/load.ts"],
+        rules: {
+          "eslint/no-restricted-imports": ["error", sparkCryptoOnlyImports],
         },
       },
     ],

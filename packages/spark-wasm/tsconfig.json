@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Development resolution for the workspace sibling without a prior pack
+    // build; the emitted package keeps importing @qntx/spark/crypto (peer dep).
+    "paths": {
+      "@qntx/spark/crypto": ["../spark/src/crypto/index.ts"]
+    }
+  },
+  "include": ["src", "tests", "vite.config.ts"]
+}
