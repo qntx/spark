@@ -1,4 +1,55 @@
 {
   "schema": 1,
-  "capabilities": []
+  "capabilities": [
+    {
+      "id": "frost-commit",
+      "implementations": {
+        "rust": {
+          "module": "crates/spark-crypto/src/frost.rs",
+          "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        }
+      },
+      "vectors": ["vectors/frost-commit.json"]
+    },
+    {
+      "id": "frost-sign",
+      "implementations": {
+        "rust": {
+          "module": "crates/spark-crypto/src/frost.rs",
+          "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        }
+      },
+      "vectors": ["vectors/frost-sign.json"]
+    },
+    {
+      "id": "frost-aggregate",
+      "implementations": {
+        "rust": {
+          "module": "crates/spark-crypto/src/frost.rs",
+          "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        }
+      },
+      "vectors": ["vectors/frost-sign.json"]
+    },
+    {
+      "id": "ecies",
+      "implementations": {
+        "rust": {
+          "module": "crates/spark-crypto/src/ecies.rs",
+          "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        }
+      },
+      "vectors": ["vectors/ecies.json"]
+    },
+    {
+      "id": "vss",
+      "implementations": {
+        "rust": {
+          "module": "crates/spark-crypto/src/vss.rs",
+          "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        }
+      },
+      "vectors": ["vectors/vss.json"]
+    }
+  ]
 }
