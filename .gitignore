@@ -1,0 +1,25 @@
+node_modules
+dist
+*.local
+*.log
+.DS_Store
+.env
+.env.*
+.vite-hooks/_
+.wrangler
+.dev.vars*
+.idea
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Hermes smoke bundle (built by packages/spark/scripts/hermes-smoke.ts)
+.hermes-smoke*
+
+# Rust
+/target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+/fuzz/coverage
+/crates/interop/target

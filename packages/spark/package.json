@@ -1,0 +1,77 @@
+{
+  "name": "@qntx/spark",
+  "version": "0.0.0",
+  "description": "Spark Bitcoin L2 protocol for TypeScript: platform-neutral client, signer and crypto-backend interfaces.",
+  "keywords": [
+    "bitcoin",
+    "l2",
+    "lightning",
+    "spark"
+  ],
+  "homepage": "https://github.com/qntx/spark#readme",
+  "bugs": {
+    "url": "https://github.com/qntx/spark/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "QuantX <x@qntx.org>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qntx/spark.git",
+    "directory": "packages/spark"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./crypto": {
+      "types": "./dist/crypto.d.mts",
+      "import": "./dist/crypto.mjs",
+      "default": "./dist/crypto.mjs"
+    },
+    "./signer": {
+      "types": "./dist/signer.d.mts",
+      "import": "./dist/signer.mjs",
+      "default": "./dist/signer.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
+    "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
+    "smoke:hermes": "bun run build && bun scripts/hermes-smoke.ts",
+    "prepublishOnly": "vp run build"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@qntx/tsconfig": "1.0.1",
+    "@types/node": "26.6.3",
+    "publint": "0.3.24",
+    "typescript": "7.0.2",
+    "vite-plus": "1.0.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "bun",
+      "version": "1.4.0",
+      "onFail": "ignore"
+    }
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

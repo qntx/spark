@@ -1,0 +1,46 @@
+# Basic settings
+* text=auto eol=lf
+
+# Source code files
+*.ts    text diff=typescript
+*.tsx   text diff=typescript
+*.js    text diff=javascript
+*.jsx   text diff=javascript
+*.mjs   text
+*.cjs   text
+*.css   text
+*.html  text
+*.json  text
+*.yaml  text
+*.yml   text
+*.toml  text diff=toml
+*.rs    text diff=rust
+*.md    text
+*.txt   text
+
+# Scripts
+*.sh    text eol=lf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Binary files
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+*.zip   binary
+*.pdf   binary
+
+# Generated / lockfiles
+bun.lock linguist-generated=true
+
+# Special handling
+*.json  merge=union
+*.yaml  merge=union
+*.yml   merge=union
