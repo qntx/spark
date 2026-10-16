@@ -1,7 +1,7 @@
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import { BinaryWriter } from "@bufbuild/protobuf/wire";
 import { TimestampSchema } from "@bufbuild/protobuf/wkt";
-import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 import { bech32m } from "@scure/base";
 
@@ -10,10 +10,13 @@ import {
   SatsPaymentSchema,
   SparkAddressSchema,
   TokensPaymentSchema,
+  SparkInvoiceFieldsSchema,
 } from "../proto/gen/spark_pb.ts";
-import type { SparkInvoiceFields as SparkInvoiceFieldsProto } from "../proto/gen/spark_pb.ts";
+import { hashSparkInvoice } from "./hashing/invoice.ts";
+import { INVOICE_VERSION, protoInvoiceToPlain } from "./invoice.ts";
+import type { SparkInvoiceFields } from "./invoice.ts";
 import type { SparkNetwork } from "./network.ts";
-import { uuidFromBytes, uuidToBytes } from "./uuid.ts";
+import { uuidFromBytes, uuidToBytes, uuidv7 } from "./uuid.ts";
 
 // Upstream reference: sdks/js/packages/spark-sdk/src/utils/address.ts
 // (buildonspark/spark@0b3a32a). Addresses are bech32m over a SparkAddress
@@ -27,7 +30,8 @@ const IDENTITY_KEY_LENGTH = 33;
 const TOKEN_IDENTIFIER_LENGTH = 32;
 const MAX_SATS_AMOUNT = 2_100_000_000_000_000; // 21_000_000 BTC in sats
 const MAX_TOKEN_AMOUNT_BYTES = 16; // uint128, big-endian
-const INVOICE_VERSION = 1;
+const ID_LENGTH = 16;
+const PUBLIC_KEY_LENGTH = 33;
 
 const ADDRESS_PREFIX: Record<SparkNetwork, string> = {
   mainnet: "spark",
@@ -45,30 +49,7 @@ for (const network of ["mainnet", "regtest"] as const) {
   PREFIX_TO_NETWORK[LEGACY_PREFIX[network]] = network;
 }
 
-/** Payment carried by a Spark invoice: satoshis or BTKN tokens. */
-export type SparkPayment =
-  | { readonly type: "sats"; readonly amount?: number | undefined }
-  | {
-      readonly type: "tokens";
-      /** 32-byte token identifier. */
-      readonly tokenIdentifier?: Uint8Array | undefined;
-      /** Big-endian uint128, at most 16 bytes. */
-      readonly amount?: Uint8Array | undefined;
-    };
-
-/** Plain-TypeScript mirror of `spark.SparkInvoiceFields`; version is currently always 1. */
-export type SparkInvoiceFields = {
-  readonly version: number;
-  /** UUID identifying the invoice (canonical lowercase form). */
-  readonly id: string;
-  readonly payment?: SparkPayment | undefined;
-  /** At most 120 UTF-8 bytes. */
-  readonly memo?: string | undefined;
-  /** 33-byte compressed secp256k1 public key. */
-  readonly senderPublicKey?: Uint8Array | undefined;
-  /** Unix milliseconds. */
-  readonly expiresAt?: number | undefined;
-};
+export type { SparkInvoiceFields, SparkPayment } from "./invoice.ts";
 
 /**
  * Plain-TypeScript mirror of `spark.SparkAddress`. `signature` is the 64-byte schnorr signature
@@ -145,7 +126,7 @@ function validateInvoiceFields(invoice: SparkInvoiceFields): void {
 // The inner SparkInvoiceFields message is written in the upstream canonical order —
 // scalar fields first, the payment oneof last — so that re-encoding a decoded address
 // reproduces the exact same protobuf bytes (the signature covers these bytes).
-function encodeInvoiceInner(invoice: SparkInvoiceFields): Uint8Array {
+export function encodeSparkInvoiceFieldsV1Canonical(invoice: SparkInvoiceFields): Uint8Array {
   const w = new BinaryWriter();
   if (invoice.version !== 0) {
     w.uint32(8).uint32(invoice.version);
@@ -194,18 +175,39 @@ export function encodeSparkAddress(address: SparkAddress): string {
   if (address.signature !== undefined && address.signature.length !== SIGNATURE_LENGTH) {
     throw new SparkInputError(`signature: must be ${SIGNATURE_LENGTH} bytes`);
   }
-  const prefix = ADDRESS_PREFIX[address.network];
+  return encodeSparkAddressBytes(
+    address.identityPublicKey,
+    address.network,
+    address.invoice === undefined
+      ? undefined
+      : encodeSparkInvoiceFieldsV1Canonical(address.invoice),
+    address.signature,
+  );
+}
+
+/**
+ * Encodes an address from pre-serialized invoice fields bytes, embedding them verbatim. Used by
+ * invoice finalization, where the signed bytes must not be re-encoded. Internal to `core`.
+ */
+export function encodeSparkAddressBytes(
+  identityPublicKey: Uint8Array,
+  network: SparkNetwork,
+  sparkInvoiceFieldsBytes: Uint8Array | undefined,
+  signature: Uint8Array | undefined,
+): string {
+  assertCompressedKey(identityPublicKey, "identityPublicKey");
+  const prefix = ADDRESS_PREFIX[network];
   if (prefix === undefined) {
     throw new SparkInputError("network: must be 'mainnet' or 'regtest'");
   }
 
   const w = new BinaryWriter();
-  w.uint32(10).bytes(address.identityPublicKey);
-  if (address.invoice !== undefined) {
-    w.uint32(18).bytes(encodeInvoiceInner(address.invoice));
+  w.uint32(10).bytes(identityPublicKey);
+  if (sparkInvoiceFieldsBytes !== undefined) {
+    w.uint32(18).bytes(sparkInvoiceFieldsBytes);
   }
-  if (address.signature !== undefined && address.signature.length > 0) {
-    w.uint32(26).bytes(address.signature);
+  if (signature !== undefined && signature.length > 0) {
+    w.uint32(26).bytes(signature);
   }
   return bech32m.encode(prefix, bech32m.toWords(w.finish()), BECH32M_LIMIT);
 }
@@ -246,49 +248,194 @@ export function decodeSparkAddress(address: string): SparkAddress {
   if (signature !== undefined && signature.length > 0 && signature.length !== SIGNATURE_LENGTH) {
     throw new SparkInputError(`signature: must be ${SIGNATURE_LENGTH} bytes`);
   }
+  let invoice: SparkInvoiceFields | undefined;
+  if (payload.sparkInvoiceFields !== undefined) {
+    invoice = protoInvoiceToPlain(payload.sparkInvoiceFields);
+    // Decoded peer data gets the same field validation as local input, except the
+    // version check — unknown future versions may still parse.
+    validateInvoiceFields(invoice);
+  }
   return {
     network,
     identityPublicKey: payload.identityPublicKey,
-    invoice: payload.sparkInvoiceFields ? decodeInvoice(payload.sparkInvoiceFields) : undefined,
+    invoice,
     signature: signature !== undefined && signature.length > 0 ? signature : undefined,
   };
 }
 
-function decodeInvoice(fields: SparkInvoiceFieldsProto): SparkInvoiceFields {
-  let payment: SparkPayment | undefined;
-  if (fields.paymentType.case === "tokensPayment") {
-    const { tokenIdentifier, amount } = fields.paymentType.value;
-    payment = {
-      type: "tokens",
-      tokenIdentifier,
-      amount: amount !== undefined && amount.length > 0 ? amount : undefined,
-    };
-  } else if (fields.paymentType.case === "satsPayment") {
-    const { amount } = fields.paymentType.value;
-    payment = {
-      type: "sats",
-      amount: amount === undefined ? undefined : bigintToSafeInt(amount),
-    };
+/**
+ * Verifies the BIP-340 schnorr signature a Spark invoice carries: the signature covers
+ * `hashSparkInvoice(invoice, identityPublicKey, network)` under the x-only identity public key.
+ * Returns false for a missing invoice/signature or an invalid signature, matching upstream
+ * `validateSparkInvoiceSignature`'s verification step.
+ */
+export function verifySparkAddressSignature(address: SparkAddress): boolean {
+  if (address.invoice === undefined || address.signature === undefined) {
+    return false;
   }
-  const invoice: SparkInvoiceFields = {
-    version: fields.version,
-    id: uuidFromBytes(fields.id),
-    payment,
-    memo: fields.memo,
-    senderPublicKey: fields.senderPublicKey,
-    expiresAt: fields.expiryTime
-      ? Number(fields.expiryTime.seconds) * 1000 + Math.floor(fields.expiryTime.nanos / 1_000_000)
-      : undefined,
-  };
-  // Decoded peer data gets the same field validation as local input, except the
-  // version check — unknown future versions may still parse.
-  validateInvoiceFields(invoice);
-  return invoice;
+  try {
+    const hash = hashSparkInvoice(address.invoice, address.identityPublicKey, address.network);
+    const xOnly = secp256k1.Point.fromBytes(address.identityPublicKey).toBytes(true).slice(1);
+    return schnorr.verify(address.signature, hash, xOnly);
+  } catch {
+    return false;
+  }
 }
 
-function bigintToSafeInt(amount: bigint): number {
-  if (amount < 0n || amount > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new SparkInputError("invoice.payment.amount: does not fit a safe integer");
+export type PrepareTokenInvoiceRequest = {
+  readonly receiverIdentityPublicKey: Uint8Array;
+  readonly network: SparkNetwork;
+  readonly tokenIdentifier?: Uint8Array | undefined;
+  readonly tokenAmount?: Uint8Array | undefined;
+  readonly memo?: string | undefined;
+  /** Spark address of the sender; only its identity public key is bound. */
+  readonly senderAddress?: string | undefined;
+  /** Unix milliseconds. */
+  readonly expiresAtMs?: number | undefined;
+  /** 16-byte invoice id (uuid_v7 bytes). Generated from `random`/`now` when omitted. */
+  readonly invoiceId?: Uint8Array | undefined;
+  readonly random?: ((length: number) => Uint8Array) | undefined;
+  readonly now?: (() => number) | undefined;
+};
+
+export type PreparedTokenInvoice = {
+  readonly invoice: SparkInvoiceFields;
+  /** Canonical SparkInvoiceFields protobuf bytes, embedded verbatim in the address. */
+  readonly invoiceFieldsBytes: Uint8Array;
+  readonly invoiceHash: Uint8Array;
+  readonly unsignedAddress: string;
+};
+
+function requireLength(value: Uint8Array, length: number, field: string): void {
+  if (value.length !== length) {
+    throw new SparkInputError(`${field} must be exactly ${length} bytes`);
   }
-  return Number(amount);
+}
+
+function validateTokenInvoiceFields(invoice: SparkInvoiceFields): void {
+  if (invoice.version !== INVOICE_VERSION) {
+    throw new SparkInputError("invoice.version: must be 1");
+  }
+  uuidToBytes(invoice.id);
+  if (invoice.memo !== undefined && utf8ToBytes(invoice.memo).length > MEMO_MAX_BYTES) {
+    throw new SparkInputError("invoice.memo: exceeds 120 UTF-8 bytes");
+  }
+  if (invoice.senderPublicKey !== undefined) {
+    requireLength(invoice.senderPublicKey, PUBLIC_KEY_LENGTH, "invoice.senderPublicKey");
+  }
+  if (invoice.payment === undefined || invoice.payment.type !== "tokens") {
+    throw new SparkInputError("expected token invoice, got sats invoice or no payment");
+  }
+  const { tokenIdentifier, amount } = invoice.payment;
+  if (tokenIdentifier !== undefined && tokenIdentifier.length !== TOKEN_IDENTIFIER_LENGTH) {
+    throw new SparkInputError("invoice token identifier must be 32 bytes");
+  }
+  if (amount !== undefined && amount.length > MAX_TOKEN_AMOUNT_BYTES) {
+    throw new SparkInputError("invoice token amount must be at most 16 bytes");
+  }
+}
+
+/**
+ * Builds a token invoice: the canonical `SparkInvoiceFields` encoding, the invoice signing hash,
+ * and the unsigned bech32m Spark address. Mirrors the upstream Rust `prepare_token_invoice`; the
+ * caller signs `invoiceHash` with BIP-340 schnorr and passes the signature to
+ * {@link finalizeTokenInvoice}.
+ */
+export function prepareTokenInvoice(request: PrepareTokenInvoiceRequest): PreparedTokenInvoice {
+  requireLength(
+    request.receiverIdentityPublicKey,
+    PUBLIC_KEY_LENGTH,
+    "receiver identity public key",
+  );
+  if (request.tokenIdentifier !== undefined) {
+    requireLength(request.tokenIdentifier, TOKEN_IDENTIFIER_LENGTH, "token identifier");
+  }
+  if (request.tokenAmount !== undefined && request.tokenAmount.length > MAX_TOKEN_AMOUNT_BYTES) {
+    throw new SparkInputError("token amount must be at most 16 bytes");
+  }
+  if (request.memo !== undefined && utf8ToBytes(request.memo).length > MEMO_MAX_BYTES) {
+    throw new SparkInputError("memo must be at most 120 UTF-8 bytes");
+  }
+
+  let { invoiceId } = request;
+  if (invoiceId === undefined) {
+    if (request.random === undefined || request.now === undefined) {
+      throw new SparkInputError(
+        "invoice id: pass invoiceId or inject random/now for uuid v7 generation",
+      );
+    }
+    invoiceId = uuidToBytes(uuidv7(request.random, request.now));
+  }
+  requireLength(invoiceId, ID_LENGTH, "invoice id");
+
+  let senderPublicKey: Uint8Array | undefined;
+  if (request.senderAddress !== undefined) {
+    const sender = decodeSparkAddress(request.senderAddress);
+    if (sender.network !== request.network) {
+      throw new SparkInputError("sender address network mismatch");
+    }
+    senderPublicKey = sender.identityPublicKey;
+  }
+
+  const invoice: SparkInvoiceFields = {
+    version: INVOICE_VERSION,
+    id: uuidFromBytes(invoiceId),
+    payment: {
+      type: "tokens",
+      tokenIdentifier: request.tokenIdentifier,
+      amount: request.tokenAmount,
+    },
+    memo: request.memo,
+    senderPublicKey,
+    expiresAt: request.expiresAtMs,
+  };
+  validateTokenInvoiceFields(invoice);
+
+  const invoiceHash = hashSparkInvoice(invoice, request.receiverIdentityPublicKey, request.network);
+  const invoiceFieldsBytes = encodeSparkInvoiceFieldsV1Canonical(invoice);
+  const unsignedAddress = encodeSparkAddressBytes(
+    request.receiverIdentityPublicKey,
+    request.network,
+    invoiceFieldsBytes,
+    undefined,
+  );
+  return { invoice, invoiceFieldsBytes, invoiceHash, unsignedAddress };
+}
+
+/**
+ * Produces the final bech32m Spark address from canonical invoice fields bytes plus an optional
+ * signature — the fields bytes are embedded verbatim, exactly like the upstream Rust
+ * `finalize_token_invoice`.
+ */
+export function finalizeTokenInvoice(request: {
+  readonly receiverIdentityPublicKey: Uint8Array;
+  readonly network: SparkNetwork;
+  readonly invoiceFieldsBytes: Uint8Array;
+  readonly signature?: Uint8Array | undefined;
+}): string {
+  requireLength(
+    request.receiverIdentityPublicKey,
+    PUBLIC_KEY_LENGTH,
+    "receiver identity public key",
+  );
+  if (request.invoiceFieldsBytes.length === 0) {
+    throw new SparkInputError("invoice fields bytes must not be empty");
+  }
+  if (request.signature !== undefined) {
+    requireLength(request.signature, SIGNATURE_LENGTH, "signature");
+  }
+  let fields;
+  try {
+    fields = fromBinary(SparkInvoiceFieldsSchema, request.invoiceFieldsBytes);
+  } catch (error) {
+    throw new SparkInputError("failed to decode invoice fields", { cause: error });
+  }
+  // The signing hash applies to the decoded fields; validate with the same rules.
+  validateTokenInvoiceFields(protoInvoiceToPlain(fields));
+  return encodeSparkAddressBytes(
+    request.receiverIdentityPublicKey,
+    request.network,
+    request.invoiceFieldsBytes,
+    request.signature,
+  );
 }

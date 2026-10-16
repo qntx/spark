@@ -112,6 +112,108 @@
         }
       },
       "vectors": ["vectors/transactions.json"]
+    },
+    {
+      "id": "hashstructure",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/hashing.rs",
+          "tests": ["crates/interop/tests/hashing.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/hashing/hashstructure.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": ["vectors/hashing.json"]
+    },
+    {
+      "id": "protohash",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/hashing.rs",
+          "tests": ["crates/interop/tests/hashing.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/hashing/protohash.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": ["vectors/hashing.json", "vectors/upstream/invoice_hash_cases.json"]
+    },
+    {
+      "id": "token-transaction-hashes",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/hashing.rs",
+          "tests": ["crates/interop/tests/hashing.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/hashing/token.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": [
+        "vectors/hashing.json",
+        "vectors/upstream/token_transaction_v3_hash_cases.json",
+        "vectors/upstream/partial_token_transaction_hash_cases.json"
+      ]
+    },
+    {
+      "id": "transfer-manifest",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/hashing.rs",
+          "tests": ["crates/interop/tests/hashing.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/hashing/manifest.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": ["vectors/hashing.json", "vectors/upstream/transfer_manifest_hash_cases.json"]
+    },
+    {
+      "id": "quote-envelope",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/hashing.rs",
+          "tests": ["crates/interop/tests/hashing.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/hashing/manifest.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": ["vectors/hashing.json", "vectors/upstream/quote_envelope_cases.json"]
+    },
+    {
+      "id": "spark-invoice",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/hashing.rs",
+          "tests": ["crates/interop/tests/hashing.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/core/hashing/invoice.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": [
+        "vectors/hashing.json",
+        "vectors/upstream/token_invoice_canonical_encoding_cases.json",
+        "vectors/upstream/token_invoice_signing_hash_cases.json"
+      ]
+    },
+    {
+      "id": "signing-statements",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/core/hashing/statements.ts",
+          "tests": ["packages/spark/tests/hashing.test.ts"]
+        }
+      },
+      "vectors": ["vectors/hashing.json"]
     }
   ]
 }

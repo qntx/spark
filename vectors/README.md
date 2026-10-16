@@ -32,9 +32,43 @@ Every file here (except this README) must be referenced by a capability in
 | `address.json`       | fixed Spark address strings → decoded fields; legacy HRPs re-encode modern     | upstream spark-sdk address tests                                 |
 | `bolt11.json`        | every valid/invalid example invoice from the BOLT #11 spec document            | `lightning/bolts` 11-payment-encoding.md (pinned commit)         |
 | `transactions.json`  | sequence helpers, node/refund tx pairs/trios, HTLC tx + spends, sighashes      | upstream `spark-frost` via `crates/interop` (`--test bitcoin`)   |
+| `hashing.json`       | hashstructure tags/ops, protohash of real Spark messages, V3 token transaction partial/final hashes, transfer manifests, quote envelopes + targets, token invoice prepare/finalize | upstream `spark-token-primitives` via `crates/interop` (`--test hashing`) |
+| `upstream/`          | `spark/testdata` golden protojson cases copied verbatim (invoice hash + canonical encoding + signing hash, V3 token transaction, partial transaction, transfer manifest, quote envelope incl. invalid cases) | buildonspark/spark @0b3a32a (`spark/testdata/*.json`) |
 
-Regenerate with `SPARK_WRITE_VECTORS=1 cargo test -p qntx-spark-interop --test vectors`
-(and `--test bitcoin` for `transactions.json`)
-inside `crates/interop` (needs `protoc` for the upstream crate's build).
-`spark-crypto/tests/vectors.rs` replays the same files without upstream
+Regenerate with `SPARK_WRITE_VECTORS=1 cargo test --test <name>` inside
+`crates/interop` (`vectors`, `bitcoin`, or `hashing`; the `hashing` suite needs
+`protoc` for the upstream crate's build).
+`spark-crypto/tests/vectors.rs` replays the crypto files without upstream
 dependencies, and `crates/interop` re-verifies them against upstream.
+
+The signing-statement digests that have no Rust counterpart (transfer/claim
+package payloads, proof of possession, static deposit statements, watchtower
+recovery) carry `expected` values produced by running the upstream Go functions
+at buildonspark/spark @0b3a32a (`spark/common/transfer_package.go`,
+`spark/common/proof.go`, `spark/so/handler/internal_deposit_handler.go`,
+`spark/so/handler/recover_watchtower_exited_leaf_flow_handler.go`).
+
+### `hashing.json` details
+
+Case counts: hashstructure 5, protohash 6, tokenTransactionV3 6
+(mint/transfer/create × partial/final), partialTokenTransaction 1,
+finalTokenTransaction 1, transferManifest 6 (2 ok + 4 error),
+quoteTargets 6, quoteEnvelope 9 (5 ok + 4 error), tokenInvoice 2,
+finalizeTokenInvoice 2.
+
+Protohash edge cases exercised: set-vs-default field omission (empty
+`TransferPackage` hashes to the empty-field-list digest), maps
+(`key_tweak_package`, nested `receiver_amounts_sats`), repeated fields,
+enums, oneofs (`PaymentType`, `ManifestAmount`), nested `Timestamp`,
+bytes vs string, u64/u128 big-endian, optional scalars, and rejection of
+top-level protobuf scalar wrappers. `vectors/upstream/` adds the Go
+golden protojson cases (negative protohash cases, canonical token
+invoice encodings, invoice signing hashes).
+
+Protobuf map fields encode in arbitrary order, so blob fields
+(`messageHex`, `manifestHex`, `*TransactionHex`, `fieldsBytesHex`) may
+contain a different-but-equivalent encoding of the same message between
+regenerations; `crates/interop/tests/hashing.rs` check mode decodes
+blobs with prost-reflect and compares messages semantically while scalar
+fields and digests are compared exactly. No digest divergence between
+the TS, Rust, and Go implementations was found.
