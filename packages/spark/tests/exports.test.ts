@@ -18,9 +18,24 @@ export type {
 } from "../src/index.ts";
 export type { SparkCrypto } from "../src/crypto/index.ts";
 export type {
-  SparkNetwork as SignerNetwork,
+  FrostAggregateJob,
+  FrostSignJob,
   IdentityStatement,
+  OperatorCommitment,
+  PrepareClaimRequest,
+  PreparedClaim,
+  PreparedLightningReceive,
+  PreparedTransfer,
+  PreparedTransferLeaf,
+  PrepareTransferRequest,
+  SigningCommitment,
+  SigningTarget,
+  SparkKey,
+  SparkLeafKey,
+  SparkNetwork as SignerNetwork,
+  SparkOperator,
   SparkSigner,
+  StaticDepositClaimRequest,
 } from "../src/signer/index.ts";
 export type {
   SparkClient,
@@ -56,6 +71,6 @@ test("crypto runtime exports are exactly the backend contract", () => {
   expect(crypto.SPARK_ABI_VERSION).toBe(1);
 });
 
-test("signer has no runtime exports", () => {
-  expect(names(signer)).toStrictEqual([]);
+test("signer runtime exports are exactly the signer factory surface", () => {
+  expect(names(signer)).toStrictEqual(["createSparkSigner", "sparkAccountKey"]);
 });

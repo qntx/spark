@@ -88,6 +88,24 @@ const config: UserConfig = defineConfig({
         rules: { "eslint/no-bitwise": "off" },
       },
       {
+        files: ["packages/spark/tests/**"],
+        rules: {
+          // Signature-shape assertions live in named test helpers.
+          "vitest/expect-expect": [
+            "error",
+            {
+              assertFunctionNames: [
+                "expect",
+                "expectTypeOf",
+                "assert",
+                "assertType",
+                "expectDerSignature",
+              ],
+            },
+          ],
+        },
+      },
+      {
         files: ["packages/spark/scripts/**", "scripts/**"],
         rules: {
           // Maintenance scripts print their results.

@@ -1,8 +1,23 @@
+import path from "node:path";
+
 import { defineConfig } from "vite-plus";
 import type { UserConfig } from "vite-plus";
 
 const config: UserConfig = defineConfig({
   test: {
+    // Development resolution for the workspace siblings: signer tests drive
+    // @qntx/spark-wasm sources directly against this package's crypto entry
+    // without requiring a prior pack build of either package.
+    alias: [
+      {
+        find: /^@qntx\/spark\/crypto$/,
+        replacement: path.resolve("src/crypto/index.ts"),
+      },
+      {
+        find: /^@qntx\/spark-wasm$/,
+        replacement: path.resolve("../spark-wasm/src/load.ts"),
+      },
+    ],
     include: ["tests/**/*.test.ts"],
   },
   pack: {
