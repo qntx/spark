@@ -13,16 +13,19 @@
   ],
   "type": "module",
   "scripts": {
-    "lint": "vp check && taplo fmt --check && bun scripts/check-version.ts && bun scripts/check-layers.ts && bun scripts/parity/check.ts && bun scripts/check-cbindgen.ts",
+    "lint": "vp check && taplo fmt --check && bun scripts/check-version.ts && bun scripts/check-lock.ts && bun scripts/check-layers.ts && bun scripts/parity/check.ts && bun scripts/check-cbindgen.ts",
     "typecheck": "vp run -r typecheck && tsc --noEmit",
     "build": "vp run -r build",
     "test": "vp run -r test && vp test",
     "test:parity": "cd crates/interop && cargo test --release --test differential -- --ignored differential",
     "test:parity:random": "seed=$(bun -e 'console.log(Math.floor(Math.random() * 4294967296))') && echo \"parity seed: $seed\" && cd crates/interop && PARITY_SEED=$seed cargo test --release --test differential -- --ignored differential",
     "release": "bumpp",
-    "prepare": "vp config"
+    "prepare": "vp config",
+    "gen:proto": "buf generate"
   },
   "devDependencies": {
+    "@bufbuild/buf": "1.73.0",
+    "@bufbuild/protoc-gen-es": "2.16.0",
     "@qntx/oxfmt": "1.1.1",
     "@qntx/oxlint": "1.1.1",
     "@qntx/tsconfig": "1.0.1",

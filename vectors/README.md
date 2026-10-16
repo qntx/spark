@@ -29,6 +29,8 @@ Every file here (except this README) must be referenced by a capability in
 | `frost-sign.json`    | fixed keys, nonces, commitments, message, optional adaptor → user share + aggregate signature | upstream `spark-frost` via `crates/interop` |
 | `ecies.json`         | secret key, public key, plaintext, `random` → ciphertext; upstream-decryptable | `crates/interop`                                                 |
 | `vss.json`           | secret, threshold, count, `random` → proofs + shares; upstream-validated       | `crates/interop`                                                 |
+| `address.json`       | fixed Spark address strings → decoded fields; legacy HRPs re-encode modern     | upstream spark-sdk address tests                                 |
+| `bolt11.json`        | every valid/invalid example invoice from the BOLT #11 spec document            | `lightning/bolts` 11-payment-encoding.md (pinned commit)         |
 
 Regenerate with `SPARK_WRITE_VECTORS=1 cargo test -p qntx-spark-interop --test vectors`
 inside `crates/interop` (needs `protoc` for the upstream crate's build).

@@ -1,0 +1,10 @@
+{
+  "spark": {
+    "repository": "buildonspark/spark",
+    "commit": "0b3a32a05c9ac06cc411683551dd1f1bde9d0caa"
+  },
+  "frost": {
+    "repository": "lightsparkdev/frost",
+    "commit": "997427e5c09e62459230ad711ef3a33fb64b9424"
+  }
+}

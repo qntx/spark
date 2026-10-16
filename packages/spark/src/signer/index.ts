@@ -1,2 +1,1 @@
-/** Spark networks: Bitcoin mainnet, or the public regtest deployment. */
-export type SparkNetwork = "mainnet" | "regtest";
+export type { SparkNetwork } from "../core/network.ts";

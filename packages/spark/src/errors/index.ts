@@ -19,3 +19,15 @@ export class SparkCryptoError extends SparkError {
     this.code = code;
   }
 }
+
+/**
+ * Malformed caller- or peer-supplied data: a Spark address, a BOLT-11 invoice, an encoding. The
+ * message names the offending field and rule; it never echoes the input, so no secret or invoice
+ * content leaks into logs through error messages.
+ */
+export class SparkInputError extends SparkError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SparkInputError";
+  }
+}

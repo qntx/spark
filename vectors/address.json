@@ -1,0 +1,95 @@
+{
+  "source": "upstream spark-sdk address tests (tests/address.test.ts, tests/xchain-address.test.ts)",
+  "upstream": "buildonspark/spark@0b3a32a05c9ac06cc411683551dd1f1bde9d0caa",
+  "note": "Spark address vectors: 'address' decodes to the given fields; encoding 'expected' must reproduce the address (legacy prefixes decode but re-encode to the current HRP). Test vectors only. Never use these keys for funds.",
+  "cases": [
+    {
+      "address": "sparkrt1pgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnxxdy83",
+      "network": "regtest",
+      "identityPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213"
+    },
+    {
+      "address": "sprt1pgssx63fa5g6uyv450rajp5ndwy9laxzpsp9e37su58jddmcdsvhgm5n7y0ud6",
+      "network": "regtest",
+      "identityPublicKey": "036a29ed11ae1195a3c7d906936b885ff4c20c025cc7d0e50f26b7786c19746e93",
+      "legacy": true
+    },
+    {
+      "address": "spark1pgss9qg3vdslzmt2name9v550skuvlu6lj5xt9sly90k7p0gxughlqv023jqmc",
+      "network": "mainnet",
+      "identityPublicKey": "0281116361f16d6a9f7792b2947c2dc67f9afca865961f215f6f05e837117f818f"
+    },
+    {
+      "address": "sp1pgssxwh6hznfdc3c0cuqrhgttder539d52a0rqcf34amge69huh664gd2ew787",
+      "network": "mainnet",
+      "identityPublicKey": "033afab8a696e2387e3801dd0b5b723a44ada2baf183098d7bb46745bf2fad550d",
+      "legacy": true
+    },
+    {
+      "address": "spark1pgssyele0qrcjdheeq2a0zmpwdwvj3r4f4stkuju0fp36g6grapv2w7l8am2cp",
+      "network": "mainnet",
+      "identityPublicKey": "0267f978078936f9c815d78b61735cc944754d60bb725c7a431d23481f42c53bdf"
+    },
+    {
+      "address": "sparkrt1pgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnzfmssqgjzqqejtaxmwj8ms9rn58574nvlq4j5zr5v4ehgnt9d4hnyggr2wgghtqfpwn5rhnpg7j5pfn92dcqdyg4jrunyjdjsg7muxraxgfn5rqgandgr3sxzrqdmew8qydzvz3qpylysylkgcaw9vpm2jzspls0qtr5kfmlwz244rvuk25w5w2sgc2pyqsraqdyp8tf57a6cn2egttaas9ms3whssenmjqt8wag3lgyvdzjskfeupt8xwwdx4agxdm9f0wefzj28jmdxqeudwcwdj9vfl9sdr65x06r0tasf5fwz2",
+      "network": "regtest",
+      "identityPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213",
+      "invoice": {
+        "version": 1,
+        "id": "01992fa6-dba4-7dc0-a39d-0f4f566cf82b",
+        "payment": {
+          "type": "tokens",
+          "tokenIdentifier": "093e4813f6463ae2b03b548500fe0f02c74b277f70955a8d9cb2a8ea39504614",
+          "amount": "03e8"
+        },
+        "memo": "testMemo",
+        "senderPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213",
+        "expiresAt": 1757441388419
+      },
+      "signature": "9d69a7bbac4d5942d7dec0bb845d784333dc80b3bba88fd046345285939e0567339cd357a8337654bdd948a4a3cb6d3033c6bb0e6c8ac4fcb068f5433f437afb"
+    },
+    {
+      "address": "sparkrt1pgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnzfmqsqgjzqqejtavuhf8n5uh9a74zw66kqaz5zr5v4ehgnt9d4hnyggr2wgghtqfpwn5rhnpg7j5pfn92dcqdyg4jrunyjdjsg7muxraxgfn5zcglrwcr3sxzzqt3wrjrgnq5gqf8eyp8ajx8t3tqw65s5q0urczca9jwlmsj4dgm89j4r4rj5zxzsfqyqlgrfqw9ucldgmfzs5zmkekj90thwzmn6ps55gdjnz23aarjkf245608yg0v2x6xdpdrz6m8xjlhtru0kygcu4zhqwlth9duadfqpruuzx4tc7fdckn",
+      "network": "regtest",
+      "identityPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213",
+      "invoice": {
+        "version": 1,
+        "id": "01992fac-e5d2-79d3-972f-7d513b5ab03a",
+        "payment": {
+          "type": "tokens",
+          "tokenIdentifier": "093e4813f6463ae2b03b548500fe0f02c74b277f70955a8d9cb2a8ea39504614",
+          "amount": "03e8"
+        },
+        "memo": "testMemo",
+        "senderPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213",
+        "expiresAt": 1757441784240
+      },
+      "signature": "e2f31f6a36914282ddb36915ebbb85b9e830a510d94c4a8f7a39592aad34f3910f628da3342d18b5b39a5fbac7c7d888c72a2b81df5dcade75a90047ce08d55e"
+    },
+    {
+      "address": "sparkrt1pgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnzfzqsqgjzqqejtaxmwj8ms9rn58574nvlq4j5pnd09xk2mt0xgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnygps36q8slg7ml",
+      "network": "regtest",
+      "identityPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213",
+      "invoice": {
+        "version": 1,
+        "id": "01992fa6-dba4-7dc0-a39d-0f4f566cf82b",
+        "payment": { "type": "sats", "amount": 1000 },
+        "memo": "myMemo",
+        "senderPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213"
+      },
+      "self": true
+    },
+    {
+      "address": "spark1pgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnzgjqsqgjzqqejtaxmwj8ms9rn58574nvlq4n5rqgandgr3sxzrqdmew8qy3qq62ngdy",
+      "network": "mainnet",
+      "identityPublicKey": "0353908bac090ba741de6147a540a665537006911590f93249b2823dbe187d3213",
+      "invoice": {
+        "version": 1,
+        "id": "01992fa6-dba4-7dc0-a39d-0f4f566cf82b",
+        "payment": { "type": "sats" },
+        "expiresAt": 1757441388419
+      },
+      "self": true
+    }
+  ]
+}

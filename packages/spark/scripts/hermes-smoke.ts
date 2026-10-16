@@ -6,6 +6,7 @@
  *
  * The entry imports the packed `dist/` builds, so `smoke:hermes` runs `vp pack` first.
  */
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,7 +14,7 @@ import { fileURLToPath } from "node:url";
 type BunBuildOutput = {
   success: boolean;
   logs: ReadonlyArray<{ toString: () => string }>;
-  outputs: ReadonlyArray<{ kind: string }>;
+  outputs: ReadonlyArray<{ kind: string; text: () => Promise<string> }>;
 };
 declare const Bun: {
   build: (options: {
@@ -47,12 +48,19 @@ async function main(): Promise<number> {
     }
     return 1;
   }
-  const bundle = result.outputs.find((o: { kind: string }) => o.kind === "entry-point");
+  const bundle = result.outputs.find((o) => o.kind === "entry-point");
   if (!bundle) {
     console.error("bun build produced no entry-point output");
     return 1;
   }
-  await Bun.write(outfile, bundle);
+  // protobuf-es needs TextEncoder/TextDecoder at module load. RN 0.88 Hermes
+  // (what CI runs) ships both; HERMES_ENCODING_SHIM=1 prepends shims only for
+  // local runs against an older Hermes binary.
+  const shim =
+    process.env["HERMES_ENCODING_SHIM"] === "1"
+      ? `${readFileSync(resolve(root, "tests/hermes/prelude.js"), "utf8")}\n`
+      : "";
+  await Bun.write(outfile, `${shim}${await bundle.text()}`);
 
   const hermes = process.env["HERMES"];
   if (hermes === undefined || hermes === "") {
