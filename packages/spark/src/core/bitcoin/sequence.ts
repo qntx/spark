@@ -1,4 +1,5 @@
 import { SparkInputError } from "../../errors/index.ts";
+import { assertU32 } from "../assert.ts";
 
 // Timelock/sequence math for Spark node, refund and HTLC transactions.
 // Upstream references: signer/spark-frost/src/transaction.rs and
@@ -11,7 +12,6 @@ const SEQUENCE_LOCK_TIME_DISABLED = 0x80_00_00_00;
 const SEQUENCE_LOCK_TIME_IS_SECONDS = 0x00_40_00_00;
 /** Lower 16 bits carry the block-based timelock value. */
 const SEQUENCE_LOCK_TIME_MASK = 0x00_00_ff_ff;
-const U32_MAX = 0xff_ff_ff_ff;
 const BIT_30 = 1 << 30;
 
 export const TIME_LOCK_INTERVAL = 100;
@@ -27,12 +27,6 @@ export const INITIAL_ROOT_NODE_SEQUENCE: number = ZERO_SEQUENCE;
 export const ESTIMATED_TX_SIZE = 191;
 export const DEFAULT_SATS_PER_VBYTE = 5;
 export const DEFAULT_FEE_SATS: number = ESTIMATED_TX_SIZE * DEFAULT_SATS_PER_VBYTE;
-
-function assertU32(value: number, field: string): void {
-  if (!Number.isSafeInteger(value) || value < 0 || value > U32_MAX) {
-    throw new SparkInputError(`${field}: must be a uint32`);
-  }
-}
 
 /** Extracts the block-based timelock (lower 16 bits) from a sequence number. */
 export function getTimelockFromSequence(sequence: number): number {

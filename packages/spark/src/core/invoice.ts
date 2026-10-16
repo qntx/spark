@@ -1,6 +1,13 @@
+import { toBinary } from "@bufbuild/protobuf";
+import { BinaryWriter } from "@bufbuild/protobuf/wire";
+import { TimestampSchema } from "@bufbuild/protobuf/wkt";
+import { utf8ToBytes } from "@noble/hashes/utils.js";
+
 import { SparkInputError } from "../errors/index.ts";
+import { SatsPaymentSchema, TokensPaymentSchema } from "../proto/gen/spark_pb.ts";
 import type { SparkInvoiceFields as SparkInvoiceFieldsProto } from "../proto/gen/spark_pb.ts";
-import { uuidFromBytes } from "./uuid.ts";
+import { assertCompressedKey, assertSats, requireLength } from "./assert.ts";
+import { uuidFromBytes, uuidToBytes } from "./uuid.ts";
 
 // Upstream reference: sdks/js/packages/spark-sdk/src/utils/address.ts and
 // signer/spark-token-primitives/src/invoice.rs (buildonspark/spark@0b3a32a).
@@ -8,6 +15,10 @@ import { uuidFromBytes } from "./uuid.ts";
 // codec and the invoice hasher, so neither of those depends on the other.
 
 export const INVOICE_VERSION = 1;
+
+const MEMO_MAX_BYTES = 120;
+const TOKEN_IDENTIFIER_LENGTH = 32;
+const MAX_TOKEN_AMOUNT_BYTES = 16; // uint128, big-endian
 
 /** Payment carried by a Spark invoice: satoshis or BTKN tokens. */
 export type SparkPayment =
@@ -33,6 +44,61 @@ export type SparkInvoiceFields = {
   /** Unix milliseconds. */
   readonly expiresAt?: number | undefined;
 };
+
+/**
+ * Validates every field of an invoice: `id` must be a UUID, `memo` at most 120 UTF-8 bytes,
+ * `senderPublicKey` a valid compressed secp256k1 point, `expiresAt` a non-negative safe integer,
+ * sats amounts bounded by {@link MAX_SATS} and token fields uint128-sized. With
+ * `requireCurrentVersion` the version must equal {@link INVOICE_VERSION} — used for locally built
+ * invoices; decoded peer invoices may carry newer versions and still parse.
+ */
+export function validateInvoiceFields(
+  invoice: SparkInvoiceFields,
+  options: { readonly requireCurrentVersion: boolean },
+): void {
+  if (options.requireCurrentVersion && invoice.version !== INVOICE_VERSION) {
+    throw new SparkInputError(`invoice.version: must be ${INVOICE_VERSION}`);
+  }
+  uuidToBytes(invoice.id);
+  if (invoice.memo !== undefined && utf8ToBytes(invoice.memo).length > MEMO_MAX_BYTES) {
+    throw new SparkInputError(`invoice.memo: exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`);
+  }
+  if (invoice.senderPublicKey !== undefined) {
+    assertCompressedKey(invoice.senderPublicKey, "invoice.senderPublicKey");
+  }
+  if (
+    invoice.expiresAt !== undefined &&
+    (!Number.isSafeInteger(invoice.expiresAt) || invoice.expiresAt < 0)
+  ) {
+    throw new SparkInputError(
+      "invoice.expiresAt: must be a non-negative safe-integer unix-ms timestamp",
+    );
+  }
+  const { payment } = invoice;
+  if (payment === undefined) {
+    return;
+  }
+  switch (payment.type) {
+    case "sats":
+      if (payment.amount !== undefined) {
+        assertSats(payment.amount, "invoice.payment.amount");
+      }
+      return;
+    case "tokens":
+      if (payment.tokenIdentifier !== undefined) {
+        requireLength(
+          payment.tokenIdentifier,
+          TOKEN_IDENTIFIER_LENGTH,
+          "invoice.payment.tokenIdentifier",
+        );
+      }
+      if (payment.amount !== undefined && payment.amount.length > MAX_TOKEN_AMOUNT_BYTES) {
+        throw new SparkInputError(
+          `invoice.payment.amount: exceeds ${MAX_TOKEN_AMOUNT_BYTES} bytes (uint128)`,
+        );
+      }
+  }
+}
 
 /**
  * Converts a decoded `SparkInvoiceFields` message into the plain model, normalizing empty fields
@@ -76,6 +142,50 @@ export function protoInvoiceToPlain(fields: SparkInvoiceFieldsProto): SparkInvoi
         : Number(fields.expiryTime.seconds) * 1000 +
           Math.floor(fields.expiryTime.nanos / 1_000_000),
   };
+}
+
+// The inner SparkInvoiceFields message is written in a canonical order — scalar fields first, the
+// payment oneof last — so our encoding is byte-identical to the invoice bytes upstream embeds in
+// address strings. The invoice signature covers `hashSparkInvoice`, not these bytes; the order
+// matters only for address-encoding parity.
+export function encodeInvoiceFields(invoice: SparkInvoiceFields): Uint8Array {
+  const w = new BinaryWriter();
+  if (invoice.version !== 0) {
+    w.uint32(8).uint32(invoice.version);
+  }
+  const id = uuidToBytes(invoice.id);
+  w.uint32(18).bytes(id);
+  if (invoice.memo !== undefined) {
+    w.uint32(42).string(invoice.memo);
+  }
+  if (invoice.senderPublicKey !== undefined) {
+    w.uint32(50).bytes(invoice.senderPublicKey);
+  }
+  if (invoice.expiresAt !== undefined) {
+    const seconds = Math.floor(invoice.expiresAt / 1000);
+    const timestamp = toBinary(TimestampSchema, {
+      $typeName: "google.protobuf.Timestamp",
+      seconds: BigInt(seconds),
+      nanos: (invoice.expiresAt - seconds * 1000) * 1_000_000,
+    });
+    w.uint32(58).bytes(timestamp);
+  }
+  const { payment } = invoice;
+  if (payment?.type === "tokens") {
+    const tokens = toBinary(TokensPaymentSchema, {
+      $typeName: "spark.TokensPayment",
+      tokenIdentifier: payment.tokenIdentifier,
+      amount: payment.amount,
+    });
+    w.uint32(26).bytes(tokens);
+  } else if (payment?.type === "sats") {
+    const sats = toBinary(SatsPaymentSchema, {
+      $typeName: "spark.SatsPayment",
+      amount: payment.amount === undefined ? undefined : BigInt(payment.amount),
+    });
+    w.uint32(34).bytes(sats);
+  }
+  return w.finish();
 }
 
 function bigintToSafeInt(amount: bigint): number {

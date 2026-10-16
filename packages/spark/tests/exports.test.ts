@@ -29,7 +29,6 @@ export type {
   SparkLeaf,
   SparkTransfer,
   SparkTransferLeaf,
-  SwapFeeEstimate,
 } from "../src/index.ts";
 
 function names(mod: object): string[] {

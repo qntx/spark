@@ -26,4 +26,3 @@ export type { SparkClient, SparkClientOptions } from "./client/index.ts";
 export type { SparkEvent } from "./connection/index.ts";
 export type { SparkLeaf } from "./tree/index.ts";
 export type { SparkTransfer, SparkTransferLeaf } from "./transfer/index.ts";
-export type { SwapFeeEstimate } from "./ssp/index.ts";

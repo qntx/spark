@@ -2,6 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 
 import { SparkInputError } from "../../errors/index.ts";
+import { compareBytes, uint64be } from "../bytes.ts";
 
 // Upstream references: sdks/js/packages/spark-sdk/src/utils/hashstructure.ts
 // and signer/spark-token-primitives/src/hashstructure.rs
@@ -13,24 +14,11 @@ import { SparkInputError } from "../../errors/index.ts";
 
 const MAX_UINT64 = 0xff_ff_ff_ff_ff_ff_ff_ffn;
 
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
-  const minLength = Math.min(a.length, b.length);
-  for (let i = 0; i < minLength; i++) {
-    const av = a[i];
-    const bv = b[i];
-    if (av !== undefined && bv !== undefined && av !== bv) {
-      return av - bv;
-    }
-  }
-  return a.length - b.length;
-}
-
 function serializeTag(tag: ReadonlyArray<string>): Uint8Array {
   const parts: Uint8Array[] = [];
   for (const component of tag) {
     const componentBytes = utf8ToBytes(component);
-    const lengthBytes = new Uint8Array(8);
-    new DataView(lengthBytes.buffer).setBigUint64(0, BigInt(componentBytes.length), false);
+    const lengthBytes = uint64be(BigInt(componentBytes.length));
     parts.push(lengthBytes, componentBytes);
   }
   const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
@@ -85,8 +73,7 @@ export class Hasher {
       }
       value = v;
     }
-    const valueBytes = new Uint8Array(8);
-    new DataView(valueBytes.buffer).setBigUint64(0, value, false);
+    const valueBytes = uint64be(value);
     this.addValue(valueBytes);
     return this;
   }
@@ -145,8 +132,7 @@ export class Hasher {
   }
 
   private addValue(valueBytes: Uint8Array): void {
-    const lengthBytes = new Uint8Array(8);
-    new DataView(lengthBytes.buffer).setBigUint64(0, BigInt(valueBytes.length), false);
+    const lengthBytes = uint64be(BigInt(valueBytes.length));
     this.hasher.update(lengthBytes);
     this.hasher.update(valueBytes);
   }

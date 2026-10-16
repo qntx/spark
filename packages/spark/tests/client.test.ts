@@ -1,11 +1,12 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { createRouterTransport } from "@connectrpc/connect";
+import type { HandlerContext } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { base64 } from "@scure/base";
 import { expect, test } from "vite-plus/test";
 
-import { createSparkClient } from "../src/client/index.ts";
+import { createSparkClientWith } from "../src/client/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import {
   ChallengeSchema,
@@ -16,6 +17,7 @@ import {
   Network,
   QueryTransfersResponseSchema,
   SparkService,
+  SubscribeToEventsResponseSchema,
   TreeNodeSchema,
   TreeNodeStatus,
   TransferStatus,
@@ -97,38 +99,42 @@ const sspFetch: typeof globalThis.fetch = async (_input, init) => {
 };
 
 function makeClient(signer: ReturnType<typeof createTestSigner>, sparkImpl: object) {
-  return createSparkClient({
-    network: "mainnet",
-    signer,
-    fetch: sspFetch,
-    random: (length) => new Uint8Array(length).fill(1),
-    sleep: async () => Promise.resolve(),
-    operators: OPERATORS,
-    transportFactory: (interceptors) =>
-      createRouterTransport(
-        (router) => {
-          router.service(SparkAuthnService, {
-            get_challenge: (req) => ({
-              protectedChallenge: create(ProtectedChallengeSchema, {
-                challenge: create(ChallengeSchema, {
-                  version: 1,
-                  timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                  nonce: new Uint8Array(4),
-                  publicKey: req.publicKey,
+  return createSparkClientWith(
+    {
+      network: "mainnet",
+      signer,
+      fetch: sspFetch,
+      random: (length) => new Uint8Array(length).fill(1),
+      sleep: async () => Promise.resolve(),
+      operators: OPERATORS,
+    },
+    {
+      transportFactory: (interceptors) =>
+        createRouterTransport(
+          (router) => {
+            router.service(SparkAuthnService, {
+              get_challenge: (req) => ({
+                protectedChallenge: create(ProtectedChallengeSchema, {
+                  challenge: create(ChallengeSchema, {
+                    version: 1,
+                    timestamp: BigInt(Math.floor(Date.now() / 1000)),
+                    nonce: new Uint8Array(4),
+                    publicKey: req.publicKey,
+                  }),
+                  serverHmac: new Uint8Array(4),
                 }),
-                serverHmac: new Uint8Array(4),
               }),
-            }),
-            verify_challenge: () => ({
-              sessionToken: "so-tok",
-              expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-            }),
-          });
-          router.service(SparkService, sparkImpl);
-        },
-        { transport: { interceptors: [...interceptors] } },
-      ),
-  });
+              verify_challenge: () => ({
+                sessionToken: "so-tok",
+                expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
+              }),
+            });
+            router.service(SparkService, sparkImpl);
+          },
+          { transport: { interceptors: [...interceptors] } },
+        ),
+    },
+  );
 }
 
 test("leaves and balance page through query_nodes until a short page", async () => {
@@ -227,6 +233,29 @@ test("swapFeeEstimate goes through SSP auth and returns sats", async () => {
     query_nodes: () => ({ nodes: {}, offset: 0n }),
   });
   const estimate = await client.swapFeeEstimate(100_000);
-  expect(estimate.valueSats).toBe(150);
-  expect(estimate.unit).toBe("SATOSHI");
+  expect(estimate).toBe(150);
+});
+
+test("close() stops an event stream started with a caller signal", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const client = makeClient(signer, {
+    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    async *subscribe_to_events(_req: unknown, context: HandlerContext) {
+      yield create(SubscribeToEventsResponseSchema, {
+        event: { case: "connected", value: {} },
+      });
+      await new Promise<void>((resolve) => {
+        context.signal.addEventListener("abort", () => {
+          resolve();
+        });
+      });
+    },
+  });
+  const caller = new AbortController();
+  const iterator = client.events(caller.signal)[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  client.close();
+  const last = await iterator.next();
+  expect(first.done).not.toBe(true);
+  expect(last.done).toBe(true);
 });

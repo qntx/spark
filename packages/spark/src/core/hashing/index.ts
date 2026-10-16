@@ -17,7 +17,6 @@ export {
   sendTarget,
   staticDepositTarget,
 } from "./manifest.ts";
-export type { QuoteReason as QuoteReasonValue, QuoteRole as QuoteRoleValue } from "./manifest.ts";
 export { hashSparkInvoice } from "./invoice.ts";
 export {
   authnChallengeDigest,

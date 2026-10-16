@@ -6,6 +6,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 
 import { SparkInputError } from "../../errors/index.ts";
+import { compareBytes, uint64be } from "../bytes.ts";
 
 // Upstream reference: signer/spark-token-primitives/src/protohash/*
 // (buildonspark/spark@0b3a32a), itself a port of spark/common/protohash (Go
@@ -118,8 +119,7 @@ function hashBool(v: boolean): Uint8Array {
 }
 
 function hashU64(v: bigint): Uint8Array {
-  const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setBigUint64(0, v & MAX_UINT64, false);
+  const bytes = uint64be(v & MAX_UINT64);
   return tagged(INT_TAG, bytes);
 }
 
@@ -221,18 +221,6 @@ function isDefaultValue(field: DescField, value: unknown): boolean {
     default:
       return false;
   }
-}
-
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
-  const minLength = Math.min(a.length, b.length);
-  for (let i = 0; i < minLength; i++) {
-    const av = a[i];
-    const bv = b[i];
-    if (av !== undefined && bv !== undefined && av !== bv) {
-      return av - bv;
-    }
-  }
-  return a.length - b.length;
 }
 
 function hashSingular(field: DescField, value: unknown): Uint8Array | undefined {

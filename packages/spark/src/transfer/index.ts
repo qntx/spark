@@ -2,9 +2,9 @@ import { timestampDate } from "@bufbuild/protobuf/wkt";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import type { CallOptions, Client } from "@connectrpc/connect";
 
+import { u64ToSats } from "../core/assert.ts";
 import { sparkNetworkFromProto, sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
-import { SparkInputError } from "../errors/index.ts";
 import { TransferStatus, TransferType } from "../proto/gen/spark_pb.ts";
 import type { SparkService, Transfer, TransferLeaf } from "../proto/gen/spark_pb.ts";
 import { mapTreeNode } from "../tree/index.ts";
@@ -67,7 +67,7 @@ export function mapTransfer(transfer: Transfer): SparkTransfer {
     status: enumName(TransferStatus, transfer.status),
     type: enumName(TransferType, transfer.type),
     network: sparkNetworkFromProto(transfer.network),
-    totalValueSats: checkedValue(transfer.totalValue),
+    totalValueSats: u64ToSats(transfer.totalValue, "transfer total value"),
     leaves,
   };
   const expiry = millis(transfer.expiryTime);
@@ -80,13 +80,6 @@ export function mapTransfer(transfer: Transfer): SparkTransfer {
     ...(updated === undefined ? {} : { updatedTimeMs: updated }),
     ...(transfer.sparkInvoice === "" ? {} : { sparkInvoice: transfer.sparkInvoice }),
   };
-}
-
-function checkedValue(value: bigint): number {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new SparkInputError("transfer total value out of range");
-  }
-  return Number(value);
 }
 
 /** `query_pending_transfers` — transfers awaiting this identity as receiver. */

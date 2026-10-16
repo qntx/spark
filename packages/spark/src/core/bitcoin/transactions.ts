@@ -3,6 +3,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 
 import { SparkInputError } from "../../errors/index.ts";
+import { assertSats, assertU32, MAX_SATS } from "../assert.ts";
 import type { SparkNetwork } from "../network.ts";
 import {
   btcNetwork,
@@ -72,20 +73,6 @@ export function maybeApplyFee(amountSats: number, feeSats: number): number {
   assertSats(amountSats, "amount");
   assertSats(feeSats, "feeSats");
   return amountSats > feeSats ? amountSats - feeSats : amountSats;
-}
-
-const MAX_SATS = 2_100_000_000_000_000;
-
-function assertSats(value: number, field: string): void {
-  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_SATS) {
-    throw new SparkInputError(`${field}: must be a non-negative satoshi amount (<= ${MAX_SATS})`);
-  }
-}
-
-function assertU32(value: number, field: string): void {
-  if (!Number.isSafeInteger(value) || value < 0 || value > 0xff_ff_ff_ff) {
-    throw new SparkInputError(`${field}: must be a uint32`);
-  }
 }
 
 function prevOutAt(tx: Transaction, vout: number): { script: Uint8Array; amountSats: number } {

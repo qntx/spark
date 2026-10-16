@@ -1,7 +1,7 @@
 import { toBinary } from "@bufbuild/protobuf";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { utf8ToBytes } from "@noble/hashes/utils.js";
-import { base64 } from "@scure/base";
+import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { base64urlnopad } from "@scure/base";
 
 import { SparkInputError } from "../../errors/index.ts";
 import { ChallengeSchema } from "../../proto/gen/spark_authn_pb.ts";
@@ -17,20 +17,6 @@ import { newHasher } from "./hashstructure.ts";
 // watchtower statements), services/transfer.ts (per-leaf send digest), and the
 // Go counterparts in spark/common/{transfer_package,proof}.go and
 // spark/so/handler (buildonspark/spark@0b3a32a).
-
-function concat(parts: ReadonlyArray<Uint8Array>): Uint8Array {
-  const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-function transferIdBytes(transferId: string): Uint8Array {
-  return uuidToBytes(transferId);
-}
 
 /**
  * The transfer-package digest the sender signs: the HASH_VARIANT_V2 tagged hashstructure digest
@@ -48,7 +34,7 @@ export function transferPackageDigest(
     throw new SparkInputError("transfer package: delegation intent is not supported");
   }
   return newHasher(["spark", "transfer", "signing payload"])
-    .addBytes(transferIdBytes(transferId))
+    .addBytes(uuidToBytes(transferId))
     .addMapStringToBytes(transferPackage.keyTweakPackage)
     .hash();
 }
@@ -59,7 +45,7 @@ export function claimPackageDigest(
   keyTweakPackage: Readonly<Record<string, Uint8Array>>,
 ): Uint8Array {
   return newHasher(["spark", "claim", "signing payload"])
-    .addBytes(transferIdBytes(transferId))
+    .addBytes(uuidToBytes(transferId))
     .addMapStringToBytes(keyTweakPackage)
     .hash();
 }
@@ -70,7 +56,7 @@ export function sendLeafSigningDigest(
   transferId: string,
   secretCipher: Uint8Array,
 ): Uint8Array {
-  return sha256(concat([utf8ToBytes(leafId), utf8ToBytes(transferId), secretCipher]));
+  return sha256(concatBytes(utf8ToBytes(leafId), utf8ToBytes(transferId), secretCipher));
 }
 
 /** Deposit-address proof of possession, signed with the identity key at address generation. */
@@ -132,7 +118,7 @@ export function staticDepositStatementDigest({
   new DataView(creditAmountBytes.buffer).setBigUint64(0, BigInt(creditAmountSats), true);
 
   return sha256(
-    concat([
+    concatBytes(
       utf8ToBytes("claim_static_deposit"),
       utf8ToBytes(network),
       utf8ToBytes(transactionId),
@@ -140,7 +126,7 @@ export function staticDepositStatementDigest({
       new Uint8Array([requestTypeValue]),
       creditAmountBytes,
       payload,
-    ]),
+    ),
   );
 }
 
@@ -191,30 +177,30 @@ export function watchtowerRecoveryStatementDigest(
   recoveryTxSighash: Uint8Array,
 ): Uint8Array {
   return sha256(
-    concat([
+    concatBytes(
       utf8ToBytes("recover_watchtower_exited_leaf"),
       utf8ToBytes(NETWORK_STATEMENT_NAME[network]),
       // uuid.String() in Go: lowercase canonical form.
       utf8ToBytes(uuidFromBytes(uuidToBytes(leafId))),
       recoveryTxSighash,
-    ]),
+    ),
   );
 }
 
 /**
  * Sha256 over the base64-decoded SSP protected challenge — the digest the SSP session signature
  * covers (upstream graphql/client.ts `authenticate`). The SSP emits unpadded base64url; like Node's
- * base64 decoder the URL-safe characters and missing padding are normalized.
+ * base64 decoder the standard-alphabet characters and padding are normalized away before decoding
+ * with the URL-safe, unpadded variant.
  */
 export function sspChallengeDigest(protectedChallenge: string): Uint8Array {
   let decoded: Uint8Array;
   try {
-    const normalized = protectedChallenge.replaceAll("-", "+").replaceAll("_", "/");
-    const padded =
-      normalized.length % 4 === 0
-        ? normalized
-        : normalized + "=".repeat(4 - (normalized.length % 4));
-    decoded = base64.decode(padded);
+    const normalized = protectedChallenge
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replaceAll("=", "");
+    decoded = base64urlnopad.decode(normalized);
   } catch {
     throw new SparkInputError("ssp challenge: protected challenge is not valid base64");
   }

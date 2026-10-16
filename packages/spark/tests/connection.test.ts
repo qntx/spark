@@ -336,6 +336,34 @@ test("retries an expired challenge during authentication", async () => {
   expect(calls.signaturesVerified).toBe(1);
 });
 
+test("does not retry non-transient failures during authentication", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const calls: AuthCalls = { get_challenge: 0, verify_challenge: 0, signaturesVerified: 0 };
+  const conn = connectTest(signer, (router) => {
+    router.service(SparkAuthnService, {
+      get_challenge: () => {
+        calls.get_challenge++;
+        throw new ConnectError("bad signature", Code.Internal);
+      },
+      verify_challenge: () => {
+        calls.verify_challenge++;
+        return { sessionToken: "tok", expirationTimestamp: 0n };
+      },
+    });
+    router.service(SparkService, {
+      query_nodes: () => ({ nodes: {}, offset: 0n }),
+    });
+  });
+  const owner = await signer.identityPublicKey();
+  await expect(
+    conn.spark.query_nodes({
+      source: { case: "ownerIdentityPubkey", value: owner },
+      network: Network.MAINNET,
+    }),
+  ).rejects.toMatchObject({ name: "SparkRequestError", code: "internal" });
+  expect(calls.get_challenge).toBe(1);
+});
+
 test("retries idempotent reads with backoff but never non-idempotent calls", async () => {
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const calls: AuthCalls = { get_challenge: 0, verify_challenge: 0, signaturesVerified: 0 };
@@ -393,7 +421,7 @@ test("maps ConnectError to SparkRequestError with code and operator", async () =
     }),
   ).rejects.toMatchObject({
     name: "SparkRequestError",
-    code: "PermissionDenied",
+    code: "permission_denied",
     operator: OPERATOR.identifier,
     message: "denied by policy",
   });
