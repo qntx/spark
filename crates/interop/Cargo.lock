@@ -1553,6 +1553,7 @@ dependencies = [
 name = "qntx-spark-interop"
 version = "0.0.0"
 dependencies = [
+ "bitcoin",
  "frost-core",
  "frost-secp256k1-tr",
  "hex",
