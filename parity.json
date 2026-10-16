@@ -50,6 +50,26 @@
         }
       },
       "vectors": ["vectors/vss.json"]
+    },
+    {
+      "id": "spark-address",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/core/address.ts",
+          "tests": ["packages/spark/tests/address.test.ts"]
+        }
+      },
+      "vectors": ["vectors/address.json"]
+    },
+    {
+      "id": "bolt11",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/core/bolt11.ts",
+          "tests": ["packages/spark/tests/bolt11.test.ts"]
+        }
+      },
+      "vectors": ["vectors/bolt11.json"]
     }
   ]
 }
