@@ -7,7 +7,6 @@ edition      = "2024"
 rust-version = "1.99"
 license      = "Apache-2.0"
 repository   = "https://github.com/qntx/spark"
-homepage     = "https://github.com/qntx/spark"
 authors      = ["QNTX <https://qntx.org>"]
 
 # Standalone project: excluded from the root workspace, own lockfile.

@@ -9,13 +9,13 @@ edition      = "2024"
 rust-version = "1.99"
 license      = "Apache-2.0"
 repository   = "https://github.com/qntx/spark"
-homepage     = "https://github.com/qntx/spark"
 authors      = ["QNTX <https://qntx.org>"]
 description  = "Cryptographic primitives for the Spark protocol"
 keywords     = ["spark", "bitcoin", "frost", "ecies", "vss"]
 categories   = ["cryptography", "no-std"]
 
 [workspace.dependencies]
+spark-crypto       = { path = "crates/spark-crypto", version = "=0.0.0" }
 aes-gcm            = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 frost-core         = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
 frost-secp256k1-tr = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
@@ -24,6 +24,7 @@ k256               = { version = "0.13", default-features = false, features = ["
 rand_chacha        = { version = "0.3", default-features = false }
 rand_core          = { version = "0.6", default-features = false }
 sha2               = { version = "0.10", default-features = false }
+prost              = { version = "0.14", default-features = false, features = ["derive"] }
 vsss-rs            = { version = "5", default-features = false, features = ["alloc", "primitive"] }
 zeroize            = { version = "1", default-features = false, features = ["derive"] }
 
@@ -47,6 +48,16 @@ inherits = "dev"
 [profile.bench]
 debug    = true
 inherits = "release"
+
+# packages/spark-wasm/scripts/build.sh builds spark-ffi for
+# wasm32-unknown-unknown with this profile.
+[profile.wasm]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = true
+panic         = "abort"
 
 [workspace.lints.rust]
 unsafe_code                   = "deny"

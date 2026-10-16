@@ -1,0 +1,41 @@
+[package]
+name         = "spark-fuzz"
+version      = "0.0.0"
+publish      = false
+edition      = "2024"
+rust-version = "1.99"
+license      = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+spark-ffi     = { path = "../crates/spark-ffi" }
+
+# Standalone cargo-fuzz workspace: excluded from the root workspace.
+[workspace]
+
+[[bin]]
+name = "ffi_frost_sign"
+path = "fuzz_targets/ffi_frost_sign.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "ffi_frost_aggregate"
+path = "fuzz_targets/ffi_frost_aggregate.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "ffi_ecies_decrypt"
+path = "fuzz_targets/ffi_ecies_decrypt.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "ffi_split"
+path = "fuzz_targets/ffi_split.rs"
+test = false
+doc  = false

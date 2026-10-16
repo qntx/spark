@@ -1,4 +1,4 @@
-export { SparkCryptoError } from "../errors/index.ts";
+export { SparkCryptoError, SparkError } from "../errors/index.ts";
 
 /**
  * C ABI version implemented by a {@link SparkCrypto} backend. Bumped only when `qntx_spark.h`

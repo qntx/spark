@@ -1,0 +1,70 @@
+{
+  "name": "@qntx/spark-wasm",
+  "version": "0.0.0",
+  "description": "spark.wasm SparkCrypto backend — C ABI from crates/spark-ffi, platform-neutral and browser-first",
+  "keywords": [
+    "bitcoin",
+    "ecies",
+    "frost",
+    "lightning",
+    "secret-sharing",
+    "spark",
+    "threshold-signatures",
+    "typescript",
+    "vss",
+    "wasm",
+    "webassembly"
+  ],
+  "license": "Apache-2.0",
+  "author": {
+    "name": "quantumcat",
+    "url": "https://x.com/quantumcat"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qntx/spark.git"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "**/*.wasm"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "browser": "./dist/browser.mjs",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.mts",
+      "import": "./dist/browser.mjs",
+      "default": "./dist/browser.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "build:wasm": "vp run @qntx/spark#build && bash scripts/build.sh && vp pack",
+    "test": "vp run @qntx/spark#build && vp pack && vp test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
+    "check:pkg": "vp run @qntx/spark#build && vp pack && publint && attw --pack . --profile esm-only"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@qntx/spark": "0.0.0",
+    "@qntx/tsconfig": "1.0.1",
+    "@types/node": "26.6.3",
+    "binaryen": "132.0.0",
+    "publint": "0.3.24",
+    "typescript": "7.0.2",
+    "vite-plus": "1.0.0"
+  },
+  "peerDependencies": {
+    "@qntx/spark": "^0.0.0"
+  }
+}

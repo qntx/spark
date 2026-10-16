@@ -7,6 +7,14 @@
         "rust": {
           "module": "crates/spark-crypto/src/frost.rs",
           "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        },
+        "wasm": {
+          "module": "packages/spark-wasm/src/abi.ts",
+          "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native-host": {
+          "module": "crates/spark-ffi/tests/host/main.c",
+          "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
         }
       },
       "vectors": ["vectors/frost-commit.json"]
@@ -17,9 +25,17 @@
         "rust": {
           "module": "crates/spark-crypto/src/frost.rs",
           "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        },
+        "wasm": {
+          "module": "packages/spark-wasm/src/abi.ts",
+          "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native-host": {
+          "module": "crates/spark-ffi/tests/host/main.c",
+          "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
         }
       },
-      "vectors": ["vectors/frost-sign.json"]
+      "vectors": ["vectors/frost-sign.json", "vectors/ffi-sign.json"]
     },
     {
       "id": "frost-aggregate",
@@ -27,9 +43,17 @@
         "rust": {
           "module": "crates/spark-crypto/src/frost.rs",
           "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        },
+        "wasm": {
+          "module": "packages/spark-wasm/src/abi.ts",
+          "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native-host": {
+          "module": "crates/spark-ffi/tests/host/main.c",
+          "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
         }
       },
-      "vectors": ["vectors/frost-sign.json"]
+      "vectors": ["vectors/frost-sign.json", "vectors/ffi-aggregate.json"]
     },
     {
       "id": "ecies",
@@ -37,6 +61,14 @@
         "rust": {
           "module": "crates/spark-crypto/src/ecies.rs",
           "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        },
+        "wasm": {
+          "module": "packages/spark-wasm/src/abi.ts",
+          "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native-host": {
+          "module": "crates/spark-ffi/tests/host/main.c",
+          "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
         }
       },
       "vectors": ["vectors/ecies.json"]
@@ -47,6 +79,14 @@
         "rust": {
           "module": "crates/spark-crypto/src/vss.rs",
           "tests": ["crates/interop/tests/vectors.rs", "crates/spark-crypto/tests/vectors.rs"]
+        },
+        "wasm": {
+          "module": "packages/spark-wasm/src/abi.ts",
+          "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native-host": {
+          "module": "crates/spark-ffi/tests/host/main.c",
+          "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
         }
       },
       "vectors": ["vectors/vss.json"]
@@ -214,6 +254,24 @@
         }
       },
       "vectors": ["vectors/hashing.json"]
+    },
+    {
+      "id": "ffi-errors",
+      "implementations": {
+        "rust": {
+          "module": "crates/spark-ffi/src/abi.rs",
+          "tests": ["crates/spark-ffi/tests/vectors.rs"]
+        },
+        "wasm": {
+          "module": "packages/spark-wasm/src/abi.ts",
+          "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native-host": {
+          "module": "crates/spark-ffi/tests/host/main.c",
+          "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
+        }
+      },
+      "vectors": ["vectors/ffi-errors.json"]
     }
   ]
 }
