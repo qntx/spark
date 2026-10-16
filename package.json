@@ -17,7 +17,8 @@
     "typecheck": "vp run -r typecheck && tsc --noEmit",
     "build": "vp run -r build",
     "test": "vp run -r test && vp test",
-    "test:parity": "bun -e 'console.log(\"no parity streams yet\")'",
+    "test:parity": "cd crates/interop && cargo test --release --test differential -- --ignored differential",
+    "test:parity:random": "seed=$(bun -e 'console.log(Math.floor(Math.random() * 4294967296))') && echo \"parity seed: $seed\" && cd crates/interop && PARITY_SEED=$seed cargo test --release --test differential -- --ignored differential",
     "release": "bumpp",
     "prepare": "vp config"
   },

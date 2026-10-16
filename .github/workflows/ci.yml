@@ -20,10 +20,10 @@ jobs:
       contents: read
     # bun run build → vp run -r build
     # bun run test → vp run -r test
-    # scripts → bun run test:parity (TS generates, Rust replays)
+    # test:parity runs in the dedicated `parity` job below: ci-bun has no
+    # protoc for the upstream crate's build script.
     with:
       rust: true
-      scripts: test:parity
 
   rust:
     uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
@@ -56,10 +56,29 @@ jobs:
       contents: read
     with:
       # crates/interop is a standalone project; its rust-toolchain.toml pins
-      # the toolchain and its deny.toml sits next to its Cargo.toml.
+      # the toolchain and its deny.toml sits next to its Cargo.toml. The
+      # upstream spark-frost build script needs protoc.
       working-directory: crates/interop
+      apt-packages: protobuf-compiler
       deny: true
       doc: false
+
+  # `bun run test:parity` without bun: the script body verbatim. The seeded
+  # differential replays random FROST/ECIES/VSS inputs through the upstream
+  # crate and spark-crypto.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo test --release --test differential -- --ignored differential
+        working-directory: crates/interop
 
   # Generated surfaces must be regenerated, not edited: the committed header
   # is a contract (`qntx_spark.h`). proto regen joins this job in S3.
