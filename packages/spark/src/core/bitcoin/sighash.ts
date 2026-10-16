@@ -1,20 +1,13 @@
 import { SigHash, Transaction } from "@scure/btc-signer";
 
 import { SparkInputError } from "../../errors/index.ts";
+import { assertSats } from "../assert.ts";
 
 // BIP-341/342 sighash computation. Upstream references:
 // signer/spark-frost/src/transaction.rs (`compute_multi_input_sighash` and the
 // single-input sighash inside `build_single_output_tx` — both are the same
 // BIP-341 digest with a `Prevouts::All` commitment) and htlc.rs
 // (`taproot_script_spend_signature_hash` for HTLC spends).
-
-const MAX_SATS = 2_100_000_000_000_000;
-
-function assertSats(value: number, field: string): void {
-  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_SATS) {
-    throw new SparkInputError(`${field}: must be a non-negative satoshi amount (<= ${MAX_SATS})`);
-  }
-}
 
 /** A transaction to sign: raw bytes plus every input's prevout script and amount. */
 export type SigningTarget = {

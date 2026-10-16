@@ -4,7 +4,6 @@ import { base64 } from "@scure/base";
 import { expect, test } from "vite-plus/test";
 
 import { sspChallengeDigest } from "../src/core/hashing/index.ts";
-import { SparkRequestError } from "../src/errors/index.ts";
 import { createSspClient } from "../src/ssp/index.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
@@ -97,8 +96,8 @@ const SSP_OPTS = { baseUrl: "https://ssp.test", graphqlPath: "graphql/spark/2025
 test("authenticates then answers a fee estimate with the bearer token", async () => {
   const { fetchImpl, requests } = fakeSsp({ feeValue: 333 });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
-  const estimate = await client.leavesSwapFeeEstimate(100_000);
-  expect(estimate).toStrictEqual({ valueSats: 333, unit: "SATOSHI" });
+  const estimate = await client.swapFeeEstimate(100_000);
+  expect(estimate).toBe(333);
   expect(requests.map((r) => r.operationName)).toStrictEqual([
     "GetChallenge",
     "VerifyChallenge",
@@ -112,8 +111,8 @@ test("authenticates then answers a fee estimate with the bearer token", async ()
 test("re-authenticates once when the session token is rejected", async () => {
   const { fetchImpl, requests } = fakeSsp({ failFirstAuthed: true });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
-  const estimate = await client.leavesSwapFeeEstimate(50_000);
-  expect(estimate.valueSats).toBe(250);
+  const estimate = await client.swapFeeEstimate(50_000);
+  expect(estimate).toBe(250);
   expect(requests.map((r) => r.operationName)).toStrictEqual([
     "GetChallenge",
     "VerifyChallenge",
@@ -129,8 +128,9 @@ test("graphql errors map to SparkRequestError with the extensions code", async (
     graphqlError: { message: "amount too small", code: "BAD_USER_INPUT" },
   });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
-  const error = await client.leavesSwapFeeEstimate(1).catch((error: unknown) => error);
-  expect(error).toBeInstanceOf(SparkRequestError);
-  expect((error as SparkRequestError).code).toBe("BAD_USER_INPUT");
-  expect((error as SparkRequestError).message).toContain("amount too small");
+  await expect(client.swapFeeEstimate(1)).rejects.toMatchObject({
+    name: "SparkRequestError",
+    code: "bad_user_input",
+    message: expect.stringContaining("amount too small"),
+  });
 });

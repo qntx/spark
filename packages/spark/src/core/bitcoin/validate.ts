@@ -1,3 +1,4 @@
+import { equalBytes } from "@noble/curves/utils.js";
 import { Address, OutScript } from "@scure/btc-signer";
 
 import { SparkInputError } from "../../errors/index.ts";
@@ -9,37 +10,15 @@ import { txId } from "./transactions.ts";
 // Cooperative-exit validation, ported from
 // sdks/js/packages/spark-sdk/src/utils/bitcoin.ts (buildonspark/spark@0b3a32a).
 
-function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function equalBytesReversed(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[b.length - 1 - i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 /**
- * Ensures the SSP's connector transaction's first input spends `coopExitTxId`. Both byte orders are
- * accepted, mirroring the upstream validator's tolerance.
+ * Ensures the SSP's connector transaction's first input spends the coop-exit transaction.
+ * `coopExitTxIdInternal` is the txid in internal (wire) byte order — the byte order a serialized
+ * outpoint carries, i.e. the reverse of the conventional hex display order. btc-signer stores
+ * `TxIn.txid` in display order, so the parent id is reversed before comparing.
  */
 export function validateConnectorTxBindsToCoopExitTxid(
   connectorTxBytes: Uint8Array,
-  coopExitTxId: Uint8Array,
+  coopExitTxIdInternal: Uint8Array,
 ): void {
   const connectorTx = parseTransaction(connectorTxBytes);
   if (connectorTx.inputsLength === 0) {
@@ -49,7 +28,7 @@ export function validateConnectorTxBindsToCoopExitTxid(
   if (parentTxid === undefined) {
     throw new SparkInputError("connectorTx: input 0 has no parent txid");
   }
-  if (!equalBytes(parentTxid, coopExitTxId) && !equalBytesReversed(parentTxid, coopExitTxId)) {
+  if (!equalBytes(Uint8Array.from(parentTxid).reverse(), coopExitTxIdInternal)) {
     throw new SparkInputError("connectorTx: input 0 does not spend coopExitTxId");
   }
 }

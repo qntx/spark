@@ -57,9 +57,7 @@ export function uuidFromBytes(bytes: Uint8Array): string {
  * is valid here.
  */
 export function uuidToBytes(id: string): Uint8Array {
-  const match =
-    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.exec(id);
-  if (match === null) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
     throw new SparkInputError("id: must be a UUID in canonical form");
   }
   const hex = id.replaceAll("-", "");

@@ -156,46 +156,7 @@ function maxFeatureBit(words: ReadonlyArray<number>): number {
   return -1;
 }
 
-function utf8Decode(bytes: Uint8Array): string {
-  let result = "";
-  for (let i = 0; i < bytes.length;) {
-    const b = bytes[i] ?? 0;
-    let code: number;
-    let length: number;
-    if (b < 0x80) {
-      code = b;
-      length = 1;
-    } else if ((b & 0xe0) === 0xc0) {
-      code = b & 0x1f;
-      length = 2;
-    } else if ((b & 0xf0) === 0xe0) {
-      code = b & 0x0f;
-      length = 3;
-    } else if ((b & 0xf8) === 0xf0) {
-      code = b & 0x07;
-      length = 4;
-    } else {
-      fail("description: invalid UTF-8");
-    }
-    if (i + length > bytes.length) {
-      fail("description: truncated UTF-8");
-    }
-    for (let j = 1; j < length; j++) {
-      const next = bytes[i + j] ?? 0;
-      if ((next & 0xc0) !== 0x80) {
-        fail("description: invalid UTF-8");
-      }
-      code = (code << 6) | (next & 0x3f);
-    }
-    const min = length === 1 ? 0 : length === 2 ? 0x80 : length === 3 ? 0x800 : 0x10000;
-    if (code < min || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
-      fail("description: invalid UTF-8");
-    }
-    result += String.fromCodePoint(code);
-    i += length;
-  }
-  return result;
-}
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 function parseAmount(hrpAmount: string): bigint | undefined {
   if (hrpAmount === "") {
@@ -332,7 +293,11 @@ export function decodeBolt11(invoice: string): Bolt11Invoice {
         break;
       }
       case TAG_DESCRIPTION:
-        description ??= utf8Decode(wordsToBytes(field));
+        try {
+          description ??= UTF8_DECODER.decode(wordsToBytes(field));
+        } catch (error) {
+          throw new SparkInputError("invoice: description: invalid UTF-8", { cause: error });
+        }
         break;
       case TAG_EXPIRY:
         if (field[0] === 0) {

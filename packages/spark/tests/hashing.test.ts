@@ -11,9 +11,6 @@ import { expect, test } from "vite-plus/test";
 import {
   decodeSparkAddress,
   encodeSparkAddress,
-  encodeSparkInvoiceFieldsV1Canonical,
-  finalizeTokenInvoice,
-  prepareTokenInvoice,
   verifySparkAddressSignature,
 } from "../src/core/address.ts";
 import type { Hasher } from "../src/core/hashing/index.ts";
@@ -40,7 +37,8 @@ import {
   watchtowerRecoveryStatementDigest,
 } from "../src/core/hashing/index.ts";
 import type { SparkInvoiceFields, SparkNetwork } from "../src/core/index.ts";
-import { protoInvoiceToPlain } from "../src/core/invoice.ts";
+import { encodeInvoiceFields, protoInvoiceToPlain } from "../src/core/invoice.ts";
+import { finalizeTokenInvoice, prepareTokenInvoice } from "../src/core/token-invoice.ts";
 import { uuidToBytes, uuidv7 } from "../src/core/uuid.ts";
 import { SparkInputError } from "../src/errors/index.ts";
 import { ChallengeSchema } from "../src/proto/gen/spark_authn_pb.ts";
@@ -641,7 +639,7 @@ const canonicalCases = loadJsonFile(
 
 test.each(canonicalCases.testCases)("upstream token_invoice_canonical_encoding $name", (c) => {
   const msg = fromJson(SparkInvoiceFieldsSchema, c.sparkInvoiceFields);
-  expect(bytesToHex(encodeSparkInvoiceFieldsV1Canonical(protoInvoiceToPlain(msg)))).toBe(
+  expect(bytesToHex(encodeInvoiceFields(protoInvoiceToPlain(msg)))).toBe(
     c.expectedCanonicalEncoding,
   );
 });

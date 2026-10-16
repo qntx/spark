@@ -5,6 +5,7 @@ import type { Client, Interceptor, Transport } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 
 import type { SparkOperatorConfig } from "../core/network.ts";
+import { SESSION_EXPIRY_BUFFER_MS } from "../core/session.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import { SparkError, SparkRequestError } from "../errors/index.ts";
 import { ChallengeSchema, SparkAuthnService } from "../proto/gen/spark_authn_pb.ts";
@@ -66,9 +67,7 @@ export type ConnectionDeps = {
 /** Sent as `X-Client-Env`, the header the SOs accept from SDK clients. */
 const CLIENT_ENV = "qntx-spark";
 const AUTHN_SERVICE = "spark_authn.SparkAuthnService";
-/** Refresh the session token one minute before it expires, mirroring upstream. */
-const TOKEN_EXPIRY_BUFFER_MS = 60_000;
-const AUTH_MAX_ATTEMPTS = 8;
+const AUTH_MAX_ATTEMPTS = 3;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 10_000;
@@ -111,7 +110,12 @@ async function defaultSleep(ms: number): Promise<void> {
 }
 
 function codeName(code: Code): string {
-  return Code[code] ?? "Unknown";
+  const name = Code[code];
+  // Connect enum names are PascalCase; the public code vocabulary is the gRPC
+  // canonical snake_case form ("Unauthenticated" → "unauthenticated").
+  return name === undefined
+    ? "unknown"
+    : name.replaceAll(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
 function toSparkRequestError(error: unknown, operator: SparkOperatorConfig): SparkRequestError {
@@ -347,18 +351,17 @@ export function connectOperator(
       };
       return verified.sessionToken;
     } catch (error) {
+      // Only transient failures retry: an expired challenge (re-issued on the next round trip)
+      // and Unavailable with backoff. Internal/Unknown hide real failures like a rejected
+      // signature, so they surface immediately.
       const expiredChallenge =
         error instanceof ConnectError && error.rawMessage.includes("challenge expired");
-      const connectionError =
-        error instanceof ConnectError &&
-        (error.code === Code.Unavailable ||
-          error.code === Code.Internal ||
-          error.code === Code.Unknown);
-      if ((!expiredChallenge && !connectionError) || attempt >= AUTH_MAX_ATTEMPTS - 1) {
+      const unavailable = error instanceof ConnectError && error.code === Code.Unavailable;
+      if ((!expiredChallenge && !unavailable) || attempt >= AUTH_MAX_ATTEMPTS - 1) {
         throw toSparkRequestError(error, operator);
       }
-      if (connectionError) {
-        await sleep(250);
+      if (unavailable) {
+        await sleep(jittered(attempt, RETRY_BASE_MS, RETRY_MAX_MS));
       }
       return authenticate(attempt + 1);
     }
@@ -373,7 +376,7 @@ export function connectOperator(
   }
 
   async function sessionToken(): Promise<string> {
-    if (cached !== undefined && now() < cached.expiresAtMs - TOKEN_EXPIRY_BUFFER_MS) {
+    if (cached !== undefined && now() < cached.expiresAtMs - SESSION_EXPIRY_BUFFER_MS) {
       return cached.token;
     }
     pending ??= runAuth();
@@ -447,7 +450,7 @@ export function sparkEvents(
       }
       // Stream iterations arrive already mapped by mapStreamErrors, so the auth check is on
       // SparkRequestError, not ConnectError.
-      if (error instanceof SparkRequestError && error.code === "Unauthenticated") {
+      if (error instanceof SparkRequestError && error.code === "unauthenticated") {
         connection.invalidateSession();
       }
       return resubscribe();

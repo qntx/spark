@@ -2,6 +2,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 
 import { SparkInputError } from "../../errors/index.ts";
+import { requireLength } from "../assert.ts";
+import { uint32be, uint64be } from "../bytes.ts";
 import { INVOICE_VERSION } from "../invoice.ts";
 import type { SparkInvoiceFields } from "../invoice.ts";
 import type { SparkNetwork } from "../network.ts";
@@ -17,18 +19,6 @@ const PUBLIC_KEY_LENGTH = 33;
 const TOKEN_IDENTIFIER_LENGTH = 32;
 const MAX_TOKEN_AMOUNT_BYTES = 16;
 
-function uint32be(n: number): Uint8Array {
-  const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, n >>> 0, false);
-  return b;
-}
-
-function uint64be(v: bigint): Uint8Array {
-  const b = new Uint8Array(8);
-  new DataView(b.buffer).setBigUint64(0, v, false);
-  return b;
-}
-
 function networkMagic(network: SparkNetwork): number {
   if (network === "mainnet") {
     return 0xd9b4bef9;
@@ -41,12 +31,6 @@ function networkMagic(network: SparkNetwork): number {
 
 function hashNetworkMagic(network: SparkNetwork): Uint8Array {
   return sha256(sha256(uint32be(networkMagic(network))));
-}
-
-function requireLength(value: Uint8Array, length: number, field: string): void {
-  if (value.length !== length) {
-    throw new SparkInputError(`${field} must be exactly ${length} bytes`);
-  }
 }
 
 /**

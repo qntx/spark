@@ -563,16 +563,19 @@ test("hash-lock and sequence-lock scripts match the Rust byte format", () => {
 
 // -- Validation -----------------------------------------------------------------
 
-test("validateConnectorTxBindsToCoopExitTxid accepts either byte order", () => {
+test("validateConnectorTxBindsToCoopExitTxid requires internal byte order", () => {
   const { cpfp } = createInitialTimelockNodeTx(parent(), "mainnet");
   const connector = new Transaction({ version: 3, allowUnknownOutputs: true });
   connector.addInput({ txid: txIdInputBytes(cpfp.txBytes), index: 0 });
   connector.addOutput({ script: hexToBytes(`5120${"11".repeat(32)}`), amount: 500n });
   const connectorBytes = connector.toBytes(true);
+  const internalId = txIdBytes(cpfp.txBytes);
   const displayId = hexToBytes(txId(cpfp.txBytes));
-  const hashOrderId = txIdBytes(cpfp.txBytes);
-  validateConnectorTxBindsToCoopExitTxid(connectorBytes, displayId);
-  validateConnectorTxBindsToCoopExitTxid(connectorBytes, hashOrderId);
+  validateConnectorTxBindsToCoopExitTxid(connectorBytes, internalId);
+  // Display (reversed) order no longer passes.
+  expect(() => validateConnectorTxBindsToCoopExitTxid(connectorBytes, displayId)).toThrow(
+    SparkInputError,
+  );
   expect(() =>
     validateConnectorTxBindsToCoopExitTxid(connectorBytes, new Uint8Array(32).fill(9)),
   ).toThrow(SparkInputError);

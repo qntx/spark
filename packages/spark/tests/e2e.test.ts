@@ -39,9 +39,8 @@ test.skipIf(process.env["SPARK_E2E_MAINNET"] !== "1")(
     await expect(client.leaves()).resolves.toStrictEqual([]);
     await expect(client.transfers.pending()).resolves.toStrictEqual([]);
     const fee = await client.swapFeeEstimate(100_000);
-    console.log("e2e swapFeeEstimate:", fee);
-    expect(fee.valueSats).toBeGreaterThanOrEqual(0);
-    expect(fee.unit).not.toBe("");
+    console.log("e2e swapFeeEstimate (sats):", fee);
+    expect(fee).toBeGreaterThanOrEqual(0);
 
     const abort = new AbortController();
     const iterator = client.events(abort.signal)[Symbol.asyncIterator]();

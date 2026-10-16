@@ -5,7 +5,6 @@ import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../c
 import { SparkInputError } from "../errors/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
-import type { SwapFeeEstimate } from "../ssp/index.ts";
 import { queryAllTransfers, queryPendingTransfers } from "../transfer/index.ts";
 import type { SparkTransfer } from "../transfer/index.ts";
 import { leavesBalance, queryLeaves } from "../tree/index.ts";
@@ -28,10 +27,10 @@ export type SparkClient = {
     }) => Promise<ReadonlyArray<SparkTransfer>>;
   };
   /** SSP leaves-swap fee quote in sats. */
-  readonly swapFeeEstimate: (amountSats: number) => Promise<SwapFeeEstimate>;
-  /** Coordinator `subscribe_to_events`; reconnects until `signal` aborts. */
+  readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
+  /** Coordinator `subscribe_to_events`; reconnects until `signal` aborts or `close()` runs. */
   readonly events: (signal?: AbortSignal) => AsyncIterable<SparkEvent>;
-  /** Aborts outstanding streams. Session tokens are dropped lazily by expiry. */
+  /** Aborts all outstanding event streams (including caller-signaled ones). */
   readonly close: () => void;
 };
 
@@ -44,14 +43,21 @@ export type SparkClientOptions = {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly operators?: ReadonlyArray<SparkOperatorConfig>;
   readonly ssp?: SparkNetworkConfig["ssp"];
-  /**
-   * Test seam: substitutes the transport factory (for example wrapping `createRouterTransport`) for
-   * every operator connection.
-   */
+};
+
+/** Internal seams for tests; not part of the public options surface. */
+export type SparkClientSeams = {
   readonly transportFactory?: ConnectionDeps["transportFactory"];
 };
 
 export function createSparkClient(options: SparkClientOptions): SparkClient {
+  return createSparkClientWith(options, {});
+}
+
+export function createSparkClientWith(
+  options: SparkClientOptions,
+  seams: SparkClientSeams,
+): SparkClient {
   const config = sparkNetworkConfig(options.network);
   const operators = options.operators ?? config.operators;
   const ssp = options.ssp ?? config.ssp;
@@ -72,22 +78,14 @@ export function createSparkClient(options: SparkClientOptions): SparkClient {
     random,
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
-    ...(options.transportFactory === undefined
-      ? {}
-      : { transportFactory: options.transportFactory }),
+    ...(seams.transportFactory === undefined ? {} : { transportFactory: seams.transportFactory }),
   };
 
-  let coordinator: OperatorConnection | undefined;
-  for (const operator of operators) {
-    const connection = connectOperator(operator, deps);
-    if (operator.identifier === config.coordinator) {
-      coordinator = connection;
-    }
-  }
+  const coordinator = operators.find((operator) => operator.identifier === config.coordinator);
   if (coordinator === undefined) {
     throw new SparkInputError(`coordinator ${config.coordinator} is not in the operator set`);
   }
-  const coordinatorConnection = coordinator;
+  const coordinatorConnection: OperatorConnection = connectOperator(coordinator, deps);
 
   const sspClient = createSspClient({
     baseUrl: ssp.baseUrl,
@@ -103,6 +101,56 @@ export function createSparkClient(options: SparkClientOptions): SparkClient {
       ownerIdentityPublicKey: await options.signer.identityPublicKey(),
       network: options.network,
     });
+
+  /**
+   * Events against the coordinator. The caller's signal and the client's close() are linked into a
+   * per-stream AbortController via listeners (no AbortSignal.any — Hermes support is uncertain);
+   * listeners are dropped when the stream ends.
+   */
+  const events = (callerSignal?: AbortSignal): AsyncIterable<SparkEvent> => {
+    const controller = new AbortController();
+    const stop = (): void => {
+      controller.abort();
+    };
+    abort.signal.addEventListener("abort", stop, { once: true });
+    callerSignal?.addEventListener("abort", stop, { once: true });
+    // Abort listeners don't fire retroactively — a signal that is already aborted (or a client
+    // closed before events() ran) must abort the stream controller directly.
+    if (abort.signal.aborted || callerSignal?.aborted === true) {
+      stop();
+    }
+    const inner = eventsWithKey(controller.signal)[Symbol.asyncIterator]();
+    const cleanup = (): void => {
+      abort.signal.removeEventListener("abort", stop);
+      callerSignal?.removeEventListener("abort", stop);
+    };
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async (): Promise<IteratorResult<SparkEvent>> => {
+            try {
+              const item = await inner.next();
+              if (item.done === true) {
+                cleanup();
+              }
+              return item;
+            } catch (error) {
+              cleanup();
+              throw error;
+            }
+          },
+        };
+      },
+    };
+  };
+
+  async function* eventsWithKey(signal: AbortSignal): AsyncIterable<SparkEvent> {
+    const key = await options.signer.identityPublicKey();
+    yield* sparkEvents(coordinatorConnection, key, signal, {
+      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      random,
+    });
+  }
 
   return {
     identityPublicKey: async () => options.signer.identityPublicKey(),
@@ -124,18 +172,10 @@ export function createSparkClient(options: SparkClientOptions): SparkClient {
           ...(listOptions?.offset === undefined ? {} : { offset: listOptions.offset }),
         }),
     },
-    swapFeeEstimate: async (amountSats) => sspClient.leavesSwapFeeEstimate(amountSats),
-    events: (signal) => sparkEventsDeferred(signal ?? abort.signal),
+    swapFeeEstimate: async (amountSats) => sspClient.swapFeeEstimate(amountSats),
+    events,
     close() {
       abort.abort();
     },
   };
-
-  async function* sparkEventsDeferred(signal: AbortSignal): AsyncIterable<SparkEvent> {
-    const key = await options.signer.identityPublicKey();
-    yield* sparkEvents(coordinatorConnection, key, signal, {
-      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
-      random,
-    });
-  }
 }

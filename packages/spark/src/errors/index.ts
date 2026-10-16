@@ -33,10 +33,13 @@ export class SparkInputError extends SparkError {
 }
 
 /**
- * A request to a signing operator or the SSP failed. `code` is the Connect error code name (for
- * example "unauthenticated", "unavailable") when the server returned one; `operator` is the FROST
- * identifier of the operator that failed, when the failure came from an operator. The message
- * carries the server's own message — never request bodies.
+ * A request to a signing operator or the SSP failed. `code` uses one vocabulary: the gRPC canonical
+ * snake_case names for operator errors ("unauthenticated", "unavailable", "invalid_argument",
+ * "deadline_exceeded", … — Connect's PascalCase enum names are mapped down), `http_<status>` for
+ * SSP HTTP failures, `unexpected_response` for malformed SSP responses, and the SSP's GraphQL
+ * `extensions.code` lowercased. `operator` is the FROST identifier of the operator that failed,
+ * when the failure came from an operator. The message carries the server's own message — never
+ * request bodies.
  */
 export class SparkRequestError extends SparkError {
   readonly code?: string | undefined;

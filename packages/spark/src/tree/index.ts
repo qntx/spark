@@ -1,5 +1,6 @@
 import type { Client, CallOptions } from "@connectrpc/connect";
 
+import { u64ToSats } from "../core/assert.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SparkInputError } from "../errors/index.ts";
@@ -34,13 +35,6 @@ function optionalBytes(value: Uint8Array): Uint8Array | undefined {
   return value.length === 0 ? undefined : value;
 }
 
-function checkedSats(value: bigint, field: string): number {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new SparkInputError(`leaf ${field} out of range`);
-  }
-  return Number(value);
-}
-
 export function mapTreeNode(node: TreeNode): SparkLeaf {
   const keyshare = node.signingKeyshare;
   if (keyshare === undefined) {
@@ -49,7 +43,7 @@ export function mapTreeNode(node: TreeNode): SparkLeaf {
   const leaf: SparkLeaf = {
     id: node.id,
     treeId: node.treeId,
-    valueSats: checkedSats(node.value, "value"),
+    valueSats: u64ToSats(node.value, "leaf value"),
     status: node.status,
     nodeTx: node.nodeTx,
     refundTx: node.refundTx,
@@ -62,12 +56,19 @@ export function mapTreeNode(node: TreeNode): SparkLeaf {
       publicKey: keyshare.publicKey,
     },
     vout: node.vout,
+    ...(node.parentNodeId === undefined || node.parentNodeId === ""
+      ? {}
+      : { parentNodeId: node.parentNodeId }),
   };
   const directTx = optionalBytes(node.directTx);
-  if (directTx !== undefined) {
-    return { ...leaf, directTx };
-  }
-  return leaf;
+  const directRefundTx = optionalBytes(node.directRefundTx);
+  const directFromCpfpRefundTx = optionalBytes(node.directFromCpfpRefundTx);
+  return {
+    ...leaf,
+    ...(directTx === undefined ? {} : { directTx }),
+    ...(directRefundTx === undefined ? {} : { directRefundTx }),
+    ...(directFromCpfpRefundTx === undefined ? {} : { directFromCpfpRefundTx }),
+  };
 }
 
 /**

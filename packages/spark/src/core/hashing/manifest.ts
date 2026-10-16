@@ -5,6 +5,7 @@ import { bech32, bech32m } from "@scure/base";
 import { SparkInputError } from "../../errors/index.ts";
 import type { ManifestAmount, TransferManifest } from "../../proto/gen/spark_pb.ts";
 import { TransferManifestSchema } from "../../proto/gen/spark_pb.ts";
+import { compareBytes } from "../bytes.ts";
 import { newHasher } from "./hashstructure.ts";
 import { hashProto } from "./protohash.ts";
 
@@ -47,18 +48,6 @@ export type QuoteRole = (typeof QuoteRole)[keyof typeof QuoteRole];
 
 function notHashable(message: string): SparkInputError {
   return new SparkInputError(`transfer manifest not hashable: ${message}`);
-}
-
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
-  const minLength = Math.min(a.length, b.length);
-  for (let i = 0; i < minLength; i++) {
-    const av = a[i];
-    const bv = b[i];
-    if (av !== undefined && bv !== undefined && av !== bv) {
-      return av - bv;
-    }
-  }
-  return a.length - b.length;
 }
 
 // spark.Network values: UNSPECIFIED=0, MAINNET=1, REGTEST=2, TESTNET=3, SIGNET=4.
