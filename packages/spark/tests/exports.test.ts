@@ -17,7 +17,20 @@ export type {
   Bolt11Network,
 } from "../src/index.ts";
 export type { SparkCrypto } from "../src/crypto/index.ts";
-export type { SparkNetwork as SignerNetwork } from "../src/signer/index.ts";
+export type {
+  SparkNetwork as SignerNetwork,
+  IdentityStatement,
+  SparkSigner,
+} from "../src/signer/index.ts";
+export type {
+  SparkClient,
+  SparkClientOptions,
+  SparkEvent,
+  SparkLeaf,
+  SparkTransfer,
+  SparkTransferLeaf,
+  SwapFeeEstimate,
+} from "../src/index.ts";
 
 function names(mod: object): string[] {
   return Object.keys(mod).toSorted();
@@ -28,11 +41,14 @@ test("root runtime exports are exactly the core surface", () => {
     "SparkCryptoError",
     "SparkError",
     "SparkInputError",
+    "SparkRequestError",
+    "createSparkClient",
     "decodeBolt11",
     "decodeSparkAddress",
     "encodeSparkAddress",
     "isExpired",
     "sparkNetworkConfig",
+    "verifySparkAddressSignature",
   ]);
 });
 

@@ -1,6 +1,7 @@
 import { toBinary } from "@bufbuild/protobuf";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
+import { base64 } from "@scure/base";
 
 import { SparkInputError } from "../../errors/index.ts";
 import { ChallengeSchema } from "../../proto/gen/spark_authn_pb.ts";
@@ -198,6 +199,26 @@ export function watchtowerRecoveryStatementDigest(
       recoveryTxSighash,
     ]),
   );
+}
+
+/**
+ * Sha256 over the base64-decoded SSP protected challenge — the digest the SSP session signature
+ * covers (upstream graphql/client.ts `authenticate`). The SSP emits unpadded base64url; like Node's
+ * base64 decoder the URL-safe characters and missing padding are normalized.
+ */
+export function sspChallengeDigest(protectedChallenge: string): Uint8Array {
+  let decoded: Uint8Array;
+  try {
+    const normalized = protectedChallenge.replaceAll("-", "+").replaceAll("_", "/");
+    const padded =
+      normalized.length % 4 === 0
+        ? normalized
+        : normalized + "=".repeat(4 - (normalized.length % 4));
+    decoded = base64.decode(padded);
+  } catch {
+    throw new SparkInputError("ssp challenge: protected challenge is not valid base64");
+  }
+  return sha256(decoded);
 }
 
 /** Sha256 over the serialized spark_authn.Challenge — the digest the session signature covers. */

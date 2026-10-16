@@ -132,9 +132,18 @@ const LAYERS: Record<string, ReadonlyArray<string>> = {
 // signer implementation (signer/local.ts) is reachable only through
 // src/signer/index.ts — from outside src/signer/ it may not be imported at all.
 const TYPE_ONLY: Record<string, ReadonlyArray<string>> = Object.fromEntries(
-  ["tree", "transfer", "lightning", "deposit", "exit", "tokens", "invoice", "client"].map(
-    (layer) => [layer, ["signer"]],
-  ),
+  [
+    "connection",
+    "ssp",
+    "tree",
+    "transfer",
+    "lightning",
+    "deposit",
+    "exit",
+    "tokens",
+    "invoice",
+    "client",
+  ].map((layer) => [layer, ["signer"]]),
 );
 
 export type SourceFile = { path: string; source: string };

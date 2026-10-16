@@ -111,3 +111,15 @@ const PROTO_NETWORK: Record<SparkNetwork, Network> = {
 export function sparkNetworkProto(network: SparkNetwork): Network {
   return PROTO_NETWORK[network];
 }
+
+/** Maps a protobuf `spark.Network` enum value back onto {@link SparkNetwork}. */
+export function sparkNetworkFromProto(network: Network): SparkNetwork {
+  switch (network) {
+    case Network.MAINNET:
+      return "mainnet";
+    case Network.REGTEST:
+      return "regtest";
+    default:
+      throw new SparkInputError("unknown proto network");
+  }
+}
