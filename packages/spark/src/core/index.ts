@@ -1,8 +1,9 @@
 export { sparkNetworkConfig } from "./network.ts";
-export { encodeSparkAddress, decodeSparkAddress } from "./address.ts";
+export { encodeSparkAddress, decodeSparkAddress, verifySparkAddressSignature } from "./address.ts";
 export { decodeBolt11, isExpired } from "./bolt11.ts";
 export type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "./network.ts";
-export type { SparkAddress, SparkInvoiceFields, SparkPayment } from "./address.ts";
+export type { SparkAddress } from "./address.ts";
+export type { SparkInvoiceFields, SparkPayment } from "./invoice.ts";
 export type {
   Bolt11Invoice,
   Bolt11Network,
