@@ -1,2 +1,21 @@
-export type { IdentityStatement, SparkSigner } from "./types.ts";
+export { createSparkSigner, sparkAccountKey } from "./local.ts";
+export type {
+  FrostAggregateJob,
+  FrostSignJob,
+  IdentityStatement,
+  OperatorCommitment,
+  PrepareClaimRequest,
+  PreparedClaim,
+  PreparedLightningReceive,
+  PreparedTransfer,
+  PreparedTransferLeaf,
+  PrepareTransferRequest,
+  SigningCommitment,
+  SparkKey,
+  SparkLeafKey,
+  SparkOperator,
+  SparkSigner,
+  StaticDepositClaimRequest,
+} from "./types.ts";
+export type { SigningTarget } from "./types.ts";
 export type { SparkNetwork } from "../core/network.ts";

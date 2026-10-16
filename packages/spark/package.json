@@ -63,10 +63,12 @@
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "@scure/base": "^2.4.0",
+    "@scure/bip32": "^2.4.0",
     "@scure/btc-signer": "^2.4.1"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
+    "@qntx/spark-wasm": "0.0.0",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.3",
     "publint": "0.3.24",

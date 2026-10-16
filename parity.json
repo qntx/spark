@@ -272,6 +272,16 @@
         }
       },
       "vectors": ["vectors/ffi-errors.json"]
+    },
+    {
+      "id": "key-derivation",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/signer/local.ts",
+          "tests": ["packages/spark/tests/signer.test.ts"]
+        }
+      },
+      "vectors": ["vectors/derivation.json"]
     }
   ]
 }

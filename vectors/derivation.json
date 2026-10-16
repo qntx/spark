@@ -1,0 +1,149 @@
+{
+ "provenance": "buildonspark/spark sdks/js/packages/spark-sdk @ 0b3a32a05c9ac06cc411683551dd1f1bde9d0caa; DefaultSparkSigner via derive-vectors.ts (yarn workspace deps)",
+ "cases": [
+  {
+   "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+   "seed_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+   "account": 0,
+   "account_key": "aa317d30d975409025c810405ab2168a018062791c7cea6367c4484c748f5d430ed0ac00f64f195842bade8cc27f2a09474002a070af51c8089904f4b005ae11",
+   "identity_public_key": "02698b27ac308b275671b3ca25436346469d04a5bba578ae39feba1d65897a6abc",
+   "deposit_public_key": "02f4f6db6cf8f0ab8c9c95659b78448d09ebf490c4251349c6ebef7caf9ad6e10a",
+   "static_deposit_public_keys": [
+    {
+     "index": 0,
+     "public_key": "029f061ac1595c7b9386624866131a25af763233f8de42e2c5e623687cd67cc1b1"
+    },
+    {
+     "index": 1,
+     "public_key": "030ddaeeea8a6458b13b8c7efd422bdd924e6035a8f4931f9da228146327844059"
+    },
+    {
+     "index": 2,
+     "public_key": "031924ec5ed38cfdfd0510dba5b1c14fe895e4ffa067101ac8fbf11e70a9b18ed1"
+    }
+   ],
+   "leaf_public_keys": [
+    {
+     "leaf_id": "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c",
+     "public_key": "0247a58a9af49c825fe343f3d270aad5d77ac567a12b9bff4044e23db9d3369e31"
+    },
+    {
+     "leaf_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+     "public_key": "02f56623f262e083fd687dddae1089ce49596bbdd8cf9b6e5ed803f2a5cc9d367a"
+    },
+    {
+     "leaf_id": "550e8400-e29b-41d4-a716-446655440000",
+     "public_key": "02dd908fe422dca4f3ec4f46b485efeef6899141b90740c00c618cf40a02396d34"
+    }
+   ]
+  },
+  {
+   "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+   "seed_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+   "account": 1,
+   "account_key": "87d5ff25d0b348c800647f72cc9aff450aecb7e0b77e836a47479b964f5d143de3ead09124c2b1c8b6d4aa85046c1c7f2c2a6e9491e93d00446e12475a404f71",
+   "identity_public_key": "0281363910b0dc0015a4a25e758da30f0e28388ea5252c0e3713936f2d4ef7d3d5",
+   "deposit_public_key": "0274f399c2cdf20c0ce4f8ba26680793c4b6155b0a6f1131a5c2ad04cc7a49c854",
+   "static_deposit_public_keys": [
+    {
+     "index": 0,
+     "public_key": "03cf31bfca0c4ecffdfe79d272218a8ba4c972b038d45c2d3ff89d9d18de6434bb"
+    },
+    {
+     "index": 1,
+     "public_key": "03770e89c2ca31bbff0718a7d1d716e66e481f3be0c462fdef52efa543ae2a46ac"
+    },
+    {
+     "index": 2,
+     "public_key": "03aebae427e4a449f4ca29b2c4dac8755fe15324162427e918eeb97f7fbaea8159"
+    }
+   ],
+   "leaf_public_keys": [
+    {
+     "leaf_id": "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c",
+     "public_key": "02b30651ad46c93866655b426ad740bd0c91e922190f0efe2ea4ebb04d480556ba"
+    },
+    {
+     "leaf_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+     "public_key": "038a0ac4b0aca933510da5d3e4e88c50c24d87ee8837b1eea202495e5ca5416bd0"
+    },
+    {
+     "leaf_id": "550e8400-e29b-41d4-a716-446655440000",
+     "public_key": "02c4b323a010497f37a9cef52c6d6ba33af7148c852db85223bc90ba0db552e405"
+    }
+   ]
+  },
+  {
+   "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+   "seed_hex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
+   "account": 0,
+   "account_key": "7726bd8a6c0fa082bb97508a609577efc62274c7feaeb4b354a9c826056f57f3334b536d754237566c4a85bf8dec99b9c334e403d26c1211a2d174b245128b93",
+   "identity_public_key": "02dfe7995713f80633f7b22b7745fa43694aec00a0744c43cb18c5fb4aed2a6fdf",
+   "deposit_public_key": "03f074b06dbd9b0edad613ae8bde2b51d0dc2bef867696459b5e8d534fc9735d9f",
+   "static_deposit_public_keys": [
+    {
+     "index": 0,
+     "public_key": "02d7cf22723be80e4d71694d48994f0fc0c746157e0abef91b5aae9480d9138791"
+    },
+    {
+     "index": 1,
+     "public_key": "037052a5fc38c0ff178ce6352670a41fccc26e75925eba5468cdf7b6ddae4e6539"
+    },
+    {
+     "index": 2,
+     "public_key": "03dd661b155737ed54d4db047bd35a0e5bdadabda253b90a6466840b26a730b9b4"
+    }
+   ],
+   "leaf_public_keys": [
+    {
+     "leaf_id": "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c",
+     "public_key": "033dd71e6b1806f5108195f92bceb5a4c586a63cf8e32c084154b22d62f171ce5d"
+    },
+    {
+     "leaf_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+     "public_key": "029525716cdf8fe105b13a21b3f09f68aba5ed8eedc7ad760a0999e520402a1b80"
+    },
+    {
+     "leaf_id": "550e8400-e29b-41d4-a716-446655440000",
+     "public_key": "02a27813407f50e4ab0a2a38025d3f4b4026ffd62e91141089279138fcfa3575b7"
+    }
+   ]
+  },
+  {
+   "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+   "seed_hex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
+   "account": 1,
+   "account_key": "826d69dc3fd160ff38db6914919e77a7a31b9296f2849201c66b7577a36a75c8d68db44707fdf20d9265fdc271ba08518f2e747de92e4821cf8b9f61660d4b05",
+   "identity_public_key": "0319d6c5d64753556063000ab42725bfe774fe722f00fbc692142eade1fd1ea52f",
+   "deposit_public_key": "02b769aba5c366bb9ca361604289bd3277abfd9caaf5117f6bd6853b64d3cbb5c8",
+   "static_deposit_public_keys": [
+    {
+     "index": 0,
+     "public_key": "030164cc339b6e0a75ba18c17cf6ed27b1ee8c8f3dd029dff37734cd4e1a47ab56"
+    },
+    {
+     "index": 1,
+     "public_key": "03acdc5e3875ffbd1ab359f1da0302da7e54339d395faaba67e95973321bcaab2a"
+    },
+    {
+     "index": 2,
+     "public_key": "02adf4713062244bb216c64dfd603dae5eda7d1ed46d5e986a4f15adb118d6f071"
+    }
+   ],
+   "leaf_public_keys": [
+    {
+     "leaf_id": "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c",
+     "public_key": "038077decb3fdecba3be1da06326d8f4ee9aaa6b2e8b347944c719bf0637ffbdbd"
+    },
+    {
+     "leaf_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+     "public_key": "036e9eb5584767b11a7e8485b697b7cdd9ee60387aac658689ecc74ed1e8f83dcf"
+    },
+    {
+     "leaf_id": "550e8400-e29b-41d4-a716-446655440000",
+     "public_key": "029b0572e5cc7572a9bcdeb1d3f3e304619e86708c8222c7e7c61c4891e973f798"
+    }
+   ]
+  }
+ ]
+}

@@ -8,12 +8,14 @@ import { main } from "./smoke.ts";
 declare function print(msg: string): void;
 declare function quit(code: number): void;
 
-try {
-  main();
-  print("HERMES_SMOKE_OK");
-} catch (error) {
-  print(
-    `HERMES_SMOKE_FAIL: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
-  );
-  quit(1);
-}
+void (async () => {
+  try {
+    await main();
+    print("HERMES_SMOKE_OK");
+  } catch (error) {
+    print(
+      `HERMES_SMOKE_FAIL: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    );
+    quit(1);
+  }
+})();
