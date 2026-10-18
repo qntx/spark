@@ -38,6 +38,7 @@ export type {
   StaticDepositClaimRequest,
 } from "../src/signer/index.ts";
 export type {
+  ExitTransaction,
   SparkClient,
   SparkClientOptions,
   SparkEvent,
