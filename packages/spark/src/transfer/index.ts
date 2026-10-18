@@ -654,9 +654,10 @@ export function selectLeavesExact(
   if (!Number.isSafeInteger(amountSats) || amountSats <= 0) {
     throw new SparkInputError("send: amountSats must be a positive safe integer");
   }
+  // `filter` returns a fresh array, so sorting it in place is safe (Hermes has no toSorted).
   const sorted = leaves
     .filter((leaf) => leaf.status === "AVAILABLE")
-    .toSorted((a, b) => b.valueSats - a.valueSats);
+    .sort((a, b) => b.valueSats - a.valueSats);
   const chosen: SparkLeaf[] = [];
   const dead = new Set<string>();
   const search = (index: number, remaining: number): boolean => {
