@@ -536,6 +536,7 @@ describe("FROST commitments", () => {
     signer.dispose();
   });
 
+  // 1024 FROST nonce derivations take ~2 s alone, past the 5 s default under a parallel run.
   test("newCommitments bounds outstanding nonces at 1024", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
     await signer.newCommitments(256);
@@ -546,7 +547,7 @@ describe("FROST commitments", () => {
       "newCommitments: too many outstanding signing commitments",
     );
     signer.dispose();
-  });
+  }, 30_000);
 
   test("signFrost rejects unknown and reused commitments", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
