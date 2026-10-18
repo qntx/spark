@@ -1,0 +1,19 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["sparknative"],
+  "ios": {
+    "iosModuleName": "SparkNative"
+  },
+  "android": {
+    "androidNamespace": ["sparknative"],
+    "androidCxxLibName": "SparkNative"
+  },
+  "autolinking": {
+    "SparkNative": {
+      "all": {
+        "language": "c++",
+        "implementationClassName": "HybridSparkNative"
+      }
+    }
+  }
+}

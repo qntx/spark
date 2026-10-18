@@ -1,0 +1,90 @@
+{
+  "name": "@qntx/spark-native",
+  "version": "0.0.0",
+  "description": "Native qntx_spark (Nitro) SparkCrypto backend for @qntx/spark on React Native",
+  "keywords": [
+    "bitcoin",
+    "ecies",
+    "frost",
+    "nitro",
+    "react-native",
+    "secret-sharing",
+    "spark",
+    "threshold-signatures",
+    "vss"
+  ],
+  "license": "Apache-2.0",
+  "author": {
+    "name": "quantumcat",
+    "url": "https://x.com/quantumcat"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qntx/spark.git",
+    "directory": "packages/spark-native"
+  },
+  "files": [
+    "dist",
+    "cpp",
+    "include",
+    "android/build.gradle",
+    "android/CMakeLists.txt",
+    "android/gradle.properties",
+    "android/src",
+    "ios/QntxSpark.xcframework",
+    "nitrogen/generated",
+    "nitro.json",
+    "react-native.config.js",
+    "SparkNative.podspec",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp run @qntx/spark#build && vp pack",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
+    "test": "vp test",
+    "codegen": "nitrogen",
+    "check:pkg": "vp run @qntx/spark#build && vp pack && publint && attw --pack . --profile esm-only",
+    "check:cpp": "bun scripts/check-cpp.ts"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@qntx/spark": "0.0.0",
+    "@qntx/tsconfig": "1.0.1",
+    "@types/node": "26.6.5",
+    "nitrogen": "0.37.1",
+    "publint": "0.3.25",
+    "react-native-nitro-modules": "0.37.1",
+    "typescript": "7.0.2",
+    "vite-plus": "1.1.0"
+  },
+  "peerDependencies": {
+    "@qntx/spark": "^0.0.0",
+    "react-native": "*",
+    "react-native-nitro-modules": "^0.37.1"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "bun",
+      "version": "1.4.0",
+      "onFail": "ignore"
+    }
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

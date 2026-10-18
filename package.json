@@ -22,6 +22,7 @@
     "release": "bumpp",
     "prepare": "vp config",
     "gen:proto": "buf generate",
+    "build:native": "bun scripts/build-native.ts",
     "test:ffi-host": "bun scripts/ffi-host.ts"
   },
   "devDependencies": {

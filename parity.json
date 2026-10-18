@@ -12,6 +12,10 @@
           "module": "packages/spark-wasm/src/abi.ts",
           "tests": ["packages/spark-wasm/tests/abi.test.ts"]
         },
+        "native": {
+          "module": "packages/spark-native/src/bind.ts",
+          "tests": ["packages/spark-native/tests/spark-native.test.ts"]
+        },
         "native-host": {
           "module": "crates/spark-ffi/tests/host/main.c",
           "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
@@ -29,6 +33,10 @@
         "wasm": {
           "module": "packages/spark-wasm/src/abi.ts",
           "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native": {
+          "module": "packages/spark-native/src/bind.ts",
+          "tests": ["packages/spark-native/tests/spark-native.test.ts"]
         },
         "native-host": {
           "module": "crates/spark-ffi/tests/host/main.c",
@@ -48,6 +56,10 @@
           "module": "packages/spark-wasm/src/abi.ts",
           "tests": ["packages/spark-wasm/tests/abi.test.ts"]
         },
+        "native": {
+          "module": "packages/spark-native/src/bind.ts",
+          "tests": ["packages/spark-native/tests/spark-native.test.ts"]
+        },
         "native-host": {
           "module": "crates/spark-ffi/tests/host/main.c",
           "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
@@ -66,6 +78,10 @@
           "module": "packages/spark-wasm/src/abi.ts",
           "tests": ["packages/spark-wasm/tests/abi.test.ts"]
         },
+        "native": {
+          "module": "packages/spark-native/src/bind.ts",
+          "tests": ["packages/spark-native/tests/spark-native.test.ts"]
+        },
         "native-host": {
           "module": "crates/spark-ffi/tests/host/main.c",
           "tests": ["crates/spark-ffi/tests/host/main.c", "scripts/ffi-host.ts"]
@@ -83,6 +99,10 @@
         "wasm": {
           "module": "packages/spark-wasm/src/abi.ts",
           "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native": {
+          "module": "packages/spark-native/src/bind.ts",
+          "tests": ["packages/spark-native/tests/spark-native.test.ts"]
         },
         "native-host": {
           "module": "crates/spark-ffi/tests/host/main.c",
@@ -265,6 +285,10 @@
         "wasm": {
           "module": "packages/spark-wasm/src/abi.ts",
           "tests": ["packages/spark-wasm/tests/abi.test.ts"]
+        },
+        "native": {
+          "module": "packages/spark-native/src/bind.ts",
+          "tests": ["packages/spark-native/tests/spark-native.test.ts"]
         },
         "native-host": {
           "module": "crates/spark-ffi/tests/host/main.c",

@@ -1,0 +1,9 @@
+# Prebuilt artifacts produced by `bun run build:native` (CI rebuilds them; the
+# paths are what the podspec and CMake consume, and what `files` ships in npm).
+include/qntx_spark.h
+ios/QntxSpark.xcframework
+ios/staging
+android/src/main/jniLibs
+
+# Rust byproducts kept out of the package tree (they live in /target anyway).
+cpp/*.o

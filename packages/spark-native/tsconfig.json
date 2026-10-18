@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Development resolution for the workspace siblings without a prior pack
+    // build; the emitted package keeps importing @qntx/spark/* (peer dep).
+    "paths": {
+      "@qntx/spark": ["../spark/src/index.ts"],
+      "@qntx/spark/crypto": ["../spark/src/crypto/index.ts"],
+      // See types/react-native.d.ts: keeps RN's global augmentations out of
+      // this program so the mapped spark sources still typecheck.
+      "react-native": ["./types/react-native.d.ts"]
+    }
+  },
+  // wasm-env.d.ts: the test fake drives the wasm backend's sources, which are
+  // typed against its ambient WebAssembly declarations.
+  "include": ["src", "tests", "vite.config.ts", "../spark-wasm/src/wasm-env.d.ts"]
+}

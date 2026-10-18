@@ -6,7 +6,12 @@ import { defineConfig } from "bumpp";
 // `x.y.z` occurrence of the current version in non-JSON files, so Cargo.toml
 // picks up both [workspace.package].version and any `spark-* = "=x.y.z"` dep.
 const config: ReturnType<typeof defineConfig> = defineConfig({
-  files: ["packages/spark/package.json", "packages/spark-wasm/package.json", "Cargo.toml"],
+  files: [
+    "packages/spark/package.json",
+    "packages/spark-wasm/package.json",
+    "packages/spark-native/package.json",
+    "Cargo.toml",
+  ],
   // crates/interop is its own workspace, so its lockfile needs a separate
   // `cargo update`. A string `execute` is not run through a shell, so the
   // updates run as separate processes.
