@@ -6,6 +6,10 @@ import { assertU32 } from "../assert.ts";
 // sdks/js/packages/spark-sdk/src/utils/transaction.ts (buildonspark/spark@0b3a32a).
 // `nextSequence` follows the Rust semantics exactly; the `getNext*Sequence`
 // helpers mirror the upstream TS wrappers used by the services layer.
+// Observed on the local SOs (S7a deposit e2e, docker compose stack): they accept the
+// initial deposit with root sequence 0 and refund timelocks 2000 / 2050 — the
+// `getNextTransactionSequence`-style initial timelocks. Whether `nextSequence` matches
+// renewal paths is still unverified against the SO; keep both until S7b.
 
 // BIP-68: bit 31 disables relative lock-time, bit 22 selects a time-based lock.
 const SEQUENCE_LOCK_TIME_DISABLED = 0x80_00_00_00;

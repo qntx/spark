@@ -2,6 +2,13 @@ import { connectOperator, sparkEvents } from "../connection/index.ts";
 import type { ConnectionDeps, OperatorConnection, SparkEvent } from "../connection/index.ts";
 import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
+import { uuidv7 } from "../core/uuid.ts";
+import {
+  claimDeposit,
+  generateDepositAddress,
+  queryUnusedDepositAddresses,
+} from "../deposit/index.ts";
+import type { DepositCoordinator, UnusedDepositAddress } from "../deposit/index.ts";
 import { SparkInputError } from "../errors/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
@@ -28,6 +35,20 @@ export type SparkClient = {
   };
   /** SSP leaves-swap fee quote in sats. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
+  readonly deposits: {
+    /** Fresh single-use deposit address with a verified proof-of-possession. */
+    readonly newAddress: () => Promise<string>;
+    /** Deposit addresses the SO still considers unused. */
+    readonly unused: () => Promise<ReadonlyArray<UnusedDepositAddress>>;
+    /**
+     * Claims an on-chain deposit paying to one of the unused addresses. When the transaction has
+     * multiple matching outputs `vout` selects which one.
+     */
+    readonly claim: (options: {
+      readonly transaction: Uint8Array;
+      readonly vout?: number;
+    }) => Promise<SparkLeaf>;
+  };
   /** Coordinator `subscribe_to_events`; reconnects until `signal` aborts or `close()` runs. */
   readonly events: (signal?: AbortSignal) => AsyncIterable<SparkEvent>;
   /** Aborts all outstanding event streams (including caller-signaled ones). */
@@ -86,6 +107,14 @@ export function createSparkClientWith(
     throw new SparkInputError(`coordinator ${config.coordinator} is not in the operator set`);
   }
   const coordinatorConnection: OperatorConnection = connectOperator(coordinator, deps);
+
+  const depositCoordinator: DepositCoordinator = {
+    spark: coordinatorConnection.spark,
+    signer: options.signer,
+    network: options.network,
+    operators,
+    coordinatorIdentifier: config.coordinator,
+  };
 
   const sspClient = createSspClient({
     baseUrl: ssp.baseUrl,
@@ -173,6 +202,20 @@ export function createSparkClientWith(
         }),
     },
     swapFeeEstimate: async (amountSats) => sspClient.swapFeeEstimate(amountSats),
+    deposits: {
+      newAddress: async () =>
+        generateDepositAddress({
+          ...depositCoordinator,
+          leafId: uuidv7(random, options.now),
+        }),
+      unused: async () => queryUnusedDepositAddresses(depositCoordinator),
+      claim: async (claimOptions) =>
+        claimDeposit({
+          ...depositCoordinator,
+          transaction: claimOptions.transaction,
+          ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
+        }),
+    },
     events,
     close() {
       abort.abort();
