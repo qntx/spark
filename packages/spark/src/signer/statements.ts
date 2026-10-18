@@ -21,6 +21,7 @@ import {
   transferPackageDigest,
   watchtowerRecoveryStatementDigest,
 } from "../core/hashing/statements.ts";
+import { hashPartialTokenTransaction } from "../core/hashing/token.ts";
 import { protoInvoiceToPlain } from "../core/invoice.ts";
 import { sparkNetworkFromProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
@@ -32,6 +33,7 @@ import {
   TransferManifestSchema,
   TransferPackageSchema,
 } from "../proto/gen/spark_pb.ts";
+import { PartialTokenTransactionSchema } from "../proto/gen/spark_token_pb.ts";
 import { randomBytes, unreachable } from "./backend.ts";
 import type { IdentityStatement } from "./types.ts";
 
@@ -154,6 +156,14 @@ export function statementDigest(
       digest: hashSparkInvoice(invoice, context.identityPublicKey, context.network),
       format: "schnorr",
     };
+  }
+  if (statement.kind === "token-transaction") {
+    const partial = decode(
+      PartialTokenTransactionSchema,
+      statement.partialTransaction,
+      "token transaction",
+    );
+    return { digest: hashPartialTokenTransaction(partial), format: "schnorr" };
   }
   return unreachable("unexpected statement kind");
 }
