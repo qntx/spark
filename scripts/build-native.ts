@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 // Builds the prebuilt `qntx_spark` (spark-ffi cdylib) libraries that
 // @qntx/spark-native ships: an iOS `QntxSpark.xcframework` and per-ABI Android
@@ -102,6 +102,8 @@ function checkExports(names: string[], label: string): void {
 }
 
 function copyHeader(): void {
+  // include/ is gitignored (it only holds this copy) — recreate it in clean checkouts.
+  mkdirSync(dirname(HEADER_DST), { recursive: true });
   copyFileSync(HEADER_SRC, HEADER_DST);
   console.log(`header: packages/spark-native/include/qntx_spark.h sha256=${sha256(HEADER_DST)}`);
 }
@@ -195,6 +197,7 @@ function buildIos(): void {
 
   const output = join(NATIVE, "ios/QntxSpark.xcframework");
   rmSync(output, { recursive: true, force: true });
+  mkdirSync(dirname(output), { recursive: true });
   sh("xcodebuild", [
     "-create-xcframework",
     "-framework",
