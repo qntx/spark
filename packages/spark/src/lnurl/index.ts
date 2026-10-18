@@ -1,3 +1,5 @@
+export { parseLnurlAuth, submitLnurlAuth } from "./auth.ts";
+export type { LnurlAuthAction, LnurlAuthRequest, LnurlAuthSigning } from "./auth.ts";
 export { checkLnurlUrl, decodeLnurl, encodeLnurl, lightningAddressUrl } from "./codec.ts";
 export { resolveLnurl } from "./fetch.ts";
 export type { LnurlResolved } from "./fetch.ts";

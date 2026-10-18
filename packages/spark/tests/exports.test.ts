@@ -20,6 +20,9 @@ export type {
 export type { SparkCrypto } from "../src/crypto/index.ts";
 export type {
   JsonObject,
+  LnurlAuthAction,
+  LnurlAuthRequest,
+  LnurlAuthSigning,
   LnurlInvoice,
   LnurlPayRequest,
   LnurlResolved,
@@ -105,11 +108,13 @@ test("lnurl runtime exports are exactly the LNURL protocol surface", () => {
     "encodeLnurl",
     "lightningAddressUrl",
     "lnurlGetJson",
+    "parseLnurlAuth",
     "parseLnurlPayRequest",
     "parseLnurlWithdrawRequest",
     "parseSuccessAction",
     "requestInvoice",
     "resolveLnurl",
+    "submitLnurlAuth",
     "submitWithdraw",
   ]);
 });
