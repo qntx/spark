@@ -10,6 +10,7 @@ import type { SigningCommitment } from "./types.ts";
 const FROST_COMMITMENT_ITEM = 130; // nonces(64) ‖ commitments(66)
 const NONCE_LENGTH = 64;
 const FROST_HEDGE_TAG = "spark/frost-hedge";
+const MAX_OUTSTANDING = 1024;
 
 /**
  * Single-use FROST nonce storage. `commit` asks the backend for `count` commitment items (`hedge` =
@@ -35,6 +36,9 @@ export function createNonceStore(
     commit(count) {
       if (!Number.isSafeInteger(count) || count < 1 || count > MAX_JOBS) {
         throw new SparkInputError(`newCommitments: count must be between 1 and ${MAX_JOBS}`);
+      }
+      if (nonces.size + count > MAX_OUTSTANDING) {
+        throw new SparkError("newCommitments: too many outstanding signing commitments");
       }
       const items = backendCall(() => crypto.frostCommit(hedge, randomBytes(random, 32 * count)));
       if (items.length !== count * FROST_COMMITMENT_ITEM) {

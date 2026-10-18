@@ -489,6 +489,18 @@ describe("FROST commitments", () => {
     signer.dispose();
   });
 
+  test("newCommitments bounds outstanding nonces at 1024", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    await signer.newCommitments(256);
+    await signer.newCommitments(256);
+    await signer.newCommitments(256);
+    await signer.newCommitments(256);
+    await expect(signer.newCommitments(1)).rejects.toThrow(
+      "newCommitments: too many outstanding signing commitments",
+    );
+    signer.dispose();
+  });
+
   test("signFrost rejects unknown and reused commitments", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
     const [commitment] = await signer.newCommitments(1);
