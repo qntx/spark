@@ -20,7 +20,7 @@ aes-gcm            = { version = "0.10", default-features = false, features = ["
 frost-core         = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
 frost-secp256k1-tr = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
 hkdf               = { version = "0.12", default-features = false }
-k256               = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh"] }
+k256               = { version = "0.14", default-features = false, features = ["arithmetic", "ecdh"] }
 rand_chacha        = { version = "0.3", default-features = false }
 rand_core          = { version = "0.6", default-features = false }
 sha2               = { version = "0.10", default-features = false }
