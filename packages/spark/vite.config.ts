@@ -5,6 +5,10 @@ import type { UserConfig } from "vite-plus";
 
 const config: UserConfig = defineConfig({
   test: {
+    // The e2e-local suites run against one shared bitcoind + SO set, so they
+    // must not interleave across workers. They only execute when
+    // SPARK_E2E_LOCAL=1; serializing files in that mode keeps them ordered.
+    fileParallelism: process.env["SPARK_E2E_LOCAL"] !== "1",
     // Development resolution for the workspace siblings: signer tests drive
     // @qntx/spark-wasm sources directly against this package's crypto entry
     // without requiring a prior pack build of either package.
