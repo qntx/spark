@@ -16,7 +16,7 @@ categories   = ["cryptography", "no-std"]
 
 [workspace.dependencies]
 spark-crypto       = { path = "crates/spark-crypto", version = "=0.0.0" }
-aes-gcm            = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+aes-gcm            = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
 frost-core         = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
 frost-secp256k1-tr = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
 hkdf               = { version = "0.12", default-features = false }
