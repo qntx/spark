@@ -14,13 +14,22 @@ import { join, resolve } from "node:path";
 //   bun scripts/spark-local.ts down    # stop the stack (keeps volumes)
 //   bun scripts/spark-local.ts certs   # re-export the TLS certs only
 //
-// SPARK_REF overrides the upstream checkout (default: the reference clone path).
+// SPARK_REF is required: point it at a checkout of buildonspark/spark (the script verifies it
+// is at the commit pinned in scripts/lock.json before touching docker).
 
 const REPO = resolve(import.meta.dirname, "..");
-const SPARK_REF = resolve(
-  process.env["SPARK_REF"] ?? "/Users/xu/Desktop/x/spark-ref/lightspark-spark",
-);
+const SPARK_REF_ENV = process.env["SPARK_REF"];
+if (SPARK_REF_ENV === undefined || SPARK_REF_ENV === "") {
+  console.error(
+    "set SPARK_REF to a checkout of buildonspark/spark at the commit in scripts/lock.json",
+  );
+  process.exit(1);
+}
+const SPARK_REF = resolve(SPARK_REF_ENV);
 const COMPOSE = join(SPARK_REF, "docker-compose.yml");
+// Runs bitcoind 31 for TRUC package relay (ephemeral P2A anchor outputs are
+// rejected as dust by v28). See scripts/spark-local.override.yml.
+const COMPOSE_OVERRIDE = join(REPO, "scripts/spark-local.override.yml");
 const PROJECT = "spark-local";
 const SO_PORTS = [8535, 8536, 8537] as const;
 const CERT_DIR = join(tmpdir(), "spark-local-certs");
@@ -43,7 +52,7 @@ function sh(cmd: string, args: ReadonlyArray<string>, quiet = false): string {
 }
 
 function compose(...args: ReadonlyArray<string>): string {
-  return sh("docker", ["compose", "-f", COMPOSE, "-p", PROJECT, ...args]);
+  return sh("docker", ["compose", "-f", COMPOSE, "-f", COMPOSE_OVERRIDE, "-p", PROJECT, ...args]);
 }
 
 type Lock = { spark?: { commit?: unknown } };

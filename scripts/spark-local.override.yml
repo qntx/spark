@@ -1,0 +1,11 @@
+# Compose override for the upstream spark-local stack: run bitcoind 31 so the
+# node's ephemeral-dust policy accepts Spark's zero-fee v3 transactions carrying
+# a 0-value P2A anchor (added in Bitcoin Core 29; lncm/bitcoind:v28.0 rejects
+# them as dust). Only the daemon image is replaced; bitcoin-init/bitcoin-miner
+# stay on lncm v28 since they only drive bitcoin-cli over RPC.
+# Index digest pinned from `docker buildx imagetools inspect bitcoin/bitcoin:31.0`.
+services:
+  bitcoind:
+    image: bitcoin/bitcoin:31.0@sha256:a1d05be6939b5c85132a761d2b795f5b8a2612ce53782263da4939778e461792
+    environment:
+      BITCOIN_DATA: /data/.bitcoin
