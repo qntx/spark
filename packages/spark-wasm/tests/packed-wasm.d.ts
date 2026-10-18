@@ -7,4 +7,6 @@ declare module "*.mjs" {
   export function loadSparkWasm(
     opts?: import("../src/instance.ts").LoadSparkWasmOptions,
   ): Promise<import("@qntx/spark/crypto").SparkCrypto>;
+  // oxlint-disable-next-line unicorn/custom-error-definition -- ambient declaration only
+  export class WasmPoisonedError extends Error {}
 }

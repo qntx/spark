@@ -14,7 +14,19 @@ need cargo
 need openssl
 
 cd "$root"
-RUSTFLAGS="--remap-path-prefix=${HOME}=~ --remap-path-prefix=${root}=." \
+# Path remaps keep panic-location strings host-independent; the LAST matching
+# prefix wins, so general prefixes come first and specific ones last. Without
+# them the artifact embeds ~/.rustup/toolchains/…-<host-triple> (when rust-src
+# is installed) and the real CARGO_HOME, both of which differ across hosts.
+# The rust-src tree is remapped to rustc's own canonical /rustc/<commit> form —
+# the same shape a rust-src-less (minimal profile) toolchain produces.
+sysroot="$(rustc --print sysroot)"
+commit="$(rustc --version --verbose | sed -n 's/^commit-hash: //p')"
+RUSTFLAGS="--remap-path-prefix=${root}=. \
+  --remap-path-prefix=${HOME}=~ \
+  --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=cargo \
+  --remap-path-prefix=${sysroot}/lib/rustlib/src/rust=/rustc/${commit} \
+  --remap-path-prefix=${sysroot}=rustc" \
   cargo build -p spark-ffi --profile wasm --target wasm32-unknown-unknown
 
 out="${pkg}/src/spark.wasm"

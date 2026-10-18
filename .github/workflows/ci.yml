@@ -112,10 +112,9 @@ jobs:
       - run: git diff --exit-code crates/spark-ffi/include/qntx_spark.h
 
   # spark.wasm and its SRI integrity hash are committed artifacts: rebuild and
-  # diff so the checked-in bytes always come from this toolchain. Byte
-  # reproducibility across platforms is not guaranteed (see SIZES.md); the
-  # diff anchors the macOS-produced artifact and the wasm tests assert the
-  # module's exact export table instead.
+  # diff so the checked-in bytes always come from the pinned toolchain. With
+  # the exact rustc patch version and the path remaps in build.sh, x86_64
+  # Linux and aarch64 macOS builds are byte-identical (see SIZES.md).
   wasm:
     runs-on: ubuntu-latest
     steps:
@@ -125,12 +124,17 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: "1.99"
+          toolchain: "1.99.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/spark-wasm build:wasm
       - run: git diff --exit-code packages/spark-wasm/src/spark.wasm packages/spark-wasm/src/integrity.ts
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spark-wasm-rebuild
+          path: packages/spark-wasm/src/spark.wasm
       - run: bunx vp test
         working-directory: packages/spark-wasm
 

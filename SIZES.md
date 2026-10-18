@@ -8,23 +8,21 @@ LTO, `codegen-units = 1`, stripped, `panic = "abort"`) and post-processed by
 
 | Artifact   | Raw       | Gzip     |
 | ---------- | --------- | -------- |
-| spark.wasm | 196,043 B | 81,555 B |
+| spark.wasm | 195,815 B | 81,527 B |
 
 ## Reproducibility
 
-The build applies `RUSTFLAGS="--remap-path-prefix=$HOME=~
---remap-path-prefix=$PWD=."` so source paths do not enter the artifact.
-Evidence: an earlier build of this pipeline from two different checkout
-paths on the same toolchain (`/Users/xu/Desktop/qntx/spark` and
-`/private/tmp/spark-repro`, rustc 1.99, aarch64-apple-darwin host) produced
-byte-identical output. The committed artifact:
+`scripts/build.sh` runs on the exact toolchain pinned in
+`rust-toolchain.toml` (rustc 1.99.1) and remaps every host path that can enter
+panic-location strings: the checkout, `$HOME`, `CARGO_HOME`, the sysroot, and
+the rust-src tree (to rustc's canonical `/rustc/<commit>`).
+
+Verified on rustc 1.99.1: a native aarch64-darwin build and a linux/amd64
+build are byte-identical. An aarch64-linux build was observed to differ in
+codegen (870 of 1173 functions), so regenerate the artifact on x86_64 Linux or
+macOS only; the `wasm` CI job (x86_64 Linux) rebuilds and diffs the committed
+bytes and uploads its rebuild on a mismatch. The committed artifact:
 
 ```
-sha256 = 95a6e7b807d7dec107dde06a7763950c3ed57112990b733282eeb09bf30a32fa
+sha256 = 2e147515bf89034ac8940e912edfa6dd19d52ec5f2ff7f05d0df017b67f02f49
 ```
-
-Cross-platform reproducibility (macOS ↔ Linux) is not verified locally. The
-`wasm` CI job rebuilds the artifact on ubuntu-latest and diffs it against the
-committed bytes; if that ever diverges across hosts, fall back to asserting
-the size within ±1% plus the exact export table (which
-`packages/spark-wasm/tests/abi.test.ts` already checks).
