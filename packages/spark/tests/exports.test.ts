@@ -46,6 +46,7 @@ export type {
   SparkClientOptions,
   SparkEvent,
   SparkLeaf,
+  SparkTokenIdentifierData,
   SparkTransfer,
   SparkTransferLeaf,
 } from "../src/index.ts";
@@ -65,7 +66,9 @@ test("root runtime exports are exactly the core surface", () => {
     "createSparkClient",
     "decodeBolt11",
     "decodeSparkAddress",
+    "decodeTokenIdentifier",
     "encodeSparkAddress",
+    "encodeTokenIdentifier",
     "exitTransactions",
     "isExpired",
     "sparkNetworkConfig",
