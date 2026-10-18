@@ -282,6 +282,16 @@
         }
       },
       "vectors": ["vectors/derivation.json"]
+    },
+    {
+      "id": "token-identifier",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/core/token-identifier.ts",
+          "tests": ["packages/spark/tests/token-identifier.test.ts"]
+        }
+      },
+      "vectors": ["vectors/token-identifier.json"]
     }
   ]
 }

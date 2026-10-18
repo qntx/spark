@@ -1,0 +1,17 @@
+{
+  "source": "upstream spark-sdk token identifier tests (src/tests/token-identifier.test.ts)",
+  "upstream": "buildonspark/spark@0b3a32a05c9ac06cc411683551dd1f1bde9d0caa",
+  "note": "Bech32m token identifier vectors: 'tokenIdentifier' is the raw 32-byte identifier, 'encoded' its bech32m form for that network. Test vectors only.",
+  "cases": [
+    {
+      "tokenIdentifier": "3f7a672e7a0561b9fd875b5e7350c613f66a971a7c399c2c1a6942a47e4b96f8",
+      "network": "mainnet",
+      "encoded": "btkn18aaxwtn6q4smnlv8td08x5xxz0mx49c60suectq6d9p2gljtjmuqahuvew"
+    },
+    {
+      "tokenIdentifier": "3f7a672e7a0561b9fd875b5e7350c613f66a971a7c399c2c1a6942a47e4b96f8",
+      "network": "regtest",
+      "encoded": "btknrt18aaxwtn6q4smnlv8td08x5xxz0mx49c60suectq6d9p2gljtjmuq7f86q9"
+    }
+  ]
+}

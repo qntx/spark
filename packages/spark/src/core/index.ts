@@ -1,5 +1,7 @@
 export { sparkNetworkConfig } from "./network.ts";
 export { encodeSparkAddress, decodeSparkAddress, verifySparkAddressSignature } from "./address.ts";
+export { encodeTokenIdentifier, decodeTokenIdentifier } from "./token-identifier.ts";
+export type { SparkTokenIdentifierData } from "./token-identifier.ts";
 export { decodeBolt11, isExpired } from "./bolt11.ts";
 export type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "./network.ts";
 export type { SparkAddress } from "./address.ts";

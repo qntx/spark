@@ -9,6 +9,8 @@ export {
   encodeSparkAddress,
   decodeSparkAddress,
   decodeBolt11,
+  decodeTokenIdentifier,
+  encodeTokenIdentifier,
   isExpired,
   verifySparkAddressSignature,
 } from "./core/index.ts";
@@ -19,6 +21,7 @@ export type {
   SparkAddress,
   SparkInvoiceFields,
   SparkPayment,
+  SparkTokenIdentifierData,
 } from "./core/index.ts";
 export type { Bolt11Invoice, Bolt11Network } from "./core/index.ts";
 export { createSparkClient } from "./client/index.ts";
