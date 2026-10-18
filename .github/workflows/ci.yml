@@ -93,6 +93,10 @@ jobs:
       - run: bun scripts/sync-proto.ts --check
       - run: bun run gen:proto
       - run: git diff --exit-code packages/spark/src/proto/gen proto/
+      # nitrogen/generated is committed: re-running the codegen must be a no-op.
+      - run: bun run codegen
+        working-directory: packages/spark-native
+      - run: git diff --exit-code packages/spark-native/nitrogen
 
   # Generated surfaces must be regenerated, not edited: the committed header
   # is a contract (`qntx_spark.h`). proto regen is the `generated` job above.
