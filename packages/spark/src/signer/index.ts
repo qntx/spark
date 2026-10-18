@@ -1,4 +1,6 @@
 export { createSparkSigner, sparkAccountKey } from "./local.ts";
+export { createLnurlAuthSigner, lnurlAuthRootKey } from "./lnurl-auth.ts";
+export type { LnurlAuthSigner } from "./lnurl-auth.ts";
 export type {
   FrostAggregateJob,
   FrostSignJob,

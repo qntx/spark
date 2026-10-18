@@ -115,5 +115,10 @@ test("lnurl runtime exports are exactly the LNURL protocol surface", () => {
 });
 
 test("signer runtime exports are exactly the signer factory surface", () => {
-  expect(names(signer)).toStrictEqual(["createSparkSigner", "sparkAccountKey"]);
+  expect(names(signer)).toStrictEqual([
+    "createLnurlAuthSigner",
+    "createSparkSigner",
+    "lnurlAuthRootKey",
+    "sparkAccountKey",
+  ]);
 });

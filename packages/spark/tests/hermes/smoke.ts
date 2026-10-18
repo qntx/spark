@@ -37,6 +37,20 @@ const DERIVATION = {
   leaf: "0247a58a9af49c825fe343f3d270aad5d77ac567a12b9bff4044e23db9d3369e31",
 };
 
+/**
+ * First case of `vectors/lnurl-auth.json` (LUD-05 derivation replayed from the Breez SDK by
+ * `crates/interop/tests/lnurl_auth.rs`).
+ */
+const LNURL_AUTH = {
+  rootKey:
+    "073c09c9d514a456addfb05479736383270d120ae88f20bd841f48e0457cec8c1605e57d7613bb1d44d1bd18b1d44b5f60f21eae739f57eedda920623bc98d85",
+  domain: "site.com",
+  k1: "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+  linkingKey: "027da5d64331f61260eb8e2b356403446555f525bc7dc35b991ec1447e4f58991f",
+  signature:
+    "3045022100fea478533fe923d9cc48633de6473e244b0c54d8de69fb77616b9ade3a5dbccd022074975d5d7f8356330b97b3b1aa99babd426075eb37d92f70a2e19e83fcce6103",
+};
+
 /** First case of `vectors/transactions.json` `multiInputSighash`. */
 const TARGET = {
   transaction: hexToBytes(
@@ -149,4 +163,21 @@ export async function main(): Promise<void> {
   }
   print(`hermes timing: 10 key-spend sighashes ${Date.now() - started}ms`);
   sparkSigner.dispose();
+
+  // LUD-05: the linking-key derivation and the RFC-6979 DER signature are byte-exact against the
+  // interop vector, covering HDKey + hmac + secp256k1 under Hermes.
+  const authRoot = signer.lnurlAuthRootKey(hexToBytes(DERIVATION.seed));
+  assert(bytesToHex(authRoot) === LNURL_AUTH.rootKey, "lnurl-auth root key matches vector");
+  const authSigner = signer.createLnurlAuthSigner({ rootKey: authRoot });
+  assert(
+    bytesToHex(await authSigner.linkingKey(LNURL_AUTH.domain)) === LNURL_AUTH.linkingKey,
+    "lnurl-auth linking key matches vector",
+  );
+  const { signature: authSig } = await authSigner.sign({
+    domain: LNURL_AUTH.domain,
+    k1: hexToBytes(LNURL_AUTH.k1),
+  });
+  assert(bytesToHex(authSig) === LNURL_AUTH.signature, "lnurl-auth signature matches vector");
+  authSigner.dispose();
+  authRoot.fill(0);
 }
