@@ -20,6 +20,8 @@ export async function sendTransfer(
     readonly transferId: string;
     readonly leaves: ReadonlyArray<SparkLeaf>;
     readonly receiverIdentityPublicKey: Uint8Array;
+    /** The invoice address string this transfer pays, forwarded to `start_transfer_v2`. */
+    readonly sparkInvoice?: string;
     readonly call?: CallOptions;
   },
 ): Promise<SparkTransfer> {
@@ -92,6 +94,7 @@ export async function sendTransfer(
       ownerIdentityPublicKey: await signer.identityPublicKey(),
       receiverIdentityPublicKey: options.receiverIdentityPublicKey,
       transferPackage,
+      sparkInvoice: options.sparkInvoice ?? "",
     },
     options.call,
   );

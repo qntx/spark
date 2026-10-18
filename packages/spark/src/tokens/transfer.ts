@@ -17,6 +17,7 @@ import type {
   SparkTokenService,
 } from "../proto/gen/spark_token_pb.ts";
 import {
+  InvoiceAttachmentSchema,
   PartialTokenOutputSchema,
   PartialTokenTransactionSchema,
   SignatureWithIndexSchema,
@@ -126,7 +127,8 @@ function partialOutput(
  * Builds the V3 `PartialTokenTransaction` for a transfer (upstream
  * `constructPartialTransferTokenTransaction`): inputs sorted by previous vout, receiver outputs
  * first, change back to the sender when selected inputs exceed the requested amount, metadata from
- * the network config. No invoice attachments.
+ * the network config. Invoice attachments are attached sorted by plain string order, matching
+ * upstream sortInvoiceAttachments.
  */
 export function buildTransferPartial(options: {
   readonly selectedOutputs: ReadonlyArray<SparkTokenOutput>;
@@ -138,6 +140,8 @@ export function buildTransferPartial(options: {
   readonly operators: ReadonlyArray<SparkOperatorConfig>;
   readonly tokens: TokenNetworkParams;
   readonly now: () => number;
+  /** Invoice address strings this transfer pays; attached sorted by plain string order. */
+  readonly invoiceAttachments?: ReadonlyArray<string>;
 }): PartialTokenTransaction {
   const inputs = [...options.selectedOutputs].sort(
     (a, b) => a.prevTransactionVout - b.prevTransactionVout,
@@ -179,7 +183,9 @@ export function buildTransferPartial(options: {
       sparkOperatorIdentityPublicKeys: sortedOperatorKeys(options.operators),
       validityDurationSeconds: BigInt(options.tokens.validityDurationSeconds),
       clientCreatedTimestamp: timestampFromMs(options.now()),
-      invoiceAttachments: [],
+      invoiceAttachments: [...(options.invoiceAttachments ?? [])]
+        .sort()
+        .map((sparkInvoice) => create(InvoiceAttachmentSchema, { sparkInvoice })),
     }),
     tokenInputs: {
       case: "transferInput",
@@ -243,12 +249,29 @@ function sameInputs(final: FinalTokenTransaction, partial: PartialTokenTransacti
   return final.tokenInputs.case === partial.tokenInputs.case;
 }
 
+function sameInvoiceAttachments(
+  final: FinalTokenTransaction,
+  partial: PartialTokenTransaction,
+): boolean {
+  const expected = (partial.tokenTransactionMetadata?.invoiceAttachments ?? []).map(
+    (attachment) => attachment.sparkInvoice,
+  );
+  const actual = (final.tokenTransactionMetadata?.invoiceAttachments ?? []).map(
+    (attachment) => attachment.sparkInvoice,
+  );
+  return (
+    expected.length === actual.length &&
+    expected.every((invoice, index) => invoice === actual[index])
+  );
+}
+
 /**
  * `broadcast_transaction` — signs the partial transaction's hash once per input index with the
  * identity key (BIP-340), submits it to the coordinator, and verifies the returned final
  * transaction carries the same inputs, outputs (order, owner, identifier, amount, withdraw
- * bond/locktime), network, operator set, and validity duration. Returns the hex
- * `hashFinalTokenTransaction` plus the raw token identifier the SO returns on create transactions.
+ * bond/locktime), invoice attachments, network, operator set, and validity duration. Returns the
+ * hex `hashFinalTokenTransaction` plus the raw token identifier the SO returns on create
+ * transactions.
  */
 export async function broadcastPartialTokenTransaction(options: {
   readonly token: Client<typeof SparkTokenService>;
@@ -295,6 +318,7 @@ export async function broadcastPartialTokenTransaction(options: {
     final.version !== partial.version ||
     !sameInputs(final, partial) ||
     !sameOutputs(final, partial) ||
+    !sameInvoiceAttachments(final, partial) ||
     finalMetadata === undefined ||
     finalMetadata.network !== metadata.network ||
     finalMetadata.validityDurationSeconds !== metadata.validityDurationSeconds ||

@@ -15,6 +15,7 @@ import { leavesBalance } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { createClientContext } from "./context.ts";
 import { createDeposits } from "./deposits.ts";
+import { createInvoices } from "./invoices.ts";
 import { createTokens } from "./tokens.ts";
 import { createTransfers } from "./transfers.ts";
 import { createWithdrawals } from "./withdrawals.ts";
@@ -66,6 +67,42 @@ export type SparkClient = {
       readonly receiver: string | Uint8Array;
     }) => Promise<string>;
   };
+  readonly invoices: {
+    /**
+     * Creates a signed sats invoice address for this identity. `amountSats` omitted means the payer
+     * picks the amount.
+     */
+    readonly createSats: (options?: {
+      readonly amountSats?: number;
+      readonly memo?: string;
+      readonly senderPublicKey?: Uint8Array;
+      readonly expiresAtMs?: number;
+    }) => Promise<string>;
+    /**
+     * Creates a signed token invoice address for this identity. `tokenIdentifier` is the bech32m
+     * identifier; omit it (with `amount`) for any-token invoices.
+     */
+    readonly createTokens: (options?: {
+      readonly tokenIdentifier?: string;
+      readonly amount?: bigint;
+      readonly memo?: string;
+      readonly senderPublicKey?: Uint8Array;
+      readonly expiresAtMs?: number;
+    }) => Promise<string>;
+    /**
+     * Pays a Spark invoice address. `amount` is required for open invoices and must equal a fixed
+     * invoice amount when set. Resolves to the `SparkTransfer` for sats invoices or the hex final
+     * token transaction hash for token invoices.
+     */
+    readonly pay: (
+      invoice: string,
+      options?: { readonly amount?: number | bigint },
+    ) => Promise<SparkTransfer | string>;
+    /** Coordinator `query_spark_invoices` statuses for the given invoice address strings. */
+    readonly status: (
+      invoices: ReadonlyArray<string>,
+    ) => Promise<ReadonlyArray<SparkInvoiceStatus>>;
+  };
   /** SSP leaves-swap fee quote in sats. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
   readonly deposits: {
@@ -102,6 +139,17 @@ export type SparkClient = {
   readonly events: (signal?: AbortSignal) => AsyncIterable<SparkEvent>;
   /** Aborts all outstanding event streams (including caller-signaled ones). */
   readonly close: () => void;
+};
+
+/** One entry of `query_spark_invoices`: the invoice string, its status name, and the payment. */
+export type SparkInvoiceStatus = {
+  readonly invoice: string;
+  /** `InvoiceStatus` enum name, e.g. `"PENDING"`, `"FINALIZED"`. */
+  readonly status: string;
+  /** Hex transfer id when a sats transfer paid the invoice. */
+  readonly satsTransferId?: string | undefined;
+  /** Hex `hashFinalTokenTransaction` when a token transfer paid the invoice. */
+  readonly tokenTransactionHash?: string | undefined;
 };
 
 export type SparkClientOptions = {
@@ -144,12 +192,13 @@ export function createSparkClientWith(
     });
   const abort = new AbortController();
   const store = options.store ?? createMemorySparkStore();
+  const now = options.now ?? (() => Date.now());
 
   const deps: ConnectionDeps = {
     signer: options.signer,
     fetch: options.fetch,
     random,
-    ...(options.now === undefined ? {} : { now: options.now }),
+    now,
     ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
     ...(seams.transportFactory === undefined ? {} : { transportFactory: seams.transportFactory }),
   };
@@ -168,7 +217,7 @@ export function createSparkClientWith(
     operators,
     store,
     random,
-    ...(options.now === undefined ? {} : { now: options.now }),
+    now,
     depositCoordinator: {
       spark: coordinatorConnection.spark,
       signer: options.signer,
@@ -188,7 +237,7 @@ export function createSparkClientWith(
       graphqlPath: ssp.graphqlPath,
       signer: options.signer,
       fetch: options.fetch,
-      ...(options.now === undefined ? {} : { now: options.now }),
+      now,
     }),
   });
 
@@ -248,6 +297,7 @@ export function createSparkClientWith(
     leaves: context.leaves,
     transfers: createTransfers(context),
     tokens: createTokens(context),
+    invoices: createInvoices(context),
     swapFeeEstimate: async (amountSats) => context.sspClient.swapFeeEstimate(amountSats),
     deposits: createDeposits(context),
     withdrawals: createWithdrawals(context),
