@@ -1,51 +1,23 @@
-import { equalBytes } from "@noble/curves/utils.js";
-
 import { connectOperator, sparkEvents } from "../connection/index.ts";
 import type { ConnectionDeps, OperatorConnection, SparkEvent } from "../connection/index.ts";
-import { decodeSparkAddress, verifySparkAddressSignature } from "../core/address.ts";
-import {
-  buildKeySpendSweep,
-  finalizeKeySpend,
-  p2trScriptFromPublicKey,
-  parseTransaction,
-} from "../core/bitcoin/index.ts";
 import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
-import { decodeTokenIdentifier } from "../core/token-identifier.ts";
-import { uuidv7 } from "../core/uuid.ts";
-import {
-  claimDeposit,
-  generateDepositAddress,
-  queryUnusedDepositAddresses,
-} from "../deposit/index.ts";
-import type { DepositCoordinator, UnusedDepositAddress } from "../deposit/index.ts";
+import type { UnusedDepositAddress } from "../deposit/index.ts";
 import { SparkInputError } from "../errors/index.ts";
 import { createMemorySparkStore } from "../exit/store.ts";
 import type { SparkStore } from "../exit/store.ts";
-import { queryExitChains, unilateralExitTransactions } from "../exit/unilateral.ts";
 import type { ExitTransaction } from "../exit/unilateral.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
-import {
-  buildTransferPartial,
-  broadcastPartialTokenTransaction,
-  queryTokenOutputs,
-  selectTokenOutputs,
-  tokenBalances,
-} from "../tokens/index.ts";
 import type { SparkTokenBalance, SparkTokenOutput } from "../tokens/index.ts";
-import {
-  claimTransfer,
-  CLAIMABLE_TRANSFER_STATUSES,
-  queryAllTransfers,
-  queryPendingTransfers,
-  selectLeavesExact,
-  sendTransfer,
-} from "../transfer/index.ts";
-import type { SparkTransfer, TransferCoordinator } from "../transfer/index.ts";
-import { leavesBalance, queryLeaves } from "../tree/index.ts";
+import type { SparkTransfer } from "../transfer/index.ts";
+import { leavesBalance } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
-import { renewLeaf, renewalKind } from "../tree/renew.ts";
+import { createClientContext } from "./context.ts";
+import { createDeposits } from "./deposits.ts";
+import { createTokens } from "./tokens.ts";
+import { createTransfers } from "./transfers.ts";
+import { createWithdrawals } from "./withdrawals.ts";
 
 export type SparkClient = {
   /** The 33-byte compressed secp256k1 identity public key. */
@@ -188,92 +160,37 @@ export function createSparkClientWith(
   }
   const coordinatorConnection: OperatorConnection = connectOperator(coordinator, deps);
 
-  const depositCoordinator: DepositCoordinator = {
-    spark: coordinatorConnection.spark,
+  const context = createClientContext({
+    coordinatorConnection,
     signer: options.signer,
     network: options.network,
+    config,
     operators,
-    coordinatorIdentifier: config.coordinator,
-  };
-
-  const transferCoordinator: TransferCoordinator = {
-    spark: coordinatorConnection.spark,
-    signer: options.signer,
-    network: options.network,
-    operators,
-    threshold: config.threshold,
-  };
-
-  const sspClient = createSspClient({
-    baseUrl: ssp.baseUrl,
-    graphqlPath: ssp.graphqlPath,
-    signer: options.signer,
-    fetch: options.fetch,
+    store,
+    random,
     ...(options.now === undefined ? {} : { now: options.now }),
-  });
-
-  const storeChainsFor = async (forLeaves: ReadonlyArray<SparkLeaf>): Promise<void> =>
-    store.putExitChains(
-      await queryExitChains({
-        spark: coordinatorConnection.spark,
-        network: options.network,
-        leaves: forLeaves,
-      }),
-    );
-
-  // Syncing leaves is the reconciliation point: refresh every leaf's exit chain and drop
-  // chains for leaves the coordinator no longer reports as ours.
-  const leaves = async (): Promise<ReadonlyArray<SparkLeaf>> => {
-    const current = await queryLeaves({
+    depositCoordinator: {
       spark: coordinatorConnection.spark,
-      ownerIdentityPublicKey: await options.signer.identityPublicKey(),
+      signer: options.signer,
       network: options.network,
-    });
-    await storeChainsFor(current);
-    const live = new Set(current.map((leaf) => leaf.id));
-    const chains = await store.exitChains();
-    const stale = chains.map((chain) => chain.leafId).filter((leafId) => !live.has(leafId));
-    if (stale.length > 0) {
-      await store.deleteExitChains(stale);
-    }
-    return current;
-  };
-
-  /** Resolves a spark address string or raw identity public key to the receiver's identity key. */
-  const receiverIdentityKey = (receiver: string | Uint8Array): Uint8Array => {
-    if (typeof receiver !== "string") {
-      if (receiver.length !== 33) {
-        throw new SparkInputError("send: receiver identity public key must be 33 bytes");
-      }
-      return receiver;
-    }
-    const address = decodeSparkAddress(receiver);
-    if (address.network !== options.network) {
-      throw new SparkInputError(`send: receiver address is for ${address.network}`);
-    }
-    if (address.invoice !== undefined) {
-      throw new SparkInputError("send: invoice-carrying addresses are not supported yet");
-    }
-    if (
-      address.signature !== undefined &&
-      address.signature.length > 0 &&
-      !verifySparkAddressSignature(address)
-    ) {
-      throw new SparkInputError("send: receiver address signature is invalid");
-    }
-    return address.identityPublicKey;
-  };
-
-  /** Decodes a bech32m token identifier and rejects other networks' prefixes. */
-  const tokenIdentifierForNetwork = (text: string): Uint8Array => {
-    const decoded = decodeTokenIdentifier(text);
-    if (decoded.network !== options.network) {
-      throw new SparkInputError(
-        `token identifier is for ${decoded.network}, expected ${options.network}`,
-      );
-    }
-    return decoded.tokenIdentifier;
-  };
+      operators,
+      coordinatorIdentifier: config.coordinator,
+    },
+    transferCoordinator: {
+      spark: coordinatorConnection.spark,
+      signer: options.signer,
+      network: options.network,
+      operators,
+      threshold: config.threshold,
+    },
+    sspClient: createSspClient({
+      baseUrl: ssp.baseUrl,
+      graphqlPath: ssp.graphqlPath,
+      signer: options.signer,
+      fetch: options.fetch,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    }),
+  });
 
   /**
    * Events against the coordinator. The caller's signal and the client's close() are linked into a
@@ -327,184 +244,13 @@ export function createSparkClientWith(
 
   return {
     identityPublicKey: async () => options.signer.identityPublicKey(),
-    balance: async () => leavesBalance(await leaves()),
-    leaves,
-    transfers: {
-      pending: async () =>
-        queryPendingTransfers({
-          spark: coordinatorConnection.spark,
-          identityPublicKey: await options.signer.identityPublicKey(),
-          network: options.network,
-        }),
-      list: async (listOptions) =>
-        queryAllTransfers({
-          spark: coordinatorConnection.spark,
-          identityPublicKey: await options.signer.identityPublicKey(),
-          network: options.network,
-          ...(listOptions?.limit === undefined ? {} : { limit: listOptions.limit }),
-          ...(listOptions?.offset === undefined ? {} : { offset: listOptions.offset }),
-        }),
-      send: async (sendOptions) => {
-        const receiver = receiverIdentityKey(sendOptions.receiver);
-        const selected = selectLeavesExact(await leaves(), sendOptions.amountSats);
-        // Renew any leaf whose refund timelock is spent before handing it to the receiver.
-        const sendLeaves: SparkLeaf[] = [];
-        for (const leaf of selected) {
-          if (renewalKind(leaf) === undefined) {
-            sendLeaves.push(leaf);
-            continue;
-          }
-          // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order before send
-          const renewed = await renewLeaf({
-            spark: coordinatorConnection.spark,
-            signer: options.signer,
-            network: options.network,
-            leaf,
-          });
-          sendLeaves.push(renewed);
-        }
-        const sent = await sendTransfer({
-          ...transferCoordinator,
-          transferId: uuidv7(random, options.now),
-          leaves: sendLeaves,
-          receiverIdentityPublicKey: receiver,
-        });
-        await store.deleteExitChains(sendLeaves.map((leaf) => leaf.id));
-        return sent;
-      },
-      claim: async (transfer) => {
-        const claimed = await claimTransfer({ ...transferCoordinator, transfer });
-        await storeChainsFor(claimed);
-        return claimed;
-      },
-      claimPending: async () => {
-        const pending = await queryPendingTransfers({
-          spark: coordinatorConnection.spark,
-          identityPublicKey: await options.signer.identityPublicKey(),
-          network: options.network,
-        });
-        const claimed: SparkLeaf[] = [];
-        for (const transfer of pending) {
-          if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
-            continue;
-          }
-          // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order; each consumes signer nonces
-          const leaves = await claimTransfer({ ...transferCoordinator, transfer });
-          // Persist each claim's chains before the next, so a later failure loses nothing.
-          // oxlint-disable-next-line no-await-in-loop
-          await storeChainsFor(leaves);
-          claimed.push(...leaves);
-        }
-        return claimed;
-      },
-    },
-    tokens: {
-      outputs: async (outputsOptions) => {
-        const identifier =
-          outputsOptions?.tokenIdentifier === undefined
-            ? undefined
-            : tokenIdentifierForNetwork(outputsOptions.tokenIdentifier);
-        return queryTokenOutputs({
-          token: coordinatorConnection.token,
-          ownerPublicKey: await options.signer.identityPublicKey(),
-          network: options.network,
-          tokenIdentifiers: identifier === undefined ? [] : [identifier],
-        });
-      },
-      balances: async () =>
-        tokenBalances(
-          await queryTokenOutputs({
-            token: coordinatorConnection.token,
-            ownerPublicKey: await options.signer.identityPublicKey(),
-            network: options.network,
-          }),
-          options.network,
-        ),
-      transfer: async (transferOptions) => {
-        const identifier = tokenIdentifierForNetwork(transferOptions.tokenIdentifier);
-        const receiver = receiverIdentityKey(transferOptions.receiver);
-        const owned = await queryTokenOutputs({
-          token: coordinatorConnection.token,
-          ownerPublicKey: await options.signer.identityPublicKey(),
-          network: options.network,
-          tokenIdentifiers: [identifier],
-        });
-        const selected = selectTokenOutputs(owned, transferOptions.amount);
-        const partial = buildTransferPartial({
-          selectedOutputs: selected,
-          receiverPublicKey: receiver,
-          tokenIdentifier: identifier,
-          amount: transferOptions.amount,
-          senderPublicKey: await options.signer.identityPublicKey(),
-          network: options.network,
-          operators,
-          tokens: config.tokens,
-          now: options.now ?? (() => Date.now()),
-        });
-        const result = await broadcastPartialTokenTransaction({
-          token: coordinatorConnection.token,
-          signer: options.signer,
-          partial,
-          network: options.network,
-          operators,
-          tokens: config.tokens,
-        });
-        return result.transactionHash;
-      },
-    },
-    swapFeeEstimate: async (amountSats) => sspClient.swapFeeEstimate(amountSats),
-    deposits: {
-      newAddress: async () =>
-        generateDepositAddress({
-          ...depositCoordinator,
-          leafId: uuidv7(random, options.now),
-        }),
-      unused: async () => queryUnusedDepositAddresses(depositCoordinator),
-      claim: async (claimOptions) => {
-        const leaf = await claimDeposit({
-          ...depositCoordinator,
-          transaction: claimOptions.transaction,
-          ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
-        });
-        await storeChainsFor([leaf]);
-        return leaf;
-      },
-    },
-    withdrawals: {
-      unilateralExit: async (leafIds) => {
-        const { transactions, chains } = await unilateralExitTransactions({
-          spark: coordinatorConnection.spark,
-          network: options.network,
-          leafIds,
-        });
-        await store.putExitChains(chains);
-        return transactions;
-      },
-      sweepRefund: async ({ leafId, refundTx, destinationScript, feeRateSatPerVbyte }) => {
-        const key = { type: "leaf" as const, leafId };
-        const [publicKey] = await options.signer.publicKeys([key]);
-        if (publicKey === undefined) {
-          throw new SparkInputError(`sweepRefund: no public key for leaf ${leafId}`);
-        }
-        const output = parseTransaction(refundTx).getOutput(0);
-        if (
-          output.script === undefined ||
-          !equalBytes(output.script, p2trScriptFromPublicKey(publicKey, options.network))
-        ) {
-          throw new SparkInputError(
-            `sweepRefund: refund tx output 0 does not pay leaf ${leafId}'s key-path script`,
-          );
-        }
-        const sweep = buildKeySpendSweep({
-          prevTx: refundTx,
-          vout: 0,
-          destinationScript,
-          feeRateSatPerVbyte,
-        });
-        const signature = await options.signer.signKeySpend(key, sweep.target);
-        return finalizeKeySpend(sweep.transaction, signature);
-      },
-    },
+    balance: async () => leavesBalance(await context.leaves()),
+    leaves: context.leaves,
+    transfers: createTransfers(context),
+    tokens: createTokens(context),
+    swapFeeEstimate: async (amountSats) => context.sspClient.swapFeeEstimate(amountSats),
+    deposits: createDeposits(context),
+    withdrawals: createWithdrawals(context),
     events,
     close() {
       abort.abort();
