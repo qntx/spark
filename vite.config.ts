@@ -38,6 +38,43 @@ const sparkCryptoOnlyImports = {
   ],
 };
 
+// Node- and browser-only globals banned from library source (@types/node
+// would otherwise let them typecheck silently). URL and URLSearchParams are
+// added per-file-set below: React Native's URL polyfill
+// (Libraries/Blob/URL.js) does not validate input and never writes
+// searchParams mutations back to href, so library code must use a strict
+// parser — but the wasm loaders legitimately resolve assets with a real URL.
+const platformNeutralGlobals = [
+  { name: "Buffer", message: "Node-only global — use Uint8Array" },
+  { name: "process", message: "Node-only global — not available in browsers or Hermes" },
+  { name: "global", message: "Node-only global — use globalThis" },
+  { name: "require", message: "CJS-only — use import" },
+  { name: "module", message: "CJS-only global" },
+  { name: "__dirname", message: "CJS-only global" },
+  { name: "__filename", message: "CJS-only global" },
+  { name: "setImmediate", message: "Node-only global — use setTimeout" },
+  { name: "clearImmediate", message: "Node-only global — use clearTimeout" },
+  { name: "window", message: "browser-only global — use globalThis" },
+  { name: "document", message: "browser-only global — use globalThis" },
+  { name: "navigator", message: "browser-only global — use globalThis" },
+  { name: "location", message: "browser-only global — use globalThis" },
+  { name: "localStorage", message: "browser-only global — inject a store" },
+  { name: "sessionStorage", message: "browser-only global — inject a store" },
+];
+
+const restrictedUrlGlobals = [
+  {
+    name: "URL",
+    message:
+      "React Native's URL polyfill (Libraries/Blob/URL.js) is a regex stub that does not validate and ignores searchParams mutations — parse strictly instead",
+  },
+  {
+    name: "URLSearchParams",
+    message:
+      "React Native's URLSearchParams is not linked to its URL's href — parse strictly instead",
+  },
+];
+
 const config: UserConfig = defineConfig({
   defaultPackage: {
     pack: "./packages/spark",
@@ -157,21 +194,8 @@ const config: UserConfig = defineConfig({
           // globalThis lookups instead.
           "eslint/no-restricted-globals": [
             "error",
-            { name: "Buffer", message: "Node-only global — use Uint8Array" },
-            { name: "process", message: "Node-only global — not available in browsers or Hermes" },
-            { name: "global", message: "Node-only global — use globalThis" },
-            { name: "require", message: "CJS-only — use import" },
-            { name: "module", message: "CJS-only global" },
-            { name: "__dirname", message: "CJS-only global" },
-            { name: "__filename", message: "CJS-only global" },
-            { name: "setImmediate", message: "Node-only global — use setTimeout" },
-            { name: "clearImmediate", message: "Node-only global — use clearTimeout" },
-            { name: "window", message: "browser-only global — use globalThis" },
-            { name: "document", message: "browser-only global — use globalThis" },
-            { name: "navigator", message: "browser-only global — use globalThis" },
-            { name: "location", message: "browser-only global — use globalThis" },
-            { name: "localStorage", message: "browser-only global — inject a store" },
-            { name: "sessionStorage", message: "browser-only global — inject a store" },
+            ...platformNeutralGlobals,
+            ...restrictedUrlGlobals,
           ],
           "eslint/no-restricted-imports": ["error", platformNeutralImports],
         },
@@ -189,8 +213,16 @@ const config: UserConfig = defineConfig({
         },
       },
       {
-        // Platform shim: wasm loading under Node legitimately needs builtins
-        // (still bound to the @qntx/spark/crypto boundary).
+        // Platform shims: the wasm loaders resolve the .wasm asset through a
+        // real WHATWG URL (Node and browsers both ship one), and the Node
+        // loader legitimately needs builtins (still bound to the
+        // @qntx/spark/crypto boundary).
+        files: ["packages/spark-wasm/src/load.ts", "packages/spark-wasm/src/load.browser.ts"],
+        rules: {
+          "eslint/no-restricted-globals": ["error", ...platformNeutralGlobals],
+        },
+      },
+      {
         files: ["packages/spark-wasm/src/load.ts"],
         rules: {
           "eslint/no-restricted-imports": ["error", sparkCryptoOnlyImports],

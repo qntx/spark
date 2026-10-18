@@ -2,6 +2,7 @@ import { expect, test } from "vite-plus/test";
 
 import * as crypto from "../src/crypto/index.ts";
 import * as root from "../src/index.ts";
+import * as lnurl from "../src/lnurl/index.ts";
 import * as signer from "../src/signer/index.ts";
 
 // Type-only exports cannot be enumerated at runtime; re-exporting each expected
@@ -17,6 +18,14 @@ export type {
   Bolt11Network,
 } from "../src/index.ts";
 export type { SparkCrypto } from "../src/crypto/index.ts";
+export type {
+  JsonObject,
+  LnurlInvoice,
+  LnurlPayRequest,
+  LnurlResolved,
+  LnurlSuccessAction,
+  LnurlWithdrawRequest,
+} from "../src/lnurl/index.ts";
 export type {
   FrostAggregateJob,
   FrostSignJob,
@@ -87,6 +96,22 @@ test("root runtime exports are exactly the core surface", () => {
 test("crypto runtime exports are exactly the backend contract", () => {
   expect(names(crypto)).toStrictEqual(["SPARK_ABI_VERSION", "SparkCryptoError", "SparkError"]);
   expect(crypto.SPARK_ABI_VERSION).toBe(1);
+});
+
+test("lnurl runtime exports are exactly the LNURL protocol surface", () => {
+  expect(names(lnurl)).toStrictEqual([
+    "checkLnurlUrl",
+    "decodeLnurl",
+    "encodeLnurl",
+    "lightningAddressUrl",
+    "lnurlGetJson",
+    "parseLnurlPayRequest",
+    "parseLnurlWithdrawRequest",
+    "parseSuccessAction",
+    "requestInvoice",
+    "resolveLnurl",
+    "submitWithdraw",
+  ]);
 });
 
 test("signer runtime exports are exactly the signer factory surface", () => {
