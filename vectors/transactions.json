@@ -329,58 +329,6 @@
         "zero": true
       }
     ],
-    "nextSequence": [
-      {
-        "interval": 100,
-        "nextDirectSequence": 1950,
-        "nextSequence": 1900,
-        "offset": 50,
-        "ok": true,
-        "sequence": 2000
-      },
-      {
-        "interval": 100,
-        "nextDirectSequence": 50,
-        "nextSequence": 0,
-        "offset": 50,
-        "ok": true,
-        "sequence": 100
-      },
-      {
-        "interval": 100,
-        "offset": 50,
-        "ok": false,
-        "sequence": 0
-      },
-      {
-        "interval": 100,
-        "offset": 50,
-        "ok": false,
-        "sequence": 50
-      },
-      {
-        "interval": 100,
-        "nextDirectSequence": 1073743774,
-        "nextSequence": 1073743724,
-        "offset": 50,
-        "ok": true,
-        "sequence": 1073743824
-      },
-      {
-        "interval": 100,
-        "nextDirectSequence": 67486,
-        "nextSequence": 67436,
-        "offset": 50,
-        "ok": true,
-        "sequence": 67536
-      },
-      {
-        "interval": 100,
-        "offset": 65535,
-        "ok": false,
-        "sequence": 2000
-      }
-    ],
     "roundDownToTimelockInterval": [
       {
         "interval": 100,

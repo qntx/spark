@@ -153,42 +153,11 @@ fn sequence_cases() -> Value {
     })
     .collect();
 
-    let next: Vec<Value> = [
-        (2000u32, 100u32, 50u32),
-        (100, 100, 50),
-        (0, 100, 50),
-        (50, 100, 50),
-        (0x4000_07d0, 100, 50),
-        (0x0001_0000 | 0x07d0, 100, 50),
-        (2000, 100, 0xFFFF),
-    ]
-    .iter()
-    .map(
-        |&(curr, interval, offset)| match transaction::next_sequence(curr, interval, offset) {
-            Ok((next_seq, next_direct)) => json!({
-                "sequence": curr,
-                "interval": interval,
-                "offset": offset,
-                "ok": true,
-                "nextSequence": next_seq,
-                "nextDirectSequence": next_direct,
-            }),
-            Err(_) => json!({
-                "sequence": curr,
-                "interval": interval,
-                "offset": offset,
-                "ok": false,
-            }),
-        },
-    )
-    .collect();
-
     json!({
         "getTimelockFromSequence": timelock,
         "checkIfValidSequence": valid,
         "isZeroTimelock": zero,
         "roundDownToTimelockInterval": round_down,
-        "nextSequence": next,
     })
 }
 

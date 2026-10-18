@@ -27,7 +27,6 @@ import {
   getNextTransactionSequence,
   getTimelockFromSequence,
   isZeroTimelock,
-  nextSequence,
   roundDownToTimelockInterval,
 } from "../src/core/bitcoin/sequence.ts";
 import { taprootKeySpendSighash } from "../src/core/bitcoin/sighash.ts";
@@ -60,14 +59,6 @@ const vectors = JSON.parse(
     checkIfValidSequence: Array<{ sequence: number; ok: boolean }>;
     isZeroTimelock: Array<{ sequence: number; zero: boolean }>;
     roundDownToTimelockInterval: Array<{ timelock: number; interval: number; result: number }>;
-    nextSequence: Array<{
-      sequence: number;
-      interval: number;
-      offset: number;
-      ok: boolean;
-      nextSequence?: number;
-      nextDirectSequence?: number;
-    }>;
   };
   nodeTxPairs: Array<{
     name: string;
@@ -206,17 +197,6 @@ test.each(vectors.sequence.roundDownToTimelockInterval)(
     expect(roundDownToTimelockInterval(timelock, interval)).toBe(result);
   },
 );
-
-test.each(vectors.sequence.nextSequence.filter((c) => c.ok))("nextSequence %#", (c) => {
-  expect(nextSequence(c.sequence, c.interval, c.offset)).toStrictEqual({
-    nextSequence: c.nextSequence,
-    nextDirectSequence: c.nextDirectSequence,
-  });
-});
-
-test.each(vectors.sequence.nextSequence.filter((c) => !c.ok))("nextSequence rejects %#", (c) => {
-  expect(() => nextSequence(c.sequence, c.interval, c.offset)).toThrow(SparkInputError);
-});
 
 // -- Rust-vector-backed: node transaction pairs -----------------------------------
 

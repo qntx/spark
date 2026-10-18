@@ -1,5 +1,6 @@
 import { connectOperator, sparkEvents } from "../connection/index.ts";
 import type { ConnectionDeps, OperatorConnection, SparkEvent } from "../connection/index.ts";
+import { decodeSparkAddress, verifySparkAddressSignature } from "../core/address.ts";
 import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
 import { uuidv7 } from "../core/uuid.ts";
@@ -12,8 +13,14 @@ import type { DepositCoordinator, UnusedDepositAddress } from "../deposit/index.
 import { SparkInputError } from "../errors/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
-import { queryAllTransfers, queryPendingTransfers } from "../transfer/index.ts";
-import type { SparkTransfer } from "../transfer/index.ts";
+import {
+  claimTransfer,
+  queryAllTransfers,
+  queryPendingTransfers,
+  selectLeavesExact,
+  sendTransfer,
+} from "../transfer/index.ts";
+import type { SparkTransfer, TransferCoordinator } from "../transfer/index.ts";
 import { leavesBalance, queryLeaves } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 
@@ -32,6 +39,19 @@ export type SparkClient = {
       readonly limit?: number;
       readonly offset?: number;
     }) => Promise<ReadonlyArray<SparkTransfer>>;
+    /**
+     * Sends exactly `amountSats` to `receiver` (a `spark1…`/`sparkrt1…` address string or a 33-byte
+     * identity public key) via `start_transfer_v2`. Selects AVAILABLE leaves summing exactly to the
+     * amount — leaf swaps arrive with S8, so other amounts are rejected for now.
+     */
+    readonly send: (sendOptions: {
+      readonly receiver: string | Uint8Array;
+      readonly amountSats: number;
+    }) => Promise<SparkTransfer>;
+    /** Verifies and claims a pending transfer addressed to this identity; returns the new leaves. */
+    readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;
+    /** Claims every pending incoming transfer; returns all new leaves. */
+    readonly claimPending: () => Promise<ReadonlyArray<SparkLeaf>>;
   };
   /** SSP leaves-swap fee quote in sats. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
@@ -116,6 +136,14 @@ export function createSparkClientWith(
     coordinatorIdentifier: config.coordinator,
   };
 
+  const transferCoordinator: TransferCoordinator = {
+    spark: coordinatorConnection.spark,
+    signer: options.signer,
+    network: options.network,
+    operators,
+    threshold: config.threshold,
+  };
+
   const sspClient = createSspClient({
     baseUrl: ssp.baseUrl,
     graphqlPath: ssp.graphqlPath,
@@ -136,6 +164,31 @@ export function createSparkClientWith(
    * per-stream AbortController via listeners (no AbortSignal.any — Hermes support is uncertain);
    * listeners are dropped when the stream ends.
    */
+  /** Resolves a spark address string or raw identity public key to the receiver's identity key. */
+  const receiverIdentityKey = (receiver: string | Uint8Array): Uint8Array => {
+    if (typeof receiver !== "string") {
+      if (receiver.length !== 33) {
+        throw new SparkInputError("send: receiver identity public key must be 33 bytes");
+      }
+      return receiver;
+    }
+    const address = decodeSparkAddress(receiver);
+    if (address.network !== options.network) {
+      throw new SparkInputError(`send: receiver address is for ${address.network}`);
+    }
+    if (address.invoice !== undefined) {
+      throw new SparkInputError("send: invoice-carrying addresses are not supported yet");
+    }
+    if (
+      address.signature !== undefined &&
+      address.signature.length > 0 &&
+      !verifySparkAddressSignature(address)
+    ) {
+      throw new SparkInputError("send: receiver address signature is invalid");
+    }
+    return address.identityPublicKey;
+  };
+
   const events = (callerSignal?: AbortSignal): AsyncIterable<SparkEvent> => {
     const controller = new AbortController();
     const stop = (): void => {
@@ -200,6 +253,32 @@ export function createSparkClientWith(
           ...(listOptions?.limit === undefined ? {} : { limit: listOptions.limit }),
           ...(listOptions?.offset === undefined ? {} : { offset: listOptions.offset }),
         }),
+      send: async (sendOptions) =>
+        sendTransfer({
+          ...transferCoordinator,
+          transferId: uuidv7(random, options.now),
+          leaves: selectLeavesExact(await leaves(), sendOptions.amountSats),
+          receiverIdentityPublicKey: receiverIdentityKey(sendOptions.receiver),
+        }),
+      claim: async (transfer) => claimTransfer({ ...transferCoordinator, transfer }),
+      claimPending: async () => {
+        const pending = await queryPendingTransfers({
+          spark: coordinatorConnection.spark,
+          identityPublicKey: await options.signer.identityPublicKey(),
+          network: options.network,
+        });
+        const claimAt = async (index: number): Promise<ReadonlyArray<SparkLeaf>> => {
+          const transfer = pending[index];
+          if (transfer === undefined) {
+            return [];
+          }
+          return [
+            ...(await claimTransfer({ ...transferCoordinator, transfer })),
+            ...(await claimAt(index + 1)),
+          ];
+        };
+        return claimAt(0);
+      },
     },
     swapFeeEstimate: async (amountSats) => sspClient.swapFeeEstimate(amountSats),
     deposits: {
