@@ -4,7 +4,7 @@ import { basename, join } from "node:path";
 
 type JsonObject = Record<string, unknown>;
 
-const IMPLEMENTATIONS = new Set(["rust", "wasm", "native-host", "ts"]);
+const IMPLEMENTATIONS = new Set(["rust", "wasm", "native", "native-host", "ts"]);
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -22,7 +22,7 @@ function asStrings(value: unknown): string[] {
  * Validates parity.json against the vectors/ tree and the referenced source files. Returns error
  * messages; an empty array means the file is consistent.
  *
- * Every capability lists the files behind each implementation target (`rust`, `wasm`,
+ * Every capability lists the files behind each implementation target (`rust`, `wasm`, `native`,
  * `native-host`, `ts`) as `{ module, tests }` plus the shared `vectors/` files it consumes.
  * Referenced paths must exist and every vector file (except README.md) must be claimed by some
  * capability.

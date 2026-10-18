@@ -53,6 +53,9 @@ const config: UserConfig = defineConfig({
       // stay byte-frozen. Generated protobuf output is never formatted.
       "**/*.toml",
       "vectors/**",
+      // Nitrogen spec DSL: oxfmt canonicalizes `interface X extends
+      // HybridObject` into an intersection type, which nitrogen cannot parse.
+      "packages/spark-native/src/specs/**",
       "fuzz/**",
       "packages/spark/src/proto/gen/**",
     ],
@@ -120,10 +123,23 @@ const config: UserConfig = defineConfig({
         },
       },
       {
-        files: ["packages/spark/scripts/**", "scripts/**"],
+        files: ["packages/*/scripts/**", "scripts/**"],
         rules: {
           // Maintenance scripts print their results.
           "eslint/no-console": "off",
+        },
+      },
+      {
+        // Nitro spec interfaces follow the nitrogen DSL (method-style
+        // signatures); react-native.config.js is the RN CLI's CJS hook.
+        files: [
+          "packages/spark-native/src/specs/**",
+          "packages/spark-native/react-native.config.js",
+        ],
+        rules: {
+          "typescript/method-signature-style": "off",
+          "unicorn/prefer-module": "off",
+          "import/no-commonjs": "off",
         },
       },
       {

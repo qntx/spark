@@ -1,0 +1,6 @@
+qntx/spark
+Copyright 2026 QuantX
+
+This product includes software derived from Spark (https://github.com/buildonspark/spark),
+Copyright Lightspark Group, Inc., licensed under the Apache License, Version 2.0.
+Modified files carry a notice stating the upstream path, commit and changes.

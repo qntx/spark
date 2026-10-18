@@ -1,4 +1,4 @@
-exclude = ["node_modules/**", "target/**", "dist/**", "docs/**", "fuzz/target/**"]
+exclude = ["**/node_modules/**", "target/**", "dist/**", "docs/**", "fuzz/target/**"]
 
 [formatting]
 align_entries        = true
