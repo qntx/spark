@@ -47,7 +47,7 @@ hex                    = "0.4"
 
 [dev-dependencies]
 prost         = "0.13.5"
-prost-reflect = { version = "0.14", features = ["text-format"] }
+prost-reflect = { version = "0.16", features = ["text-format"] }
 prost-types   = "0.13.5"
 
 [profile.test]
