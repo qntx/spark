@@ -24,6 +24,7 @@ import {
 import type { SparkTransfer, TransferCoordinator } from "../transfer/index.ts";
 import { leavesBalance, queryLeaves } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
+import { renewLeaf, renewalKind } from "../tree/renew.ts";
 
 export type SparkClient = {
   /** The 33-byte compressed secp256k1 identity public key. */
@@ -254,13 +255,32 @@ export function createSparkClientWith(
           ...(listOptions?.limit === undefined ? {} : { limit: listOptions.limit }),
           ...(listOptions?.offset === undefined ? {} : { offset: listOptions.offset }),
         }),
-      send: async (sendOptions) =>
-        sendTransfer({
+      send: async (sendOptions) => {
+        const receiver = receiverIdentityKey(sendOptions.receiver);
+        const selected = selectLeavesExact(await leaves(), sendOptions.amountSats);
+        // Renew any leaf whose refund timelock is spent before handing it to the receiver.
+        const sendLeaves: SparkLeaf[] = [];
+        for (const leaf of selected) {
+          if (renewalKind(leaf) === undefined) {
+            sendLeaves.push(leaf);
+            continue;
+          }
+          // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order before send
+          const renewed = await renewLeaf({
+            spark: coordinatorConnection.spark,
+            signer: options.signer,
+            network: options.network,
+            leaf,
+          });
+          sendLeaves.push(renewed);
+        }
+        return sendTransfer({
           ...transferCoordinator,
           transferId: uuidv7(random, options.now),
-          leaves: selectLeavesExact(await leaves(), sendOptions.amountSats),
-          receiverIdentityPublicKey: receiverIdentityKey(sendOptions.receiver),
-        }),
+          leaves: sendLeaves,
+          receiverIdentityPublicKey: receiver,
+        });
+      },
       claim: async (transfer) => claimTransfer({ ...transferCoordinator, transfer }),
       claimPending: async () => {
         const pending = await queryPendingTransfers({
