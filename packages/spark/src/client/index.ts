@@ -19,7 +19,9 @@ import {
 } from "../deposit/index.ts";
 import type { DepositCoordinator, UnusedDepositAddress } from "../deposit/index.ts";
 import { SparkInputError } from "../errors/index.ts";
-import { unilateralExitTransactions } from "../exit/unilateral.ts";
+import { createMemorySparkStore } from "../exit/store.ts";
+import type { SparkStore } from "../exit/store.ts";
+import { queryExitChains, unilateralExitTransactions } from "../exit/unilateral.ts";
 import type { ExitTransaction } from "../exit/unilateral.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
@@ -107,6 +109,8 @@ export type SparkClientOptions = {
   readonly network: SparkNetwork;
   readonly signer: SparkSigner;
   readonly fetch: typeof globalThis.fetch;
+  /** Exit-chain persistence; defaults to an in-memory store. */
+  readonly store?: SparkStore;
   readonly random?: (length: number) => Uint8Array;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -140,6 +144,7 @@ export function createSparkClientWith(
       return crypto.getRandomValues(new Uint8Array(length));
     });
   const abort = new AbortController();
+  const store = options.store ?? createMemorySparkStore();
 
   const deps: ConnectionDeps = {
     signer: options.signer,
@@ -180,12 +185,32 @@ export function createSparkClientWith(
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 
-  const leaves = async (): Promise<ReadonlyArray<SparkLeaf>> =>
-    queryLeaves({
+  const storeChainsFor = async (forLeaves: ReadonlyArray<SparkLeaf>): Promise<void> =>
+    store.putExitChains(
+      await queryExitChains({
+        spark: coordinatorConnection.spark,
+        network: options.network,
+        leaves: forLeaves,
+      }),
+    );
+
+  // Syncing leaves is the reconciliation point: refresh every leaf's exit chain and drop
+  // chains for leaves the coordinator no longer reports as ours.
+  const leaves = async (): Promise<ReadonlyArray<SparkLeaf>> => {
+    const current = await queryLeaves({
       spark: coordinatorConnection.spark,
       ownerIdentityPublicKey: await options.signer.identityPublicKey(),
       network: options.network,
     });
+    await storeChainsFor(current);
+    const live = new Set(current.map((leaf) => leaf.id));
+    const chains = await store.exitChains();
+    const stale = chains.map((chain) => chain.leafId).filter((leafId) => !live.has(leafId));
+    if (stale.length > 0) {
+      await store.deleteExitChains(stale);
+    }
+    return current;
+  };
 
   /** Resolves a spark address string or raw identity public key to the receiver's identity key. */
   const receiverIdentityKey = (receiver: string | Uint8Array): Uint8Array => {
@@ -300,14 +325,20 @@ export function createSparkClientWith(
           });
           sendLeaves.push(renewed);
         }
-        return sendTransfer({
+        const sent = await sendTransfer({
           ...transferCoordinator,
           transferId: uuidv7(random, options.now),
           leaves: sendLeaves,
           receiverIdentityPublicKey: receiver,
         });
+        await store.deleteExitChains(sendLeaves.map((leaf) => leaf.id));
+        return sent;
       },
-      claim: async (transfer) => claimTransfer({ ...transferCoordinator, transfer }),
+      claim: async (transfer) => {
+        const claimed = await claimTransfer({ ...transferCoordinator, transfer });
+        await storeChainsFor(claimed);
+        return claimed;
+      },
       claimPending: async () => {
         const pending = await queryPendingTransfers({
           spark: coordinatorConnection.spark,
@@ -320,7 +351,11 @@ export function createSparkClientWith(
             continue;
           }
           // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order; each consumes signer nonces
-          claimed.push(...(await claimTransfer({ ...transferCoordinator, transfer })));
+          const leaves = await claimTransfer({ ...transferCoordinator, transfer });
+          // Persist each claim's chains before the next, so a later failure loses nothing.
+          // oxlint-disable-next-line no-await-in-loop
+          await storeChainsFor(leaves);
+          claimed.push(...leaves);
         }
         return claimed;
       },
@@ -333,20 +368,26 @@ export function createSparkClientWith(
           leafId: uuidv7(random, options.now),
         }),
       unused: async () => queryUnusedDepositAddresses(depositCoordinator),
-      claim: async (claimOptions) =>
-        claimDeposit({
+      claim: async (claimOptions) => {
+        const leaf = await claimDeposit({
           ...depositCoordinator,
           transaction: claimOptions.transaction,
           ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
-        }),
+        });
+        await storeChainsFor([leaf]);
+        return leaf;
+      },
     },
     withdrawals: {
-      unilateralExit: async (leafIds) =>
-        unilateralExitTransactions({
+      unilateralExit: async (leafIds) => {
+        const { transactions, chains } = await unilateralExitTransactions({
           spark: coordinatorConnection.spark,
           network: options.network,
           leafIds,
-        }),
+        });
+        await store.putExitChains(chains);
+        return transactions;
+      },
       sweepRefund: async ({ leafId, refundTx, destinationScript, feeRateSatPerVbyte }) => {
         const key = { type: "leaf" as const, leafId };
         const [publicKey] = await options.signer.publicKeys([key]);

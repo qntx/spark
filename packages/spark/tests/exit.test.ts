@@ -7,7 +7,13 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { p2trScriptFromPublicKey, txId } from "../src/core/bitcoin/index.ts";
 import { SparkError, SparkInputError } from "../src/errors/index.ts";
-import { exitChain, unilateralExitTransactions } from "../src/exit/unilateral.ts";
+import {
+  buildExitChains,
+  exitChain,
+  exitTransactions,
+  queryExitChains,
+  unilateralExitTransactions,
+} from "../src/exit/unilateral.ts";
 import {
   Network,
   QueryNodesResponseSchema,
@@ -15,6 +21,7 @@ import {
   TreeNodeSchema,
   TreeNodeStatus,
 } from "../src/proto/gen/spark_pb.ts";
+import type { QueryNodesRequest } from "../src/proto/gen/spark_pb.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 
 const OPERATORS = ["id0001", "id0002"];
@@ -42,8 +49,13 @@ function leafNode(options: {
   readonly nodeSequence?: number;
   readonly refundSequence?: number;
   readonly hasRefund?: boolean;
+  /** Skip real tx construction when content is irrelevant (bulk tests). */
+  readonly fakeTxs?: boolean;
 }): SparkLeaf {
-  const nodeTx = txSpending(fakeTxid(0x11), options.nodeSequence ?? 0);
+  const nodeTx =
+    options.fakeTxs === true
+      ? new Uint8Array(4)
+      : txSpending(fakeTxid(0x11), options.nodeSequence ?? 0);
   return {
     id: options.id,
     treeId: `tree-${options.id}`,
@@ -54,7 +66,9 @@ function leafNode(options: {
     refundTx:
       options.hasRefund === false
         ? new Uint8Array(0)
-        : txSpending(hexToBytes(txId(nodeTx)), options.refundSequence ?? 500),
+        : options.fakeTxs === true
+          ? new Uint8Array(4)
+          : txSpending(hexToBytes(txId(nodeTx)), options.refundSequence ?? 500),
     verifyingPublicKey: KEY,
     ownerIdentityPublicKey: new Uint8Array(33).fill(6),
     ownerSigningPublicKey: new Uint8Array(33).fill(6),
@@ -86,6 +100,14 @@ function treeNodeProto(leaf: SparkLeaf) {
     treenodeStatus: TreeNodeStatus.AVAILABLE,
     ...(leaf.parentNodeId === undefined ? {} : { parentNodeId: leaf.parentNodeId }),
   });
+}
+
+/** Narrows a query_nodes request to its nodeIds source, failing the test on any other case. */
+function nodeIdsFrom(req: QueryNodesRequest): ReadonlyArray<string> {
+  if (req.source.case !== "nodeIds") {
+    throw new Error(`unexpected query_nodes source: ${req.source.case}`);
+  }
+  return req.source.value.nodeIds;
 }
 
 function required<T>(value: T | undefined): T {
@@ -151,30 +173,26 @@ describe("exitChain", () => {
   });
 });
 
-describe("unilateralExitTransactions", () => {
-  const ROOT = leafNode({ id: "root" });
-  const MID = leafNode({ id: "mid", parent: "root", nodeSequence: 2000 });
-  const LEAF_A = leafNode({
-    id: "leaf-a",
-    parent: "mid",
-    nodeSequence: 1900,
-    refundSequence: 2000,
-  });
-  const LEAF_B = leafNode({
-    id: "leaf-b",
-    parent: "mid",
-    nodeSequence: 1800,
-    refundSequence: 1900,
-  });
-  const ALL = [ROOT, MID, LEAF_A, LEAF_B];
+const ROOT = leafNode({ id: "root" });
+const MID = leafNode({ id: "mid", parent: "root", nodeSequence: 2000 });
+const LEAF_A = leafNode({
+  id: "leaf-a",
+  parent: "mid",
+  nodeSequence: 1900,
+  refundSequence: 2000,
+});
+const LEAF_B = leafNode({
+  id: "leaf-b",
+  parent: "mid",
+  nodeSequence: 1800,
+  refundSequence: 1900,
+});
+const ALL = [ROOT, MID, LEAF_A, LEAF_B];
+const ALL_MAP = new Map(ALL.map((leaf) => [leaf.id, leaf]));
 
-  test("emits root-to-leaf chains, dedupes shared ancestors, refund right after its leaf", async () => {
-    const spark = sparkReturning(ALL);
-    const out = await unilateralExitTransactions({
-      spark,
-      network: "regtest",
-      leafIds: ["leaf-a", "leaf-b"],
-    });
+describe("exitTransactions", () => {
+  test("emits root-to-leaf chains, dedupes shared ancestors, refund right after its leaf", () => {
+    const out = exitTransactions(buildExitChains(["leaf-a", "leaf-b"], ALL_MAP));
     expect(out.map((tx) => `${tx.nodeId}:${tx.kind}`)).toStrictEqual([
       "root:node",
       "mid:node",
@@ -185,11 +203,8 @@ describe("unilateralExitTransactions", () => {
     ]);
   });
 
-  test("reports txids, parentTxid and relative timelocks", async () => {
-    const spark = sparkReturning(ALL);
-    const [out] = [
-      await unilateralExitTransactions({ spark, network: "regtest", leafIds: ["leaf-b"] }),
-    ];
+  test("reports txids, parentTxid and relative timelocks", () => {
+    const out = exitTransactions(buildExitChains(["leaf-b"], ALL_MAP));
     const [rootTx, midTx, leafTx, refundTx] = out;
     const root = required(rootTx);
     const mid = required(midTx);
@@ -205,12 +220,14 @@ describe("unilateralExitTransactions", () => {
     expect(refund.parentTxid).toBe(txId(LEAF_B.nodeTx));
     expect(refund.relativeTimelock).toBe(1900);
   });
+});
 
+describe("unilateralExitTransactions", () => {
   test("queries with nodeIds, includeParents and empty statuses", async () => {
     let captured: unknown;
     const transport = createRouterTransport((router) => {
       router.service(SparkService, {
-        query_nodes: (req: { source: unknown; includeParents: boolean; statuses: unknown[] }) => {
+        query_nodes: (req: QueryNodesRequest) => {
           captured = {
             source: req.source,
             includeParents: req.includeParents,
@@ -270,7 +287,98 @@ describe("unilateralExitTransactions", () => {
     const spark = createClient(SparkService, transport);
     await expect(
       unilateralExitTransactions({ spark, network: "regtest", leafIds: [] }),
-    ).resolves.toStrictEqual([]);
+    ).resolves.toStrictEqual({ transactions: [], chains: [] });
     expect(calls).toBe(0);
+  });
+});
+
+describe("queryExitChains", () => {
+  test("root leaves need no RPC", async () => {
+    let calls = 0;
+    const transport = createRouterTransport((router) => {
+      router.service(SparkService, {
+        query_nodes: () => {
+          calls += 1;
+          return create(QueryNodesResponseSchema, { nodes: {}, offset: 0n });
+        },
+      });
+    });
+    const spark = createClient(SparkService, transport);
+    const chains = await queryExitChains({
+      spark,
+      network: "regtest",
+      leaves: [ROOT],
+    });
+    expect(calls).toBe(0);
+    expect(chains.map((chain) => chain.leafId)).toStrictEqual(["root"]);
+    expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["root"]);
+  });
+
+  test("fetches missing ancestors once per 1000 parent ids", async () => {
+    const parentIds: string[] = [];
+    for (let i = 0; i < 1001; i++) {
+      parentIds.push(`p${i}`);
+    }
+    const leaves = parentIds.map((parent) =>
+      leafNode({ id: `leaf-${parent}`, parent, fakeTxs: true }),
+    );
+    // Respond with the parents only for the requested chunk.
+    const calls: Array<ReadonlyArray<string>> = [];
+    const parents = new Map(parentIds.map((id) => [id, leafNode({ id, fakeTxs: true })]));
+    const transport = createRouterTransport((router) => {
+      router.service(SparkService, {
+        query_nodes: (req: QueryNodesRequest) => {
+          const chunk = nodeIdsFrom(req);
+          calls.push(chunk);
+          const nodes: Record<string, ReturnType<typeof treeNodeProto>> = {};
+          for (const id of chunk) {
+            nodes[id] = treeNodeProto(required(parents.get(id)));
+          }
+          return create(QueryNodesResponseSchema, { nodes, offset: 0n });
+        },
+      });
+    });
+    const spark = createClient(SparkService, transport);
+    const chains = await queryExitChains({ spark, network: "regtest", leaves });
+    expect(calls.map((chunk) => chunk.length)).toStrictEqual([1000, 1]);
+    expect(chains).toHaveLength(1001);
+  });
+
+  test("the given leaf wins over a node returned for its id", async () => {
+    const parent = leafNode({ id: "p", parent: "gp" });
+    const grandparent = leafNode({ id: "gp" });
+    const leaf = leafNode({ id: "leaf", parent: "p" });
+    const staleLeaf = leafNode({ id: "leaf", parent: "p", refundSequence: 7 });
+    const transport = createRouterTransport((router) => {
+      router.service(SparkService, {
+        query_nodes: () =>
+          create(QueryNodesResponseSchema, {
+            nodes: {
+              p: treeNodeProto(parent),
+              gp: treeNodeProto(grandparent),
+              leaf: treeNodeProto(staleLeaf),
+            },
+            offset: 0n,
+          }),
+      });
+    });
+    const spark = createClient(SparkService, transport);
+    const chains = await queryExitChains({ spark, network: "regtest", leaves: [leaf] });
+    const [chain] = chains;
+    expect(chain?.nodes.map((node) => node.nodeId)).toStrictEqual(["gp", "p", "leaf"]);
+    expect(chain?.refundTx).toStrictEqual(leaf.refundTx);
+  });
+
+  test("a parent missing from the query result is an error", async () => {
+    const leaf = leafNode({ id: "leaf", parent: "ghost" });
+    const transport = createRouterTransport((router) => {
+      router.service(SparkService, {
+        query_nodes: () => create(QueryNodesResponseSchema, { nodes: {}, offset: 0n }),
+      });
+    });
+    const spark = createClient(SparkService, transport);
+    await expect(queryExitChains({ spark, network: "regtest", leaves: [leaf] })).rejects.toThrow(
+      /ghost/,
+    );
   });
 });

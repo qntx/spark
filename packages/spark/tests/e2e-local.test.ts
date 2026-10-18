@@ -9,8 +9,10 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { createSparkClient } from "../src/client/index.ts";
 import { encodeSparkAddress } from "../src/core/address.ts";
-import { buildCpfpChild, getTimelockFromSequence } from "../src/core/bitcoin/index.ts";
+import { getTimelockFromSequence } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { buildCpfpChild, createMemorySparkStore, exitTransactions } from "../src/index.ts";
+import type { SparkStore } from "../src/index.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
 
@@ -123,6 +125,24 @@ async function pendingUntil(client: ReturnType<typeof createSparkClient>, deadli
   }
   await sleep(3000);
   return pendingUntil(client, deadline);
+}
+
+/** Polls `leaves` until `leafId` is gone from both the owner query and the store (bounded). */
+async function exitChainDroppedUntil(
+  client: ReturnType<typeof createSparkClient>,
+  store: SparkStore,
+  leafId: string,
+  deadline: number,
+): Promise<boolean> {
+  const leaves = await client.leaves();
+  const chains = await store.exitChains();
+  const dropped =
+    !leaves.some((leaf) => leaf.id === leafId) && !chains.some((chain) => chain.leafId === leafId);
+  if (dropped || Date.now() > deadline) {
+    return dropped;
+  }
+  await sleep(3000);
+  return exitChainDroppedUntil(client, store, leafId, deadline);
 }
 
 /** Polls `leaves` until at least one AVAILABLE leaf is visible (bounded). */
@@ -391,17 +411,21 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
       network: "regtest",
       random: (length: number) => randomBytes(length),
     });
+    const storeA = createMemorySparkStore();
+    const storeB = createMemorySparkStore();
     const clientA = createSparkClient({
       network: "regtest",
       signer: signerA,
       fetch: localFetch(),
       operators: LOCAL_OPERATORS,
+      store: storeA,
     });
     const clientB = createSparkClient({
       network: "regtest",
       signer: signerB,
       fetch: localFetch(),
       operators: LOCAL_OPERATORS,
+      store: storeB,
     });
 
     // Fund A via the S7a deposit flow.
@@ -445,6 +469,17 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     );
     console.log("B recovered leaves on re-claim:", recovered.map((l) => l.id).join(", "));
 
+    // B's store holds the claimed exit chain; replaying it yields the same
+    // transactions the SO query path returns.
+    const leafId = requiredTransfer(claimedByB[0]).id;
+    const claimed = await storeB.exitChains();
+    const storedChains = claimed.filter((chain) => chain.leafId === leafId);
+    expect(storedChains).toHaveLength(1);
+    const queried = await clientB.withdrawals.unilateralExit([leafId]);
+    expect(exitTransactions(storedChains).map((tx) => tx.txid)).toStrictEqual(
+      queried.map((tx) => tx.txid),
+    );
+
     // Round trip: B sends the leaf back to A's identity key.
     const leavesB = await leavesUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
     expect(leavesB.map((l) => l.id)).toContain(claimedByB[0]?.id);
@@ -462,6 +497,13 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     );
     await expect(clientA.balance()).resolves.toBe(100_000);
     await expect(clientB.balance()).resolves.toBe(0);
+
+    // Send removed B's chain; A's claim stored A's leaf chain.
+    const storeBChains = await storeB.exitChains();
+    expect(storeBChains.map((chain) => chain.leafId)).not.toContain(leafId);
+    const reclaimedId = requiredTransfer(reclaimedByA[0]).id;
+    const storeAChains = await storeA.exitChains();
+    expect(storeAChains.map((chain) => chain.leafId)).toContain(reclaimedId);
 
     clientA.close();
     clientB.close();
@@ -540,6 +582,78 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     signerB.dispose();
   }, 600_000);
 
+  test("exit chains reconcile across two devices sharing a seed", async () => {
+    const crypto = await loadWasmBackend();
+    const makeWallet = (seed: Uint8Array) => {
+      const signer = createSparkSigner({
+        crypto,
+        accountKey: sparkAccountKey(seed, "regtest"),
+        network: "regtest",
+        random: (length: number) => randomBytes(length),
+      });
+      const store = createMemorySparkStore();
+      const client = createSparkClient({
+        network: "regtest",
+        signer,
+        fetch: localFetch(),
+        operators: LOCAL_OPERATORS,
+        store,
+      });
+      return { signer, store, client };
+    };
+    const walletA = makeWallet(randomBytes(32));
+    const seedB = randomBytes(32);
+    const walletB1 = makeWallet(seedB);
+    const walletB2 = makeWallet(seedB);
+
+    // A deposits and sends to B's identity; both B devices share the seed.
+    const address = await walletA.client.deposits.newAddress();
+    const txid = (await bitcoinRpc("sendtoaddress", [address, 0.001])) as string;
+    await mine(1);
+    const rawHex = (await bitcoinRpc("getrawtransaction", [txid])) as string;
+    await claimUntilAccepted(walletA.client, hexToBytes(rawHex), Date.now() + CLAIM_DEADLINE_MS);
+    await leavesUntil(walletA.client, Date.now() + CLAIM_DEADLINE_MS);
+    await walletA.client.transfers.send({
+      receiver: await walletB1.signer.identityPublicKey(),
+      amountSats: 100_000,
+    });
+
+    // Device B1 claims and syncs: its store holds the exit chain.
+    const claimedByB1 = await claimPendingUntil(walletB1.client, Date.now() + CLAIM_DEADLINE_MS);
+    const leafId = requiredTransfer(claimedByB1[0]).id;
+    await leavesUntil(walletB1.client, Date.now() + CLAIM_DEADLINE_MS);
+    const b1Chains = await walletB1.store.exitChains();
+    expect(b1Chains.map((chain) => chain.leafId)).toContain(leafId);
+    console.log("B1 stored exit chain for", leafId);
+
+    // Device B2 sees the same leaf (same identity) and sends it back to A.
+    await leavesUntil(walletB2.client, Date.now() + CLAIM_DEADLINE_MS);
+    await walletB2.client.transfers.send({
+      receiver: await walletA.signer.identityPublicKey(),
+      amountSats: 100_000,
+    });
+    console.log("B2 sent the leaf away");
+
+    // B1 re-syncs against the owner query: the leaf is gone, so its chain is dropped.
+    const dropped = await exitChainDroppedUntil(
+      walletB1.client,
+      walletB1.store,
+      leafId,
+      Date.now() + CLAIM_DEADLINE_MS,
+    );
+    expect(dropped).toBe(true);
+    const b2Chains = await walletB2.store.exitChains();
+    expect(b2Chains.map((chain) => chain.leafId)).not.toContain(leafId);
+    console.log("B1 and B2 stores dropped the spent chain");
+
+    walletA.client.close();
+    walletB1.client.close();
+    walletB2.client.close();
+    walletA.signer.dispose();
+    walletB1.signer.dispose();
+    walletB2.signer.dispose();
+  }, 300_000);
+
   test("unilateral exit: node+refund packages confirm on-chain, refund sweeps to wallet", async () => {
     const crypto = await loadWasmBackend();
     const signerA = createSparkSigner({
@@ -560,11 +674,13 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
       fetch: localFetch(),
       operators: LOCAL_OPERATORS,
     });
+    const storeB = createMemorySparkStore();
     const clientB = createSparkClient({
       network: "regtest",
       signer: signerB,
       fetch: localFetch(),
       operators: LOCAL_OPERATORS,
+      store: storeB,
     });
 
     // A deposits, sends to B, B claims — B's leaf is the exit chain's tail.
@@ -583,7 +699,10 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     await leavesUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
     console.log("exit leaf:", leafB.id);
 
-    const exits = await clientB.withdrawals.unilateralExit([leafB.id]);
+    // The claim already stored B's exit chain; derive the broadcast set from it
+    // instead of issuing a second SO query.
+    const stored = await storeB.exitChains();
+    const exits = exitTransactions(stored.filter((chain) => chain.leafId === leafB.id));
     expect(exits.map((e) => e.kind)).toStrictEqual(["node", "refund"]);
     const nodeExit = requiredTransfer(exits[0]);
     const refundExit = requiredTransfer(exits[1]);
