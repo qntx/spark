@@ -45,6 +45,61 @@ export type PackageContext = {
   readonly random: (length: number) => Uint8Array;
 };
 
+type TweakSplit = {
+  readonly proofs: Uint8Array[];
+  readonly shareFor: (operator: SparkOperator) => Uint8Array;
+  readonly pubkeySharesTweak: Record<string, Uint8Array>;
+};
+
+/**
+ * VSS-splits `tweak` across `operators` at `threshold`, returning the proofs, a per-operator share
+ * accessor and each operator's share public key (`share·G`). The backend output is registered in
+ * `secrets` so the caller's `finally` wipes it.
+ */
+function splitTweak(
+  tweak: Uint8Array,
+  operators: ReadonlyArray<SparkOperator>,
+  threshold: number,
+  context: PackageContext,
+  secrets: Uint8Array[],
+  label: string,
+): TweakSplit {
+  const { crypto, random } = context;
+  const split = backendCall(() =>
+    crypto.splitSecretWithProofs(tweak, threshold, operators.length, randomBytes(random, 32)),
+  );
+  secrets.push(split);
+  const { proofs, shares } = parseSplit(split, threshold, operators.length);
+  const shareFor = (operator: SparkOperator): Uint8Array => operatorShare(shares, operator, label);
+  const pubkeySharesTweak: Record<string, Uint8Array> = {};
+  for (const operator of operators) {
+    pubkeySharesTweak[operator.identifier] = secp256k1.getPublicKey(shareFor(operator), true);
+  }
+  return { proofs, shareFor, pubkeySharesTweak };
+}
+
+/**
+ * Builds one plaintext per operator and ECIES-seals it to that operator's identity key. Every
+ * plaintext is registered in `plaintexts` so the caller's `finally` wipes it.
+ */
+function sealPerOperator(
+  operators: ReadonlyArray<SparkOperator>,
+  plaintextFor: (operator: SparkOperator) => Uint8Array,
+  context: PackageContext,
+  plaintexts: Uint8Array[],
+): Record<string, Uint8Array> {
+  const { crypto, random } = context;
+  const operatorPackages: Record<string, Uint8Array> = {};
+  for (const operator of operators) {
+    const plaintext = plaintextFor(operator);
+    plaintexts.push(plaintext);
+    operatorPackages[operator.identifier] = backendCall(() =>
+      crypto.eciesEncrypt(operator.identityPublicKey, plaintext, randomBytes(random, 32)),
+    );
+  }
+  return operatorPackages;
+}
+
 /**
  * Builds the sender transfer package: every leaf gets a fresh random recipient key, the
  * operator-visible tweak is `old − new` (mod n) split by VSS, and each `SendLeafKeyTweaks`
@@ -92,29 +147,20 @@ export function prepareTransferPackage(
         ),
       );
       secrets.push(tweak);
-      const split = backendCall(() =>
-        crypto.splitSecretWithProofs(
-          tweak,
-          request.threshold,
-          request.operators.length,
-          randomBytes(random, 32),
-        ),
+      const { proofs, shareFor, pubkeySharesTweak } = splitTweak(
+        tweak,
+        request.operators,
+        request.threshold,
+        context,
+        secrets,
+        "prepareTransfer",
       );
-      secrets.push(split);
-      const { proofs, shares } = parseSplit(split, request.threshold, request.operators.length);
-      const pubkeySharesTweak: Record<string, Uint8Array> = {};
-      for (const operator of request.operators) {
-        pubkeySharesTweak[operator.identifier] = secp256k1.getPublicKey(
-          operatorShare(shares, operator, "prepareTransfer"),
-          true,
-        );
-      }
       for (const operator of request.operators) {
         perOperator.get(operator.identifier)?.push(
           create(SendLeafKeyTweakSchema, {
             leafId: leaf.leafId,
             secretShareTweak: {
-              secretShare: operatorShare(shares, operator, "prepareTransfer"),
+              secretShare: shareFor(operator),
               proofs,
             },
             pubkeySharesTweak,
@@ -130,21 +176,21 @@ export function prepareTransferPackage(
         signature,
       });
     }
-    const operatorPackages: Record<string, Uint8Array> = {};
-    for (const operator of request.operators) {
-      const tweaks = perOperator.get(operator.identifier);
-      if (tweaks === undefined) {
-        throw new SparkError("prepareTransfer: internal operator grouping failure");
-      }
-      const plaintext = toBinary(
-        SendLeafKeyTweaksSchema,
-        create(SendLeafKeyTweaksSchema, { leavesToSend: tweaks }),
-      );
-      plaintexts.push(plaintext);
-      operatorPackages[operator.identifier] = backendCall(() =>
-        crypto.eciesEncrypt(operator.identityPublicKey, plaintext, randomBytes(random, 32)),
-      );
-    }
+    const operatorPackages = sealPerOperator(
+      request.operators,
+      (operator) => {
+        const tweaks = perOperator.get(operator.identifier);
+        if (tweaks === undefined) {
+          throw new SparkError("prepareTransfer: internal operator grouping failure");
+        }
+        return toBinary(
+          SendLeafKeyTweaksSchema,
+          create(SendLeafKeyTweaksSchema, { leavesToSend: tweaks }),
+        );
+      },
+      context,
+      plaintexts,
+    );
     return { operatorPackages, leaves };
   } finally {
     for (const secret of secrets) {
@@ -164,7 +210,7 @@ export function prepareClaimPackage(
   request: PrepareClaimRequest,
   context: PackageContext,
 ): PreparedClaim {
-  const { crypto, keys, random } = context;
+  const { keys } = context;
   if (request.leaves.length === 0) {
     throw new SparkInputError("leaves: must not be empty");
   }
@@ -190,29 +236,20 @@ export function prepareClaimPackage(
         ),
       );
       secrets.push(tweak);
-      const split = backendCall(() =>
-        crypto.splitSecretWithProofs(
-          tweak,
-          request.threshold,
-          request.operators.length,
-          randomBytes(random, 32),
-        ),
+      const { proofs, shareFor, pubkeySharesTweak } = splitTweak(
+        tweak,
+        request.operators,
+        request.threshold,
+        context,
+        secrets,
+        "prepareClaim",
       );
-      secrets.push(split);
-      const { proofs, shares } = parseSplit(split, request.threshold, request.operators.length);
-      const pubkeySharesTweak: Record<string, Uint8Array> = {};
-      for (const operator of request.operators) {
-        pubkeySharesTweak[operator.identifier] = secp256k1.getPublicKey(
-          operatorShare(shares, operator, "prepareClaim"),
-          true,
-        );
-      }
       for (const operator of request.operators) {
         perOperator.get(operator.identifier)?.push(
           create(ClaimLeafKeyTweakSchema, {
             leafId: leaf.leafId,
             secretShareTweak: {
-              secretShare: operatorShare(shares, operator, "prepareClaim"),
+              secretShare: shareFor(operator),
               proofs,
             },
             pubkeySharesTweak,
@@ -220,21 +257,21 @@ export function prepareClaimPackage(
         );
       }
     }
-    const operatorPackages: Record<string, Uint8Array> = {};
-    for (const operator of request.operators) {
-      const tweaks = perOperator.get(operator.identifier);
-      if (tweaks === undefined) {
-        throw new SparkError("prepareClaim: internal operator grouping failure");
-      }
-      const plaintext = toBinary(
-        ClaimLeafKeyTweaksSchema,
-        create(ClaimLeafKeyTweaksSchema, { leavesToReceive: tweaks }),
-      );
-      plaintexts.push(plaintext);
-      operatorPackages[operator.identifier] = backendCall(() =>
-        crypto.eciesEncrypt(operator.identityPublicKey, plaintext, randomBytes(random, 32)),
-      );
-    }
+    const operatorPackages = sealPerOperator(
+      request.operators,
+      (operator) => {
+        const tweaks = perOperator.get(operator.identifier);
+        if (tweaks === undefined) {
+          throw new SparkError("prepareClaim: internal operator grouping failure");
+        }
+        return toBinary(
+          ClaimLeafKeyTweaksSchema,
+          create(ClaimLeafKeyTweaksSchema, { leavesToReceive: tweaks }),
+        );
+      },
+      context,
+      plaintexts,
+    );
     return { operatorPackages };
   } finally {
     for (const secret of secrets) {
@@ -274,20 +311,19 @@ export function prepareLightningReceivePackage(
     );
     secrets.push(split);
     const { proofs, shares } = parseSplit(split, request.threshold, request.operators.length);
-    const operatorPackages: Record<string, Uint8Array> = {};
-    for (const operator of request.operators) {
-      const plaintext = toBinary(
-        SecretShareSchema,
-        create(SecretShareSchema, {
-          secretShare: operatorShare(shares, operator, "prepareLightningReceive"),
-          proofs,
-        }),
-      );
-      plaintexts.push(plaintext);
-      operatorPackages[operator.identifier] = backendCall(() =>
-        crypto.eciesEncrypt(operator.identityPublicKey, plaintext, randomBytes(random, 32)),
-      );
-    }
+    const operatorPackages = sealPerOperator(
+      request.operators,
+      (operator) =>
+        toBinary(
+          SecretShareSchema,
+          create(SecretShareSchema, {
+            secretShare: operatorShare(shares, operator, "prepareLightningReceive"),
+            proofs,
+          }),
+        ),
+      context,
+      plaintexts,
+    );
     return { paymentHash: sha256(preimage), operatorPackages };
   } finally {
     for (const secret of secrets) {
