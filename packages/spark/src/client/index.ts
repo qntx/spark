@@ -1,6 +1,14 @@
+import { equalBytes } from "@noble/curves/utils.js";
+
 import { connectOperator, sparkEvents } from "../connection/index.ts";
 import type { ConnectionDeps, OperatorConnection, SparkEvent } from "../connection/index.ts";
 import { decodeSparkAddress, verifySparkAddressSignature } from "../core/address.ts";
+import {
+  buildKeySpendSweep,
+  finalizeKeySpend,
+  p2trScriptFromPublicKey,
+  parseTransaction,
+} from "../core/bitcoin/index.ts";
 import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
 import { uuidv7 } from "../core/uuid.ts";
@@ -11,6 +19,8 @@ import {
 } from "../deposit/index.ts";
 import type { DepositCoordinator, UnusedDepositAddress } from "../deposit/index.ts";
 import { SparkInputError } from "../errors/index.ts";
+import { unilateralExitTransactions } from "../exit/unilateral.ts";
+import type { ExitTransaction } from "../exit/unilateral.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
 import {
@@ -70,6 +80,22 @@ export type SparkClient = {
       readonly transaction: Uint8Array;
       readonly vout?: number;
     }) => Promise<SparkLeaf>;
+  };
+  readonly withdrawals: {
+    /** Pre-signed exit transactions for the given leaves, root first (see ExitTransaction). */
+    readonly unilateralExit: (
+      leafIds: ReadonlyArray<string>,
+    ) => Promise<ReadonlyArray<ExitTransaction>>;
+    /**
+     * Signed key-path sweep of a confirmed refund output (any of the leaf's refund variants, output 0)
+     * to `destinationScript`.
+     */
+    readonly sweepRefund: (options: {
+      readonly leafId: string;
+      readonly refundTx: Uint8Array;
+      readonly destinationScript: Uint8Array;
+      readonly feeRateSatPerVbyte: number;
+    }) => Promise<Uint8Array>;
   };
   /** Coordinator `subscribe_to_events`; reconnects until `signal` aborts or `close()` runs. */
   readonly events: (signal?: AbortSignal) => AsyncIterable<SparkEvent>;
@@ -313,6 +339,38 @@ export function createSparkClientWith(
           transaction: claimOptions.transaction,
           ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
         }),
+    },
+    withdrawals: {
+      unilateralExit: async (leafIds) =>
+        unilateralExitTransactions({
+          spark: coordinatorConnection.spark,
+          network: options.network,
+          leafIds,
+        }),
+      sweepRefund: async ({ leafId, refundTx, destinationScript, feeRateSatPerVbyte }) => {
+        const key = { type: "leaf" as const, leafId };
+        const [publicKey] = await options.signer.publicKeys([key]);
+        if (publicKey === undefined) {
+          throw new SparkInputError(`sweepRefund: no public key for leaf ${leafId}`);
+        }
+        const output = parseTransaction(refundTx).getOutput(0);
+        if (
+          output.script === undefined ||
+          !equalBytes(output.script, p2trScriptFromPublicKey(publicKey, options.network))
+        ) {
+          throw new SparkInputError(
+            `sweepRefund: refund tx output 0 does not pay leaf ${leafId}'s key-path script`,
+          );
+        }
+        const sweep = buildKeySpendSweep({
+          prevTx: refundTx,
+          vout: 0,
+          destinationScript,
+          feeRateSatPerVbyte,
+        });
+        const signature = await options.signer.signKeySpend(key, sweep.target);
+        return finalizeKeySpend(sweep.transaction, signature);
+      },
     },
     events,
     close() {

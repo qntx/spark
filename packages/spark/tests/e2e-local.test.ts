@@ -9,7 +9,7 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { createSparkClient } from "../src/client/index.ts";
 import { encodeSparkAddress } from "../src/core/address.ts";
-import { getTimelockFromSequence } from "../src/core/bitcoin/index.ts";
+import { buildCpfpChild, getTimelockFromSequence } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
@@ -63,7 +63,10 @@ function localFetch() {
     undiciFetch(input, { ...init, dispatcher: agent });
 }
 
-async function bitcoinRpc(method: string, params: ReadonlyArray<unknown>): Promise<unknown> {
+async function bitcoinRpcRaw(
+  method: string,
+  params: ReadonlyArray<unknown>,
+): Promise<{ result: unknown; error: { message: string } | null }> {
   const url = new URL(BITCOIND_RPC);
   const credentials = url.username === "" ? "" : `Basic ${btoa(`${url.username}:${url.password}`)}`;
   url.username = "";
@@ -76,10 +79,14 @@ async function bitcoinRpc(method: string, params: ReadonlyArray<unknown>): Promi
     },
     body: JSON.stringify({ jsonrpc: "1.0", id: "e2e", method, params }),
   });
-  const body = (await response.json()) as {
+  return (await response.json()) as {
     result: unknown;
     error: { message: string } | null;
   };
+}
+
+async function bitcoinRpc(method: string, params: ReadonlyArray<unknown>): Promise<unknown> {
+  const body = await bitcoinRpcRaw(method, params);
   if (body.error !== null) {
     throw new Error(`bitcoind ${method}: ${body.error.message}`);
   }
@@ -208,6 +215,125 @@ async function pingPongUntilRenewed(state: PingPongState, sendsLeft: number, rou
   );
 }
 
+type FundedUtxo = {
+  readonly txid: string;
+  readonly vout: number;
+  readonly script: Uint8Array;
+  readonly amountSats: number;
+};
+
+/** Sends `amountBtc` to a fresh P2WPKH wallet address; caller must mine a block. */
+async function fundP2wpkh(amountBtc: number): Promise<{ txid: string; address: string }> {
+  const address = (await bitcoinRpc("getnewaddress", ["", "bech32"])) as string;
+  const txid = (await bitcoinRpc("sendtoaddress", [address, amountBtc])) as string;
+  return { txid, address };
+}
+
+async function utxoFor(txid: string, address: string): Promise<FundedUtxo> {
+  const verbose = (await bitcoinRpc("getrawtransaction", [txid, true])) as {
+    vout: ReadonlyArray<{
+      n: number;
+      value: number;
+      scriptPubKey: { hex: string; address?: string };
+    }>;
+  };
+  const out = verbose.vout.find((o) => o.scriptPubKey.address === address);
+  if (out === undefined) {
+    throw new Error(`no output to ${address} in ${txid}`);
+  }
+  return {
+    txid,
+    vout: out.n,
+    script: hexToBytes(out.scriptPubKey.hex),
+    amountSats: Math.round(out.value * 1e8),
+  };
+}
+
+/** Change scriptPubKey of a fresh bech32 wallet address. */
+async function changeScript(): Promise<Uint8Array> {
+  const address = (await bitcoinRpc("getnewaddress", ["", "bech32"])) as string;
+  const info = (await bitcoinRpc("getaddressinfo", [address])) as { scriptPubKey: string };
+  return hexToBytes(info.scriptPubKey);
+}
+
+/**
+ * Builds the CPFP child for one exit tx, lets the bitcoind wallet sign the funding input (it also
+ * finalizes the P2A anchor with an empty witness), and submits [parent, child] as a package.
+ * Returns the RPC result verbatim.
+ */
+async function broadcastExitPackage(
+  exitTx: { transaction: Uint8Array; txid: string },
+  funding: FundedUtxo,
+) {
+  const child = buildCpfpChild({
+    parent: exitTx.transaction,
+    funding: [
+      {
+        txid: funding.txid,
+        vout: funding.vout,
+        script: funding.script,
+        amountSats: funding.amountSats,
+        signedInputVbytes: 68,
+      },
+    ],
+    changeScript: await changeScript(),
+    feeRateSatPerVbyte: 2,
+  });
+  const psbtB64 = Buffer.from(child.psbt).toString("base64");
+  const processed = (await bitcoinRpc("walletprocesspsbt", [psbtB64])) as {
+    psbt: string;
+    complete: boolean;
+  };
+  console.log(`walletprocesspsbt complete=${processed.complete}`);
+  const finalized = (await bitcoinRpc("finalizepsbt", [processed.psbt])) as {
+    complete: boolean;
+    hex?: string;
+    psbt?: string;
+  };
+  if (finalized.hex === undefined) {
+    throw new Error(`finalizepsbt incomplete: ${JSON.stringify(finalized)}`);
+  }
+  const submission = await bitcoinRpcRaw("submitpackage", [
+    [bytesToHex(exitTx.transaction), finalized.hex],
+  ]);
+  console.log(`submitpackage ${exitTx.txid}:`, JSON.stringify(submission));
+  return submission;
+}
+
+// generatetoaddress in chunks: a multi-thousand-block call outlives the
+// undici headers timeout.
+async function mine(blocks: number): Promise<void> {
+  const minerAddress = (await bitcoinRpc("getnewaddress", [])) as string;
+  let left = blocks;
+  while (left > 0) {
+    const batch = Math.min(left, 200);
+    // oxlint-disable-next-line no-await-in-loop -- block batches must be sequential
+    await bitcoinRpc("generatetoaddress", [batch, minerAddress]);
+    left -= batch;
+  }
+}
+
+async function confirmations(txid: string): Promise<number> {
+  const verbose = (await bitcoinRpc("getrawtransaction", [txid, true])) as {
+    confirmations?: number;
+  };
+  return verbose.confirmations ?? 0;
+}
+
+/**
+ * Mines until `txid` shows `target` confirmations. The background miner adds a block every ~30s, so
+ * a fixed block count drifts — polling the confirmation count is the only way to land exactly on a
+ * BIP68 boundary.
+ */
+async function mineUntilConfirmations(txid: string, target: number): Promise<void> {
+  const confs = await confirmations(txid);
+  if (confs >= target) {
+    return;
+  }
+  await mine(Math.min(target - confs, 200));
+  return mineUntilConfirmations(txid, target);
+}
+
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow", () => {
   test("newAddress → on-chain deposit → claim → leaf visible; second claim fails", async () => {
     const crypto = await loadWasmBackend();
@@ -239,7 +365,7 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     expect(leaf.valueSats).toBe(100_000);
     console.log("claimed leaf:", leaf.id, leaf.status, leaf.valueSats, "sats");
 
-    const leaves = await client.leaves();
+    const leaves = await leavesUntil(client, Date.now() + CLAIM_DEADLINE_MS);
     expect(leaves.map((l) => l.id)).toContain(leaf.id);
     await expect(client.balance()).resolves.toBe(100_000);
 
@@ -407,6 +533,129 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     await expect(state.sender.balance()).resolves.toBe(100_000);
     await expect(state.receiver.balance()).resolves.toBe(0);
     console.log("final holder after 22 sends:", await state.sender.balance(), "sats");
+
+    clientA.close();
+    clientB.close();
+    signerA.dispose();
+    signerB.dispose();
+  }, 600_000);
+
+  test("unilateral exit: node+refund packages confirm on-chain, refund sweeps to wallet", async () => {
+    const crypto = await loadWasmBackend();
+    const signerA = createSparkSigner({
+      crypto,
+      accountKey: sparkAccountKey(randomBytes(32), "regtest"),
+      network: "regtest",
+      random: (length: number) => randomBytes(length),
+    });
+    const signerB = createSparkSigner({
+      crypto,
+      accountKey: sparkAccountKey(randomBytes(32), "regtest"),
+      network: "regtest",
+      random: (length: number) => randomBytes(length),
+    });
+    const clientA = createSparkClient({
+      network: "regtest",
+      signer: signerA,
+      fetch: localFetch(),
+      operators: LOCAL_OPERATORS,
+    });
+    const clientB = createSparkClient({
+      network: "regtest",
+      signer: signerB,
+      fetch: localFetch(),
+      operators: LOCAL_OPERATORS,
+    });
+
+    // A deposits, sends to B, B claims — B's leaf is the exit chain's tail.
+    const address = await clientA.deposits.newAddress();
+    const txid = (await bitcoinRpc("sendtoaddress", [address, 0.001])) as string;
+    await mine(1);
+    const rawHex = (await bitcoinRpc("getrawtransaction", [txid])) as string;
+    await claimUntilAccepted(clientA, hexToBytes(rawHex), Date.now() + CLAIM_DEADLINE_MS);
+    await leavesUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
+    await clientA.transfers.send({
+      receiver: await signerB.identityPublicKey(),
+      amountSats: 100_000,
+    });
+    const claimedByB = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    const leafB = requiredTransfer(claimedByB[0]);
+    await leavesUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    console.log("exit leaf:", leafB.id);
+
+    const exits = await clientB.withdrawals.unilateralExit([leafB.id]);
+    expect(exits.map((e) => e.kind)).toStrictEqual(["node", "refund"]);
+    const nodeExit = requiredTransfer(exits[0]);
+    const refundExit = requiredTransfer(exits[1]);
+    console.log(
+      `exit txs: node ${nodeExit.txid} (timelock ${nodeExit.relativeTimelock}), refund ${refundExit.txid} (timelock ${refundExit.relativeTimelock})`,
+    );
+
+    // Two confirmed wallet UTXOs fund the two CPFP children.
+    const fundingTx1 = await fundP2wpkh(0.0006);
+    const fundingTx2 = await fundP2wpkh(0.0006);
+    await mine(1);
+    const utxo1 = await utxoFor(fundingTx1.txid, fundingTx1.address);
+    const utxo2 = await utxoFor(fundingTx2.txid, fundingTx2.address);
+
+    // Node tx package.
+    const nodeSubmit = await broadcastExitPackage(nodeExit, utxo1);
+    expect(JSON.stringify(nodeSubmit)).toContain('"package_msg":"success"');
+    await mine(1);
+    const nodeConfirmed = (await bitcoinRpc("getrawtransaction", [nodeExit.txid, true])) as {
+      confirmations?: number;
+    };
+    expect(nodeConfirmed.confirmations).toBeGreaterThanOrEqual(1);
+    console.log("node tx confirmed:", nodeExit.txid);
+
+    // Watchtower observation: does an SO react to the on-chain node tx?
+    const mempoolAfterNode = (await bitcoinRpc("getrawmempool", [])) as string[];
+    console.log("mempool after node tx:", JSON.stringify(mempoolAfterNode));
+
+    // The refund's BIP68 lock needs relativeTimelock confirmations on its
+    // parent (the node tx); stop one block short and show the rejection.
+    await mineUntilConfirmations(nodeExit.txid, refundExit.relativeTimelock - 1);
+    const early = await broadcastExitPackage(refundExit, utxo2);
+    expect(JSON.stringify(early)).toContain("non-BIP68-final");
+    console.log("refund one block early rejected as expected");
+
+    // utxo2 was not consumed by the rejected package; reuse it.
+    await mine(1);
+    const refundSubmit = await broadcastExitPackage(refundExit, utxo2);
+    expect(JSON.stringify(refundSubmit)).toContain('"package_msg":"success"');
+    await mine(1);
+    const refundConfirmed = (await bitcoinRpc("getrawtransaction", [refundExit.txid, true])) as {
+      confirmations?: number;
+    };
+    expect(refundConfirmed.confirmations).toBeGreaterThanOrEqual(1);
+    console.log("refund tx confirmed:", refundExit.txid);
+    console.log("mempool after refund:", JSON.stringify(await bitcoinRpc("getrawmempool", [])));
+
+    // Sweep the confirmed refund output to a fresh wallet address.
+    const sweepAddress = (await bitcoinRpc("getnewaddress", ["", "bech32"])) as string;
+    const sweepInfo = (await bitcoinRpc("getaddressinfo", [sweepAddress])) as {
+      scriptPubKey: string;
+    };
+    const sweepTx = await clientB.withdrawals.sweepRefund({
+      leafId: leafB.id,
+      refundTx: refundExit.transaction,
+      destinationScript: hexToBytes(sweepInfo.scriptPubKey),
+      feeRateSatPerVbyte: 2,
+    });
+    const sweepTxid = (await bitcoinRpc("sendrawtransaction", [bytesToHex(sweepTx)])) as string;
+    await mine(1);
+    const sweepConfirmed = (await bitcoinRpc("getrawtransaction", [sweepTxid, true])) as {
+      confirmations?: number;
+      vout: ReadonlyArray<{ value: number; scriptPubKey: { address?: string } }>;
+    };
+    expect(sweepConfirmed.confirmations).toBeGreaterThanOrEqual(1);
+    const swept = requiredTransfer(
+      sweepConfirmed.vout.find((o) => o.scriptPubKey.address === sweepAddress),
+    );
+    const sweptSats = Math.round(swept.value * 1e8);
+    console.log(`swept ${sweptSats} sats to ${sweepAddress} (refund was ${leafB.valueSats})`);
+    expect(sweptSats).toBeGreaterThan(leafB.valueSats - 1000);
+    expect(sweptSats).toBeLessThan(leafB.valueSats);
 
     clientA.close();
     clientB.close();
