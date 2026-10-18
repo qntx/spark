@@ -106,6 +106,20 @@ const config: UserConfig = defineConfig({
         },
       },
       {
+        // Test helpers are test infrastructure: they get the same relaxations
+        // the preset grants *.test.* files (RPC result casts, console
+        // diagnostics, null in decoded JSON types).
+        files: ["packages/spark/tests/support/**"],
+        rules: {
+          "eslint/no-console": "off",
+          "eslint/no-promise-executor-return": "off",
+          "typescript/no-restricted-types": "off",
+          "typescript/no-unsafe-type-assertion": "off",
+          "typescript/restrict-template-expressions": "off",
+          "typescript/strict-void-return": "off",
+        },
+      },
+      {
         files: ["packages/spark/scripts/**", "scripts/**"],
         rules: {
           // Maintenance scripts print their results.
