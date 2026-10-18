@@ -11,6 +11,7 @@ import {
 } from "../core/bitcoin/index.ts";
 import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
+import { decodeTokenIdentifier } from "../core/token-identifier.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import {
   claimDeposit,
@@ -25,6 +26,14 @@ import { queryExitChains, unilateralExitTransactions } from "../exit/unilateral.
 import type { ExitTransaction } from "../exit/unilateral.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
+import {
+  buildTransferPartial,
+  broadcastPartialTokenTransaction,
+  queryTokenOutputs,
+  selectTokenOutputs,
+  tokenBalances,
+} from "../tokens/index.ts";
+import type { SparkTokenBalance, SparkTokenOutput } from "../tokens/index.ts";
 import {
   claimTransfer,
   CLAIMABLE_TRANSFER_STATUSES,
@@ -66,6 +75,24 @@ export type SparkClient = {
     readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;
     /** Claims every pending incoming transfer; returns all new leaves. */
     readonly claimPending: () => Promise<ReadonlyArray<SparkLeaf>>;
+  };
+  readonly tokens: {
+    /** Token outputs owned by this identity, optionally narrowed to one bech32m identifier. */
+    readonly outputs: (options?: {
+      readonly tokenIdentifier?: string;
+    }) => Promise<ReadonlyArray<SparkTokenOutput>>;
+    /** Per-identifier aggregate balances. */
+    readonly balances: () => Promise<ReadonlyArray<SparkTokenBalance>>;
+    /**
+     * Sends exactly `amount` of the bech32m token to `receiver` (a spark address string or a
+     * 33-byte identity public key) via `broadcast_transaction`; returns the hex final transaction
+     * hash. Change returns to the sender.
+     */
+    readonly transfer: (transferOptions: {
+      readonly tokenIdentifier: string;
+      readonly amount: bigint;
+      readonly receiver: string | Uint8Array;
+    }) => Promise<string>;
   };
   /** SSP leaves-swap fee quote in sats. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
@@ -237,6 +264,17 @@ export function createSparkClientWith(
     return address.identityPublicKey;
   };
 
+  /** Decodes a bech32m token identifier and rejects other networks' prefixes. */
+  const tokenIdentifierForNetwork = (text: string): Uint8Array => {
+    const decoded = decodeTokenIdentifier(text);
+    if (decoded.network !== options.network) {
+      throw new SparkInputError(
+        `token identifier is for ${decoded.network}, expected ${options.network}`,
+      );
+    }
+    return decoded.tokenIdentifier;
+  };
+
   /**
    * Events against the coordinator. The caller's signal and the client's close() are linked into a
    * per-stream AbortController via listeners (no AbortSignal.any — Hermes support is uncertain);
@@ -358,6 +396,60 @@ export function createSparkClientWith(
           claimed.push(...leaves);
         }
         return claimed;
+      },
+    },
+    tokens: {
+      outputs: async (outputsOptions) => {
+        const identifier =
+          outputsOptions?.tokenIdentifier === undefined
+            ? undefined
+            : tokenIdentifierForNetwork(outputsOptions.tokenIdentifier);
+        return queryTokenOutputs({
+          token: coordinatorConnection.token,
+          ownerPublicKey: await options.signer.identityPublicKey(),
+          network: options.network,
+          tokenIdentifiers: identifier === undefined ? [] : [identifier],
+        });
+      },
+      balances: async () =>
+        tokenBalances(
+          await queryTokenOutputs({
+            token: coordinatorConnection.token,
+            ownerPublicKey: await options.signer.identityPublicKey(),
+            network: options.network,
+          }),
+          options.network,
+        ),
+      transfer: async (transferOptions) => {
+        const identifier = tokenIdentifierForNetwork(transferOptions.tokenIdentifier);
+        const receiver = receiverIdentityKey(transferOptions.receiver);
+        const owned = await queryTokenOutputs({
+          token: coordinatorConnection.token,
+          ownerPublicKey: await options.signer.identityPublicKey(),
+          network: options.network,
+          tokenIdentifiers: [identifier],
+        });
+        const selected = selectTokenOutputs(owned, transferOptions.amount);
+        const partial = buildTransferPartial({
+          selectedOutputs: selected,
+          receiverPublicKey: receiver,
+          tokenIdentifier: identifier,
+          amount: transferOptions.amount,
+          senderPublicKey: await options.signer.identityPublicKey(),
+          network: options.network,
+          operators,
+          tokens: config.tokens,
+          now: options.now ?? (() => Date.now()),
+        });
+        const result = await broadcastPartialTokenTransaction({
+          token: coordinatorConnection.token,
+          signer: options.signer,
+          partial,
+          network: options.network,
+          operators,
+          tokens: config.tokens,
+        });
+        return result.transactionHash;
       },
     },
     swapFeeEstimate: async (amountSats) => sspClient.swapFeeEstimate(amountSats),

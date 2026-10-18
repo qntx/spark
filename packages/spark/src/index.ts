@@ -36,3 +36,8 @@ export { createMemorySparkStore } from "./exit/store.ts";
 export type { SparkExitChain, SparkStore } from "./exit/store.ts";
 export type { SparkLeaf } from "./tree/index.ts";
 export type { SparkTransfer, SparkTransferLeaf } from "./transfer/index.ts";
+export type {
+  SparkTokenBalance,
+  SparkTokenOutput,
+  SparkTokenOutputStatus,
+} from "./tokens/model.ts";

@@ -49,6 +49,9 @@ export type {
   SparkTokenIdentifierData,
   SparkTransfer,
   SparkTransferLeaf,
+  SparkTokenBalance,
+  SparkTokenOutput,
+  SparkTokenOutputStatus,
 } from "../src/index.ts";
 
 function names(mod: object): string[] {
