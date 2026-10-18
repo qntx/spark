@@ -94,6 +94,9 @@ export type FrostAggregateJob = {
  * - `receive-quote`: `manifest` is a serialized `spark.TransferManifest`; `network` must match the
  *   manifest's own network field.
  * - `spark-invoice`: `invoice` is a serialized `spark.SparkInvoiceFields`; signed with BIP-340.
+ * - `token-transaction`: `partialTransaction` is a serialized `spark_token.PartialTokenTransaction`;
+ *   the digest is its V3 protoreflecthash, signed with BIP-340 (upstream tokenSignatures:
+ *   SCHNORR).
  */
 export type IdentityStatement =
   | { readonly kind: "so-challenge"; readonly challenge: Uint8Array }
@@ -141,7 +144,12 @@ export type IdentityStatement =
       readonly manifest: Uint8Array;
       readonly paymentHash: Uint8Array;
     }
-  | { readonly kind: "spark-invoice"; readonly invoice: Uint8Array };
+  | { readonly kind: "spark-invoice"; readonly invoice: Uint8Array }
+  | {
+      readonly kind: "token-transaction";
+      /** Serialized `spark_token.PartialTokenTransaction`. */
+      readonly partialTransaction: Uint8Array;
+    };
 
 /** A signing operator the signer builds per-operator packages for. */
 export type SparkOperator = {

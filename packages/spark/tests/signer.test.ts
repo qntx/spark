@@ -26,6 +26,7 @@ import {
   transferPackageDigest,
   watchtowerRecoveryStatementDigest,
 } from "../src/core/hashing/index.ts";
+import { hashPartialTokenTransaction } from "../src/core/hashing/token.ts";
 import type { SparkInvoiceFields } from "../src/core/invoice.ts";
 import type { SparkCrypto } from "../src/crypto/index.ts";
 import { SparkCryptoError, SparkError, SparkInputError } from "../src/errors/index.ts";
@@ -42,6 +43,7 @@ import {
   TransferManifestSchema,
   TransferPackageSchema,
 } from "../src/proto/gen/spark_pb.ts";
+import { PartialTokenTransactionSchema } from "../src/proto/gen/spark_token_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkOperator, SparkSigner } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
@@ -457,6 +459,51 @@ describe("signIdentity", () => {
     };
     const digest = hashSparkInvoice(plain, identity, "regtest");
     expect(schnorr.verify(signature, digest, identity.slice(1))).toBe(true);
+    signer.dispose();
+  });
+
+  test("token-transaction signs the partial transaction hash with BIP-340", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const identity = await signer.identityPublicKey();
+    const partial = create(PartialTokenTransactionSchema, {
+      version: 3,
+      tokenInputs: {
+        case: "transferInput",
+        value: {
+          outputsToSpend: [
+            { prevTokenTransactionHash: hexToBytes("ab".repeat(32)), prevTokenTransactionVout: 0 },
+          ],
+        },
+      },
+      partialTokenOutputs: [
+        {
+          ownerPublicKey: identity,
+          tokenIdentifier: hexToBytes("cd".repeat(32)),
+          tokenAmount: hexToBytes(`${"00".repeat(15)}64`),
+          withdrawBondSats: 10_000n,
+          withdrawRelativeBlockLocktime: 1000n,
+        },
+      ],
+    });
+    const bytes = toBinary(PartialTokenTransactionSchema, partial);
+    const signature = await signer.signIdentity({
+      kind: "token-transaction",
+      partialTransaction: bytes,
+    });
+    expect(signature).toHaveLength(64);
+    const digest = hashPartialTokenTransaction(fromBinary(PartialTokenTransactionSchema, bytes));
+    expect(schnorr.verify(signature, digest, identity.slice(1))).toBe(true);
+    signer.dispose();
+  });
+
+  test("token-transaction rejects malformed partial transaction bytes", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    await expect(
+      signer.signIdentity({
+        kind: "token-transaction",
+        partialTransaction: hexToBytes("ff".repeat(8)),
+      }),
+    ).rejects.toThrow(SparkInputError);
     signer.dispose();
   });
 });
