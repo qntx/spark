@@ -12,6 +12,8 @@ import { join, resolve } from "node:path";
 //   bun scripts/spark-local.ts up      # verify pin, start stack, wait for SOs, export certs
 //   bun scripts/spark-local.ts status  # compose ps + port probe
 //   bun scripts/spark-local.ts down    # stop the stack (keeps volumes)
+//   bun scripts/spark-local.ts reset   # down -v + up: wipes chain state (use when bitcoind
+//                                      # slows past ~20k blocks mined by the e2e suites)
 //   bun scripts/spark-local.ts certs   # re-export the TLS certs only
 //
 // SPARK_REF is required: point it at a checkout of buildonspark/spark (the script verifies it
@@ -133,17 +135,26 @@ function printEnv(): void {
   console.log(`certs:      SPARK_LOCAL_CERT_DIR=${CERT_DIR}`);
 }
 
+function up(): void {
+  compose("up", "-d");
+  waitForOperators();
+  exportCerts();
+  printEnv();
+}
+
 const [command] = process.argv.slice(2);
 switch (command) {
   case "up":
     ensureLocked();
-    compose("up", "-d");
-    waitForOperators();
-    exportCerts();
-    printEnv();
+    up();
     break;
   case "down":
     compose("down");
+    break;
+  case "reset":
+    ensureLocked();
+    compose("down", "-v");
+    up();
     break;
   case "status":
     process.stdout.write(compose("ps"));
@@ -156,5 +167,5 @@ switch (command) {
     exportCerts();
     break;
   default:
-    fail("usage: spark-local.ts {up|down|status|certs}");
+    fail("usage: spark-local.ts {up|down|reset|status|certs}");
 }
