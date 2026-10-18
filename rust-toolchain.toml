@@ -1,6 +1,8 @@
 [toolchain]
-# Pin to the workspace MSRV (edition 2024). Bumping this requires
-# updating rust-version under [workspace.package] in Cargo.toml.
-channel    = "1.99"
+# Pin to the workspace MSRV (edition 2024), exact patch version: the committed
+# spark.wasm artifact must rebuild byte-identically, and codegen can change between
+# patch releases. Bumping this requires updating rust-version under
+# [workspace.package] in Cargo.toml and regenerating spark.wasm.
+channel    = "1.99.1"
 components = ["rustfmt", "clippy"]
 profile    = "minimal"
