@@ -7,6 +7,7 @@ import { Agent, fetch as undiciFetch } from "undici";
 import { describe, expect, test } from "vite-plus/test";
 
 import { createSparkClient } from "../src/client/index.ts";
+import { encodeSparkAddress } from "../src/core/address.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
@@ -88,6 +89,26 @@ const sleep = async (ms: number): Promise<void> =>
 
 const CLAIM_DEADLINE_MS = 120_000;
 
+/** Polls `claimPending` until at least one transfer is claimed (bounded). */
+async function claimPendingUntil(client: ReturnType<typeof createSparkClient>, deadline: number) {
+  const claimed = await client.transfers.claimPending();
+  if (claimed.length > 0 || Date.now() > deadline) {
+    return claimed;
+  }
+  await sleep(3000);
+  return claimPendingUntil(client, deadline);
+}
+
+/** Polls `leaves` until at least one AVAILABLE leaf is visible (bounded). */
+async function leavesUntil(client: ReturnType<typeof createSparkClient>, deadline: number) {
+  const leaves = await client.leaves();
+  if (leaves.length > 0 || Date.now() > deadline) {
+    return leaves;
+  }
+  await sleep(3000);
+  return leavesUntil(client, deadline);
+}
+
 /** Polls `claim` until the SO accepts the deposit (bounded). */
 async function claimUntilAccepted(
   client: ReturnType<typeof createSparkClient>,
@@ -148,4 +169,87 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     client.close();
     signer.dispose();
   }, 180_000);
+
+  test("A sends 100000 sats to B, B claims and sends it back", async () => {
+    const crypto = await loadWasmBackend();
+    const signerA = createSparkSigner({
+      crypto,
+      accountKey: sparkAccountKey(randomBytes(32), "regtest"),
+      network: "regtest",
+      random: (length: number) => randomBytes(length),
+    });
+    const signerB = createSparkSigner({
+      crypto,
+      accountKey: sparkAccountKey(randomBytes(32), "regtest"),
+      network: "regtest",
+      random: (length: number) => randomBytes(length),
+    });
+    const clientA = createSparkClient({
+      network: "regtest",
+      signer: signerA,
+      fetch: localFetch(),
+      operators: LOCAL_OPERATORS,
+    });
+    const clientB = createSparkClient({
+      network: "regtest",
+      signer: signerB,
+      fetch: localFetch(),
+      operators: LOCAL_OPERATORS,
+    });
+
+    // Fund A via the S7a deposit flow.
+    const address = await clientA.deposits.newAddress();
+    const txid = (await bitcoinRpc("sendtoaddress", [address, 0.001])) as string;
+    console.log("A deposit tx:", txid);
+    const minerAddress = (await bitcoinRpc("getnewaddress", [])) as string;
+    await bitcoinRpc("generatetoaddress", [1, minerAddress]);
+    const rawHex = (await bitcoinRpc("getrawtransaction", [txid])) as string;
+    const leafA = await claimUntilAccepted(
+      clientA,
+      hexToBytes(rawHex),
+      Date.now() + CLAIM_DEADLINE_MS,
+    );
+    console.log("A claimed leaf:", leafA.id, leafA.valueSats, "sats");
+
+    const receiverAddress = encodeSparkAddress({
+      network: "regtest",
+      identityPublicKey: await signerB.identityPublicKey(),
+    });
+    const leavesA = await leavesUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
+    expect(leavesA.map((l) => l.id)).toContain(leafA.id);
+    const transfer = await clientA.transfers.send({
+      receiver: receiverAddress,
+      amountSats: 100_000,
+    });
+    console.log("A sent transfer:", transfer.id, "status:", transfer.status);
+
+    const claimedByB = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    expect(claimedByB.length).toBeGreaterThan(0);
+    console.log("B claimed leaves:", claimedByB.map((l) => `${l.id}=${l.valueSats}`).join(", "));
+    await expect(clientB.balance()).resolves.toBe(100_000);
+    await expect(clientA.balance()).resolves.toBe(0);
+
+    // Round trip: B sends the leaf back to A's identity key.
+    const leavesB = await leavesUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    expect(leavesB.map((l) => l.id)).toContain(claimedByB[0]?.id);
+    const transferBack = await clientB.transfers.send({
+      receiver: await signerA.identityPublicKey(),
+      amountSats: 100_000,
+    });
+    console.log("B sent transfer back:", transferBack.id);
+
+    const reclaimedByA = await claimPendingUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
+    expect(reclaimedByA.length).toBeGreaterThan(0);
+    console.log(
+      "A reclaimed leaves:",
+      reclaimedByA.map((l) => `${l.id}=${l.valueSats}`).join(", "),
+    );
+    await expect(clientA.balance()).resolves.toBe(100_000);
+    await expect(clientB.balance()).resolves.toBe(0);
+
+    clientA.close();
+    clientB.close();
+    signerA.dispose();
+    signerB.dispose();
+  }, 300_000);
 });

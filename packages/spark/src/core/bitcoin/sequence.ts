@@ -4,12 +4,12 @@ import { assertU32 } from "../assert.ts";
 // Timelock/sequence math for Spark node, refund and HTLC transactions.
 // Upstream references: signer/spark-frost/src/transaction.rs and
 // sdks/js/packages/spark-sdk/src/utils/transaction.ts (buildonspark/spark@0b3a32a).
-// `nextSequence` follows the Rust semantics exactly; the `getNext*Sequence`
-// helpers mirror the upstream TS wrappers used by the services layer.
-// Observed on the local SOs (S7a deposit e2e, docker compose stack): they accept the
-// initial deposit with root sequence 0 and refund timelocks 2000 / 2050 — the
-// `getNextTransactionSequence`-style initial timelocks. Whether `nextSequence` matches
-// renewal paths is still unverified against the SO; keep both until S7b.
+// The `getNext*Sequence` helpers mirror the upstream TS wrappers used by the services
+// layer. Observed on the local SOs: deposits are accepted with root sequence 0 and
+// refund timelocks 2000 / 2050 (S7a e2e), and transfers are accepted with send-side
+// refunds decremented by TIME_LOCK_INTERVAL and claim-side refunds re-signed at the
+// current timelock (S7b e2e) — matching the TS wrapper semantics. The Rust-style
+// `next_sequence` port is gone: nothing the SO validates used it.
 
 // BIP-68: bit 31 disables relative lock-time, bit 22 selects a time-based lock.
 const SEQUENCE_LOCK_TIME_DISABLED = 0x80_00_00_00;
@@ -65,35 +65,6 @@ export function roundDownToTimelockInterval(timelock: number, timeLockInterval: 
     return timelock;
   }
   return timelock - (timelock % timeLockInterval);
-}
-
-/**
- * Decrements the timelock by one interval, preserving all upper bits, and returns the direct-spend
- * sequence at `directTimelockOffset` above it. Ported 1:1 from upstream Rust `next_sequence`
- * (buildonspark/spark@0b3a32a).
- */
-export function nextSequence(
-  currSequence: number,
-  timeLockInterval: number,
-  directTimelockOffset: number,
-): { nextSequence: number; nextDirectSequence: number } {
-  assertU32(currSequence, "currSequence");
-  assertU32(timeLockInterval, "timeLockInterval");
-  assertU32(directTimelockOffset, "directTimelockOffset");
-  const currTimelock = getTimelockFromSequence(currSequence);
-  const nextTimelock = currTimelock - timeLockInterval;
-  if (nextTimelock < 0) {
-    throw new SparkInputError("sequence: next timelock is below zero — renew the node timelock");
-  }
-  const upperBits = currSequence & 0xff_ff_00_00;
-  const nextDirectTimelock = nextTimelock + directTimelockOffset;
-  if (nextDirectTimelock > SEQUENCE_LOCK_TIME_MASK) {
-    throw new SparkInputError("sequence: direct timelock offset overflows the lower 16 bits");
-  }
-  return {
-    nextSequence: upperBits | nextTimelock,
-    nextDirectSequence: upperBits | nextDirectTimelock,
-  };
 }
 
 /**
