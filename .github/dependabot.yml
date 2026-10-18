@@ -23,16 +23,35 @@ updates:
       cargo-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # These crates are pinned to frost 3.0 / upstream spark-frost compatibility;
+    # bump them only together with the upstream pin in scripts/lock.json.
+    ignore:
+      - dependency-name: "k256"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "sha2"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "hkdf"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "aes-gcm"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "rand_core"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "rand_chacha"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "vsss-rs"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "zeroize"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "frost-*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  # The interop lockfile mirrors upstream; it is bumped only together with
+  # scripts/lock.json, never by dependabot.
   - package-ecosystem: "cargo"
     directory: "/crates/interop"
     schedule:
       interval: "weekly"
-    cooldown:
-      default-days: 7
-    groups:
-      cargo-minor-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
