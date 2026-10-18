@@ -33,6 +33,7 @@ Every file here (except this README) must be referenced by a capability in
 | `bolt11.json`        | every valid/invalid example invoice from the BOLT #11 spec document            | `lightning/bolts` 11-payment-encoding.md (pinned commit)         |
 | `transactions.json`  | sequence helpers, node/refund tx pairs/trios, HTLC tx + spends, sighashes      | upstream `spark-frost` via `crates/interop` (`--test bitcoin`)   |
 | `hashing.json`       | hashstructure tags/ops, protohash of real Spark messages, V3 token transaction partial/final hashes, transfer manifests, quote envelopes + targets, token invoice prepare/finalize | upstream `spark-token-primitives` via `crates/interop` (`--test hashing`) |
+| `lnurl-auth.json`    | seed, domain → `m/138'` root key, hashing key, HMAC, path elements, linking pubkey + DER signature over fixed k1 | Breez SDK `lnurl/auth.rs` via `crates/interop` (`--test lnurl_auth`) |
 | `upstream/`          | `spark/testdata` golden protojson cases copied verbatim (invoice hash + canonical encoding + signing hash, V3 token transaction, partial transaction, transfer manifest, quote envelope incl. invalid cases) | buildonspark/spark @0b3a32a (`spark/testdata/*.json`) |
 
 Regenerate with `SPARK_WRITE_VECTORS=1 cargo test --test <name>` inside

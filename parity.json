@@ -308,6 +308,16 @@
       "vectors": ["vectors/derivation.json"]
     },
     {
+      "id": "lnurl-auth",
+      "implementations": {
+        "rust": {
+          "module": "crates/interop/tests/lnurl_auth.rs",
+          "tests": ["crates/interop/tests/lnurl_auth.rs"]
+        }
+      },
+      "vectors": ["vectors/lnurl-auth.json"]
+    },
+    {
       "id": "token-identifier",
       "implementations": {
         "ts": {
