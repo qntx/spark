@@ -455,6 +455,41 @@ describe("deposits.claim", () => {
     signer.dispose();
   });
 
+  test("rejects when the coordinator returns fewer than three commitments", async () => {
+    const signer = await testSigner();
+    const [signingPublicKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { verifyingKeyFor } = buildClaimFixture();
+    const verifyingKey = verifyingKeyFor(signingPublicKey!);
+    const address = p2trAddressFromPublicKey(verifyingKey, "regtest");
+    const transaction = depositTxTo(address, 100_000n);
+    const client = makeClient(signer, {
+      query_unused_deposit_addresses: () =>
+        create(QueryUnusedDepositAddressesResponseSchema, {
+          depositAddresses: [
+            create(DepositAddressQueryResultSchema, {
+              depositAddress: address,
+              userSigningPublicKey: signingPublicKey!,
+              verifyingPublicKey: verifyingKey,
+              leafId: LEAF_ID,
+            }),
+          ],
+          offset: 1n,
+        }),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: [0, 1].map(() =>
+            create(RequestedSigningCommitmentsSchema, {
+              signingNonceCommitments: {},
+            }),
+          ),
+        }),
+    });
+    await expect(client.deposits.claim({ transaction })).rejects.toThrow(
+      "fewer than three commitments",
+    );
+    signer.dispose();
+  });
+
   test("rejects a transaction paying to none of the unused addresses", async () => {
     const signer = await testSigner();
     const client = makeClient(signer, {

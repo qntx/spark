@@ -18,6 +18,7 @@ import {
   QueryTransfersResponseSchema,
   SparkService,
   SubscribeToEventsResponseSchema,
+  TransferReceiverStatus,
   TreeNodeSchema,
   TreeNodeStatus,
   TransferStatus,
@@ -184,8 +185,15 @@ test("pending and all transfers map to plain SparkTransfer", async () => {
             updatedTime: timestampFromMs(1_700_000_000_000),
             type: TransferType.TRANSFER,
             network: Network.MAINNET,
-            leaves: [{ leaf: makeLeaf("pl-1", 4321n) }],
-            receivers: [],
+            leaves: [{ leaf: makeLeaf("pl-1", 4321n), transferReceiverId: "r-1" }],
+            receivers: [
+              {
+                id: "r-1",
+                identityPublicKey: pubkey,
+                amountSats: 4321n,
+                status: TransferReceiverStatus.KEY_TWEAKED,
+              },
+            ],
             senders: [],
           },
         ],
@@ -220,6 +228,11 @@ test("pending and all transfers map to plain SparkTransfer", async () => {
   expect(transfer?.totalValueSats).toBe(4321);
   expect(transfer?.expiryTimeMs).toBe(1_700_000_600_000);
   expect(transfer?.leaves[0]?.leaf.id).toBe("pl-1");
+  expect(transfer?.leaves[0]?.transferReceiverId).toBe("r-1");
+  expect(transfer?.receivers).toHaveLength(1);
+  expect(transfer?.receivers[0]?.id).toBe("r-1");
+  expect(transfer?.receivers[0]?.status).toBe("KEY_TWEAKED");
+  expect(transfer?.receivers[0]?.identityPublicKey).toStrictEqual(pubkey);
 
   const all = await client.transfers.list({ limit: 25 });
   expect(listLimit).toBe(25n);

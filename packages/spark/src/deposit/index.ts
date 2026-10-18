@@ -1,4 +1,3 @@
-import { create } from "@bufbuild/protobuf";
 import type { CallOptions, Client } from "@connectrpc/connect";
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -18,16 +17,13 @@ import { proofOfPossessionDigest } from "../core/hashing/statements.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
-import { HashVariant, UserSignedTxSigningJobSchema } from "../proto/gen/spark_pb.ts";
-import type {
-  Address,
-  RequestedSigningCommitments,
-  SparkService,
-  UserSignedTxSigningJob,
-} from "../proto/gen/spark_pb.ts";
-import type { FrostSignJob, SigningTarget, SparkKey, SparkSigner } from "../signer/types.ts";
+import { HashVariant } from "../proto/gen/spark_pb.ts";
+import type { Address, SparkService } from "../proto/gen/spark_pb.ts";
+import type { SigningTarget, SparkKey, SparkSigner } from "../signer/types.ts";
 import { mapTreeNode } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
+import { signUserJobs } from "../tree/signing.ts";
+import type { UserSigningSpec } from "../tree/signing.ts";
 
 export type DepositCoordinator = {
   /** Connect client for the coordinator operator. */
@@ -162,20 +158,6 @@ export async function queryUnusedDepositAddresses(
   return fetchPage(0);
 }
 
-type SigningJobPlan = {
-  readonly target: SigningTarget;
-  readonly rawTx: Uint8Array;
-};
-
-function operatorCommitments(
-  commitments: RequestedSigningCommitments,
-): FrostSignJob["operatorCommitments"] {
-  return Object.entries(commitments.signingNonceCommitments).map(([identifier, commitment]) => ({
-    identifier,
-    commitment,
-  }));
-}
-
 /**
  * Finds the output of `transaction` paying to one of the caller's unused deposit addresses, builds
  * the CPFP root node tx plus the CPFP and direct-from-CPFP refund txs, requests three signing
@@ -259,26 +241,17 @@ export async function claimDeposit(
     script: rootOutput.script,
     amount: u64ToSats(rootOutput.amount, "root node output"),
   };
-  const plans: SigningJobPlan[] = [
+  const targets: SigningTarget[] = [
+    { transaction: root.cpfp.txBytes, inputIndex: 0, prevouts: [rootPrevout] },
     {
-      target: { transaction: root.cpfp.txBytes, inputIndex: 0, prevouts: [rootPrevout] },
-      rawTx: root.cpfp.txBytes,
+      transaction: refunds.cpfpRefund.txBytes,
+      inputIndex: 0,
+      prevouts: [refundPrevout],
     },
     {
-      target: {
-        transaction: refunds.cpfpRefund.txBytes,
-        inputIndex: 0,
-        prevouts: [refundPrevout],
-      },
-      rawTx: refunds.cpfpRefund.txBytes,
-    },
-    {
-      target: {
-        transaction: refunds.directFromCpfpRefund.txBytes,
-        inputIndex: 0,
-        prevouts: [refundPrevout],
-      },
-      rawTx: refunds.directFromCpfpRefund.txBytes,
+      transaction: refunds.directFromCpfpRefund.txBytes,
+      inputIndex: 0,
+      prevouts: [refundPrevout],
     },
   ];
 
@@ -286,49 +259,20 @@ export async function claimDeposit(
     count: 3,
     nodeIdCount: 1,
   });
-  const [rootCommitment, cpfpRefundCommitment, directRefundCommitment] =
-    signingCommitments.signingCommitments;
-  if (
-    rootCommitment === undefined ||
-    cpfpRefundCommitment === undefined ||
-    directRefundCommitment === undefined
-  ) {
-    throw new SparkError("claimDeposit: coordinator returned fewer than three commitments");
-  }
-  const jobCommitments = [rootCommitment, cpfpRefundCommitment, directRefundCommitment];
-
-  const userCommitments = await signer.newCommitments(3);
-  const jobs: FrostSignJob[] = plans.map((plan, index) => {
-    const commitment = userCommitments[index];
-    const operator = jobCommitments[index];
-    if (commitment === undefined || operator === undefined) {
-      throw new SparkError("claimDeposit: commitment bookkeeping failure");
+  const specs: UserSigningSpec[] = targets.map((target, index) => {
+    const commitments = signingCommitments.signingCommitments[index];
+    if (commitments === undefined) {
+      throw new SparkError("claimDeposit: coordinator returned fewer than three commitments");
     }
     return {
       key,
-      target: plan.target,
+      signingPublicKey,
       verifyingKey: verifyingPublicKey,
-      commitment,
-      operatorCommitments: operatorCommitments(operator),
+      target,
+      commitments,
     };
   });
-  const signatureShares = await signer.signFrost(jobs);
-
-  const signingJobs: UserSignedTxSigningJob[] = plans.map((plan, index) => {
-    const commitment = userCommitments[index];
-    const share = signatureShares[index];
-    const operator = jobCommitments[index];
-    if (commitment === undefined || share === undefined || operator === undefined) {
-      throw new SparkError("claimDeposit: signing job bookkeeping failure");
-    }
-    return create(UserSignedTxSigningJobSchema, {
-      signingPublicKey,
-      rawTx: plan.rawTx,
-      signingNonceCommitment: commitment,
-      userSignature: share,
-      signingCommitments: { signingCommitments: operator.signingNonceCommitments },
-    });
-  });
+  const signingJobs = await signUserJobs(signer, specs);
 
   const response = await spark.finalize_deposit_tree_creation({
     identityPublicKey: await signer.identityPublicKey(),

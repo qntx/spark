@@ -22,9 +22,9 @@ import {
   ClaimPackageSchema,
   HashVariant,
   TransferPackageSchema,
+  TransferReceiverStatus,
   TransferStatus,
   TransferType,
-  UserSignedTxSigningJobSchema,
 } from "../proto/gen/spark_pb.ts";
 import type {
   RequestedSigningCommitments,
@@ -33,9 +33,11 @@ import type {
   TransferLeaf,
   UserSignedTxSigningJob,
 } from "../proto/gen/spark_pb.ts";
-import type { FrostSignJob, SigningTarget, SparkSigner } from "../signer/types.ts";
+import type { SparkSigner } from "../signer/types.ts";
 import { mapTreeNode } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
+import { signUserJobs } from "../tree/signing.ts";
+import type { UserSigningSpec } from "../tree/signing.ts";
 
 export type SparkTransferLeaf = {
   readonly leaf: SparkLeaf;
@@ -46,16 +48,25 @@ export type SparkTransferLeaf = {
     | { readonly case: "signature"; readonly value: Uint8Array }
     | { readonly case: "typedSignature"; readonly value: Signature }
     | undefined;
+  /** Receiver-edge id that owns this leaf on multi-receiver transfers ("" when unset). */
+  readonly transferReceiverId: string;
   /** Receiver-side refund txs captured at send time; they are the leaf's current refund state. */
   readonly intermediateRefundTx: Uint8Array;
   readonly intermediateDirectRefundTx: Uint8Array;
   readonly intermediateDirectFromCpfpRefundTx: Uint8Array;
 };
 
+export type SparkTransferReceiver = {
+  readonly id: string;
+  readonly identityPublicKey: Uint8Array;
+  readonly status: string;
+};
+
 export type SparkTransfer = {
   readonly id: string;
   readonly senderIdentityPublicKey: Uint8Array;
   readonly receiverIdentityPublicKey: Uint8Array;
+  readonly receivers: ReadonlyArray<SparkTransferReceiver>;
   readonly status: string;
   readonly type: string;
   readonly network: SparkNetwork;
@@ -66,6 +77,18 @@ export type SparkTransfer = {
   readonly sparkInvoice?: string;
   readonly leaves: ReadonlyArray<SparkTransferLeaf>;
 };
+
+/**
+ * Whole-transfer statuses a receiver can claim on (mirrors upstream
+ * `partitionClaimablePendingTransfers`).
+ */
+export const CLAIMABLE_TRANSFER_STATUSES: ReadonlyArray<string> = [
+  "SENDER_KEY_TWEAKED",
+  "RECEIVER_KEY_TWEAK_LOCKED",
+  "RECEIVER_KEY_TWEAK_APPLIED",
+  "RECEIVER_KEY_TWEAKED",
+  "RECEIVER_REFUND_SIGNED",
+];
 
 function enumName(table: Record<string, number>, value: number): string {
   for (const [name, v] of Object.entries(table)) {
@@ -96,6 +119,7 @@ function mapTransferLeaf(leaf: TransferLeaf): SparkTransferLeaf | undefined {
         : leaf.sig.case === "typedSignature"
           ? { case: "typedSignature", value: leaf.sig.value }
           : undefined,
+    transferReceiverId: leaf.transferReceiverId,
     intermediateRefundTx: leaf.intermediateRefundTx,
     intermediateDirectRefundTx: leaf.intermediateDirectRefundTx,
     intermediateDirectFromCpfpRefundTx: leaf.intermediateDirectFromCpfpRefundTx,
@@ -114,6 +138,11 @@ export function mapTransfer(transfer: Transfer): SparkTransfer {
     id: transfer.id,
     senderIdentityPublicKey: transfer.senderIdentityPublicKey,
     receiverIdentityPublicKey: transfer.receiverIdentityPublicKey,
+    receivers: transfer.receivers.map((receiver) => ({
+      id: receiver.id,
+      identityPublicKey: receiver.identityPublicKey,
+      status: enumName(TransferReceiverStatus, receiver.status),
+    })),
     status: enumName(TransferStatus, transfer.status),
     type: enumName(TransferType, transfer.type),
     network: sparkNetworkFromProto(transfer.network),
@@ -186,15 +215,8 @@ export type TransferCoordinator = {
   readonly threshold: number;
 };
 
-/** One refund signing job: the leaf it covers, its SO commitments and the signing target. */
-type RefundJobSpec = {
-  readonly leafId: string;
-  readonly signingPublicKey: Uint8Array;
-  readonly verifyingKey: Uint8Array;
-  readonly rawTx: Uint8Array;
-  readonly target: SigningTarget;
-  readonly commitments: RequestedSigningCommitments;
-};
+/** One refund signing spec: the leaf it covers, its SO commitments and the signing target. */
+type RefundJobSpec = UserSigningSpec & { readonly leafId: string };
 
 function prevout(
   txBytes: Uint8Array,
@@ -214,15 +236,6 @@ function refundTxSequence(refundTxBytes: Uint8Array, context: string): number {
     throw new SparkError(`${context}: refund tx input has no sequence`);
   }
   return sequence;
-}
-
-function operatorCommitments(
-  commitments: RequestedSigningCommitments,
-): FrostSignJob["operatorCommitments"] {
-  return Object.entries(commitments.signingNonceCommitments).map(([identifier, commitment]) => ({
-    identifier,
-    commitment,
-  }));
 }
 
 /**
@@ -278,9 +291,9 @@ function refundJobGroups(
     }
     cpfp.push({
       leafId: entry.leaf.id,
+      key: { type: "leaf", leafId: entry.leaf.id },
       signingPublicKey: entry.signingPublicKey,
       verifyingKey: entry.leaf.verifyingPublicKey,
-      rawTx: refunds.cpfpRefund.txBytes,
       target: {
         transaction: refunds.cpfpRefund.txBytes,
         inputIndex: 0,
@@ -296,9 +309,9 @@ function refundJobGroups(
       );
       direct.push({
         leafId: entry.leaf.id,
+        key: { type: "leaf", leafId: entry.leaf.id },
         signingPublicKey: entry.signingPublicKey,
         verifyingKey: entry.leaf.verifyingPublicKey,
-        rawTx: refunds.directRefund.txBytes,
         target: {
           transaction: refunds.directRefund.txBytes,
           inputIndex: 0,
@@ -309,9 +322,9 @@ function refundJobGroups(
     }
     directFromCpfp.push({
       leafId: entry.leaf.id,
+      key: { type: "leaf", leafId: entry.leaf.id },
       signingPublicKey: entry.signingPublicKey,
       verifyingKey: entry.leaf.verifyingPublicKey,
-      rawTx: refunds.directFromCpfpRefund.txBytes,
       target: {
         transaction: refunds.directFromCpfpRefund.txBytes,
         inputIndex: 0,
@@ -323,54 +336,20 @@ function refundJobGroups(
   return { cpfp, direct, directFromCpfp };
 }
 
-/** One batched `signFrost` over all specs; returns the wire `UserSignedTxSigningJob`s. */
+/** One batched `signFrost` over all specs; returns the wire `UserSignedTxSigningJob`s per group. */
 async function signRefundJobs(
   signer: SparkSigner,
-  keyFor: (leafId: string) => { readonly type: "leaf"; readonly leafId: string },
   groups: { cpfp: RefundJobSpec[]; direct: RefundJobSpec[]; directFromCpfp: RefundJobSpec[] },
 ): Promise<{
   cpfp: UserSignedTxSigningJob[];
   direct: UserSignedTxSigningJob[];
   directFromCpfp: UserSignedTxSigningJob[];
 }> {
-  const specs = [...groups.cpfp, ...groups.direct, ...groups.directFromCpfp];
-  const commitments = await signer.newCommitments(specs.length);
-  if (commitments.length !== specs.length) {
-    throw new SparkError("signRefunds: signer returned fewer commitments than requested");
-  }
-  const shares = await signer.signFrost(
-    specs.map((spec, i) => {
-      const commitment = commitments[i];
-      if (commitment === undefined) {
-        throw new SparkError("signRefunds: commitment bookkeeping failure");
-      }
-      return {
-        key: keyFor(spec.leafId),
-        target: spec.target,
-        verifyingKey: spec.verifyingKey,
-        commitment,
-        operatorCommitments: operatorCommitments(spec.commitments),
-      };
-    }),
-  );
-  if (shares.length !== specs.length) {
-    throw new SparkError("signRefunds: signer returned fewer shares than requested");
-  }
-  const jobs = specs.map((spec, i) => {
-    const commitment = commitments[i];
-    const share = shares[i];
-    if (commitment === undefined || share === undefined) {
-      throw new SparkError("signRefunds: signing job bookkeeping failure");
-    }
-    return create(UserSignedTxSigningJobSchema, {
-      leafId: spec.leafId,
-      signingPublicKey: spec.signingPublicKey,
-      rawTx: spec.rawTx,
-      signingNonceCommitment: commitment,
-      userSignature: share,
-      signingCommitments: { signingCommitments: spec.commitments.signingNonceCommitments },
-    });
-  });
+  const jobs = await signUserJobs(signer, [
+    ...groups.cpfp,
+    ...groups.direct,
+    ...groups.directFromCpfp,
+  ]);
   return {
     cpfp: jobs.slice(0, groups.cpfp.length),
     direct: jobs.slice(groups.cpfp.length, groups.cpfp.length + groups.direct.length),
@@ -439,7 +418,7 @@ export async function sendTransfer(
     "sendTransfer",
   );
 
-  const jobs = await signRefundJobs(signer, (leafId) => ({ type: "leaf", leafId }), groups);
+  const jobs = await signRefundJobs(signer, groups);
 
   const transferPackage = create(TransferPackageSchema, {
     leavesToSend: jobs.cpfp,
@@ -526,17 +505,38 @@ export async function claimTransfer(
 ): Promise<SparkLeaf[]> {
   const { spark, signer, network, operators, threshold } = options;
   const { transfer } = options;
+  if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
+    throw new SparkInputError(`claimTransfer: transfer status ${transfer.status} is not claimable`);
+  }
   if (transfer.leaves.length === 0) {
     throw new SparkInputError("claimTransfer: transfer has no leaves");
   }
-  if (transfer.receiverIdentityPublicKey.length > 0) {
-    const self = await signer.identityPublicKey();
-    if (!equalBytes(self, transfer.receiverIdentityPublicKey)) {
+
+  // Multi-receiver transfers carry every receiver's leaves; claim only our receiver edge
+  // (upstream `scopeTransferLeavesToReceiver`). Single-receiver and legacy transfers must
+  // name this identity — fail closed.
+  const self = await signer.identityPublicKey();
+  let claimLeaves = transfer.leaves;
+  let receiverId: string | undefined;
+  if (transfer.receivers.length > 1) {
+    const own = transfer.receivers.find((receiver) => equalBytes(receiver.identityPublicKey, self));
+    if (own === undefined || own.id === "") {
+      throw new SparkInputError("claimTransfer: not a receiver of this multi-receiver transfer");
+    }
+    claimLeaves = transfer.leaves.filter((leaf) => leaf.transferReceiverId === own.id);
+    if (claimLeaves.length === 0) {
+      throw new SparkInputError("claimTransfer: no leaves assigned to this receiver edge");
+    }
+    receiverId = own.id;
+  } else {
+    const receiverKey =
+      transfer.receivers[0]?.identityPublicKey ?? transfer.receiverIdentityPublicKey;
+    if (!equalBytes(receiverKey, self)) {
       throw new SparkInputError("claimTransfer: transfer is not addressed to this identity");
     }
   }
 
-  for (const leaf of transfer.leaves) {
+  for (const leaf of claimLeaves) {
     const digest = sendLeafSigningDigest(leaf.leaf.id, transfer.id, leaf.secretCipher);
     if (!verifyLeafSignature(digest, transfer.senderIdentityPublicKey, leaf.sig)) {
       throw new SparkInputError(
@@ -546,9 +546,9 @@ export async function claimTransfer(
   }
 
   const receivedKeys = await signer.receivedPublicKeys(
-    transfer.leaves.map((leaf) => leaf.secretCipher),
+    claimLeaves.map((leaf) => leaf.secretCipher),
   );
-  for (const [i, leaf] of transfer.leaves.entries()) {
+  for (const [i, leaf] of claimLeaves.entries()) {
     const received = receivedKeys[i];
     if (received === undefined) {
       throw new SparkError("claimTransfer: signer returned fewer public keys than requested");
@@ -562,7 +562,7 @@ export async function claimTransfer(
 
   const prepared = await signer.prepareClaim({
     transferId: transfer.id,
-    leaves: transfer.leaves.map((leaf) => ({
+    leaves: claimLeaves.map((leaf) => ({
       leafId: leaf.leaf.id,
       secretCipher: leaf.secretCipher,
     })),
@@ -572,18 +572,18 @@ export async function claimTransfer(
 
   const signingCommitments = await spark.get_signing_commitments(
     {
-      nodeIdCount: transfer.leaves.length,
+      nodeIdCount: claimLeaves.length,
       count: 3,
     },
     options.call,
   );
 
   const newLeafKeys = await signer.publicKeys(
-    transfer.leaves.map((leaf) => ({ type: "leaf", leafId: leaf.leaf.id })),
+    claimLeaves.map((leaf) => ({ type: "leaf", leafId: leaf.leaf.id })),
   );
 
   const groups = refundJobGroups(
-    transfer.leaves.map((leaf, i) => {
+    claimLeaves.map((leaf, i) => {
       const signingPublicKey = newLeafKeys[i];
       if (signingPublicKey === undefined) {
         throw new SparkError("claimTransfer: signer returned fewer public keys than requested");
@@ -606,7 +606,7 @@ export async function claimTransfer(
     "claimTransfer",
   );
 
-  const jobs = await signRefundJobs(signer, (leafId) => ({ type: "leaf", leafId }), groups);
+  const jobs = await signRefundJobs(signer, groups);
 
   const claimPackage = create(ClaimPackageSchema, {
     leavesToClaim: jobs.cpfp,
@@ -625,7 +625,7 @@ export async function claimTransfer(
   const response = await spark.claim_transfer(
     {
       transferId: transfer.id,
-      ownerIdentityPublicKey: await signer.identityPublicKey(),
+      ownerIdentityPublicKey: self,
       claimPackage,
     },
     options.call,
@@ -633,9 +633,14 @@ export async function claimTransfer(
   if (response.transfer === undefined) {
     throw new SparkError("claimTransfer: coordinator returned no transfer");
   }
+  // Scope the response to our receiver edge: claim responses may carry every receiver's
+  // leaves, and only ours become our leaves.
   const claimed: SparkLeaf[] = [];
   for (const leaf of response.transfer.leaves) {
-    if (leaf.leaf !== undefined) {
+    if (
+      leaf.leaf !== undefined &&
+      (receiverId === undefined || leaf.transferReceiverId === receiverId)
+    ) {
       claimed.push(mapTreeNode(leaf.leaf));
     }
   }
