@@ -7,7 +7,7 @@ import type { HybridObject } from "react-native-nitro-modules";
  * `qntx_spark:<code>`. `abiVersion()` reports `qs_abi_version()`; the TypeScript wrapper compares
  * it against `SPARK_ABI_VERSION` before use.
  */
-export type SparkNative = {
+export interface SparkNative extends HybridObject<{ ios: "c++"; android: "c++" }> {
   abiVersion(): number;
   frostCommit(hedge: ArrayBuffer, random: ArrayBuffer): ArrayBuffer;
   frostSign(request: ArrayBuffer): ArrayBuffer;
@@ -20,4 +20,4 @@ export type SparkNative = {
     shares: number,
     random: ArrayBuffer,
   ): ArrayBuffer;
-} & HybridObject<{ ios: "c++"; android: "c++" }>
+}
