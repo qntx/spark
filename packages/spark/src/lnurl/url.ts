@@ -93,6 +93,34 @@ export function formatLnurlUrl(parts: LnurlUrlParts): string {
   return `${parts.scheme}://${parts.host}${port}${parts.path}${query}`;
 }
 
+function decodeQueryComponent(text: string): string {
+  // application/x-www-form-urlencoded: '+' decodes to a space.
+  const spaced = text.replaceAll("+", " ");
+  try {
+    return decodeURIComponent(spaced);
+  } catch (error) {
+    throw new SparkInputError("lnurl url: malformed query escape", { cause: error });
+  }
+}
+
+/**
+ * Parses a `application/x-www-form-urlencoded` query string (without the leading `?`) into a
+ * name→value map. Bare `name` pairs (no `=`) decode to ""; the last duplicate wins.
+ */
+export function queryParams(query: string): Map<string, string> {
+  const params = new Map<string, string>();
+  if (query === "") {
+    return params;
+  }
+  for (const pair of query.split("&")) {
+    const eq = pair.indexOf("=");
+    const name = eq === -1 ? pair : pair.slice(0, eq);
+    const value = eq === -1 ? "" : pair.slice(eq + 1);
+    params.set(decodeQueryComponent(name), decodeQueryComponent(value));
+  }
+  return params;
+}
+
 /**
  * Appends `encodeURIComponent`-encoded `name=value` pairs to a URL's query, preserving existing
  * pairs and dropping any fragment.
