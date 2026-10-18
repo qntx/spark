@@ -40,6 +40,7 @@ export type {
 export type {
   ExitTransaction,
   FundingInput,
+  ParsedSparkInvoice,
   SparkExitChain,
   SparkStore,
   SparkClient,
@@ -52,6 +53,7 @@ export type {
   SparkTokenBalance,
   SparkTokenOutput,
   SparkTokenOutputStatus,
+  SparkInvoiceStatus,
 } from "../src/index.ts";
 
 function names(mod: object): string[] {
@@ -66,7 +68,9 @@ test("root runtime exports are exactly the core surface", () => {
     "SparkRequestError",
     "buildCpfpChild",
     "createMemorySparkStore",
+    "createSatsInvoice",
     "createSparkClient",
+    "createTokensInvoice",
     "decodeBolt11",
     "decodeSparkAddress",
     "decodeTokenIdentifier",
@@ -74,6 +78,7 @@ test("root runtime exports are exactly the core surface", () => {
     "encodeTokenIdentifier",
     "exitTransactions",
     "isExpired",
+    "parseSparkInvoice",
     "sparkNetworkConfig",
     "verifySparkAddressSignature",
   ]);

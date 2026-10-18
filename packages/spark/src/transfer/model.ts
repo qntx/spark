@@ -5,6 +5,7 @@ import type { Client } from "@connectrpc/connect";
 import { u64ToSats } from "../core/assert.ts";
 import { sparkNetworkFromProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
+import { protoEnumName } from "../core/proto-enum.ts";
 import type { Signature } from "../proto/gen/common_pb.ts";
 import { TransferReceiverStatus, TransferStatus, TransferType } from "../proto/gen/spark_pb.ts";
 import type { SparkService, Transfer, TransferLeaf } from "../proto/gen/spark_pb.ts";
@@ -63,15 +64,6 @@ export const CLAIMABLE_TRANSFER_STATUSES: ReadonlyArray<string> = [
   "RECEIVER_REFUND_SIGNED",
 ];
 
-function enumName(table: Record<string, number>, value: number): string {
-  for (const [name, v] of Object.entries(table)) {
-    if (v === value) {
-      return name;
-    }
-  }
-  return String(value);
-}
-
 function millis(timestamp: Timestamp | undefined): number | undefined {
   if (timestamp === undefined) {
     return undefined;
@@ -114,10 +106,10 @@ export function mapTransfer(transfer: Transfer): SparkTransfer {
     receivers: transfer.receivers.map((receiver) => ({
       id: receiver.id,
       identityPublicKey: receiver.identityPublicKey,
-      status: enumName(TransferReceiverStatus, receiver.status),
+      status: protoEnumName(TransferReceiverStatus, receiver.status),
     })),
-    status: enumName(TransferStatus, transfer.status),
-    type: enumName(TransferType, transfer.type),
+    status: protoEnumName(TransferStatus, transfer.status),
+    type: protoEnumName(TransferType, transfer.type),
     network: sparkNetworkFromProto(transfer.network),
     totalValueSats: u64ToSats(transfer.totalValue, "transfer total value"),
     leaves,

@@ -21,7 +21,7 @@ export type ClientContext = {
   readonly operators: ReadonlyArray<SparkOperatorConfig>;
   readonly store: SparkStore;
   readonly random: (length: number) => Uint8Array;
-  readonly now?: () => number;
+  readonly now: () => number;
   readonly transferCoordinator: TransferCoordinator;
   readonly depositCoordinator: DepositCoordinator;
   readonly sspClient: ReturnType<typeof createSspClient>;
@@ -79,7 +79,7 @@ export function createClientContext(
       throw new SparkInputError(`send: receiver address is for ${address.network}`);
     }
     if (address.invoice !== undefined) {
-      throw new SparkInputError("send: invoice-carrying addresses are not supported yet");
+      throw new SparkInputError("send: invoice-carrying addresses must be paid via invoices.pay");
     }
     if (
       address.signature !== undefined &&
