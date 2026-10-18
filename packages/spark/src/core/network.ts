@@ -29,6 +29,12 @@ export type SparkNetworkConfig = {
     /** GraphQL path appended to `baseUrl` by the SSP client (upstream schema endpoint). */
     readonly graphqlPath: string;
   };
+  /** Token output parameters stamped on every token transaction (upstream wallet-config defaults). */
+  readonly tokens: {
+    readonly withdrawBondSats: number;
+    readonly withdrawRelativeBlockLocktime: number;
+    readonly validityDurationSeconds: number;
+  };
 };
 
 const SSP_GRAPHQL_PATH = "graphql/spark/2025-03-19";
@@ -93,6 +99,13 @@ export function sparkNetworkConfig(network: SparkNetwork): SparkNetworkConfig {
       baseUrl: "https://api.lightspark.com",
       identityPublicKey: hexToBytes(sspKey),
       graphqlPath: SSP_GRAPHQL_PATH,
+    },
+    // services/wallet-config.ts: expectedWithdrawBondSats,
+    // expectedWithdrawRelativeBlockLocktime, tokenValidityDurationSeconds.
+    tokens: {
+      withdrawBondSats: 10_000,
+      withdrawRelativeBlockLocktime: 1000,
+      validityDurationSeconds: 180,
     },
   };
 }

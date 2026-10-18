@@ -1,8 +1,10 @@
 import { fromBinary } from "@bufbuild/protobuf";
-import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 
 import { authnChallengeDigest, sspChallengeDigest } from "../../src/core/hashing/index.ts";
+import { hashPartialTokenTransaction } from "../../src/core/hashing/token.ts";
 import { ChallengeSchema } from "../../src/proto/gen/spark_authn_pb.ts";
+import { PartialTokenTransactionSchema } from "../../src/proto/gen/spark_token_pb.ts";
 import type { IdentityStatement, SparkSigner } from "../../src/signer/types.ts";
 
 const NOT_IMPLEMENTED = "test signer: not implemented";
@@ -61,6 +63,13 @@ export function createTestSigner(secretKey: Uint8Array): SparkSigner & {
             format: "der",
             prehash: false,
           });
+        case "token-transaction":
+          return schnorr.sign(
+            hashPartialTokenTransaction(
+              fromBinary(PartialTokenTransactionSchema, statement.partialTransaction),
+            ),
+            secretKey,
+          );
         default:
           throw new Error(NOT_IMPLEMENTED);
       }
