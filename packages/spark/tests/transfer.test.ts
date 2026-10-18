@@ -1,5 +1,5 @@
 import { create } from "@bufbuild/protobuf";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -185,6 +185,7 @@ type SparkImpl = Partial<{
   get_signing_commitments: (req: GetSigningCommitmentsRequest) => unknown;
   start_transfer_v2: (req: StartTransferRequest) => unknown;
   claim_transfer: (req: ClaimTransferRequest) => unknown;
+  query_transfers_by_id: (req: unknown) => unknown;
 }>;
 
 function makeClient(signer: SparkSigner, sparkImpl: SparkImpl) {
@@ -858,6 +859,146 @@ describe("transfers.claim", () => {
     expect(pkg.leavesToClaim).toHaveLength(1);
     expect(pkg.leavesToClaim[0]?.leafId).toBe(LEAF_ID);
     receiver.dispose();
+  });
+
+  describe("claim recovery after already_exists", () => {
+    test("returns the receiver leaves when the claim already completed", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+      });
+      const completed = create(TransferSchema, {
+        ...pending,
+        status: TransferStatus.COMPLETED,
+      });
+      const client = makeClient(receiver, {
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        claim_transfer: () => {
+          throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+        },
+        query_transfers_by_id: () =>
+          create(QueryTransfersResponseSchema, { transfers: [completed] }),
+      });
+      const claimed = await client.transfers.claim(mapTransfer(pending));
+      expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+      receiver.dispose();
+    });
+
+    test("rethrows when the leg is not complete", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+      });
+      const client = makeClient(receiver, {
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        claim_transfer: () => {
+          throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+        },
+        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+      });
+      await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+        "leaf already claimed",
+      );
+      receiver.dispose();
+    });
+
+    test("rethrows when the transfer is not found", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+      });
+      const client = makeClient(receiver, {
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        claim_transfer: () => {
+          throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+        },
+        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [] }),
+      });
+      await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+        "leaf already claimed",
+      );
+      receiver.dispose();
+    });
+
+    test("scopes recovered leaves to the caller's receiver edge", async () => {
+      const receiver = await testSigner();
+      const receiverIdentity = await receiver.identityPublicKey();
+      const otherIdentity = secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true);
+      const ownLeaf = await pendingLeaf({
+        receiverIdentity,
+        receivedSecret: new Uint8Array(32).fill(88),
+        transferReceiverId: "r-self",
+      });
+      const otherLeaf = await pendingLeaf({
+        receiverIdentity: otherIdentity,
+        receivedSecret: new Uint8Array(32).fill(77),
+        leafId: OTHER_LEAF_ID,
+        transferReceiverId: "r-other",
+      });
+      const pending = create(TransferSchema, {
+        id: TRANSFER_ID,
+        senderIdentityPublicKey: secp256k1.getPublicKey(SENDER_SECRET, true),
+        status: TransferStatus.SENDER_KEY_TWEAKED,
+        type: TransferType.TRANSFER,
+        network: Network.REGTEST,
+        totalValue: 200_000n,
+        leaves: [ownLeaf, otherLeaf],
+        receivers: [
+          create(TransferReceiverSchema, {
+            id: "r-self",
+            identityPublicKey: receiverIdentity,
+            status: TransferReceiverStatus.KEY_TWEAKED,
+          }),
+          create(TransferReceiverSchema, {
+            id: "r-other",
+            identityPublicKey: otherIdentity,
+            status: TransferReceiverStatus.KEY_TWEAKED,
+          }),
+        ],
+      });
+      // Own leg completed while the whole transfer is still in flight.
+      const updated = create(TransferSchema, {
+        ...pending,
+        status: TransferStatus.SENDER_KEY_TWEAKED,
+        receivers: [
+          create(TransferReceiverSchema, {
+            id: "r-self",
+            identityPublicKey: receiverIdentity,
+            status: TransferReceiverStatus.COMPLETED,
+          }),
+          create(TransferReceiverSchema, {
+            id: "r-other",
+            identityPublicKey: otherIdentity,
+            status: TransferReceiverStatus.KEY_TWEAKED,
+          }),
+        ],
+      });
+      const client = makeClient(receiver, {
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        claim_transfer: () => {
+          throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+        },
+        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [updated] }),
+      });
+      const claimed = await client.transfers.claim(mapTransfer(pending));
+      expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+      receiver.dispose();
+    });
   });
 
   test("rejects a multi-receiver transfer this identity does not receive", async () => {
