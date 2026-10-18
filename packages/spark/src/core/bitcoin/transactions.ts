@@ -1,5 +1,4 @@
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 
 import { SparkInputError } from "../../errors/index.ts";
@@ -50,14 +49,17 @@ export type RefundTxTrio = {
   readonly directFromCpfpRefund: ConstructedTransaction;
 };
 
-/** Display-order txid (the usual block-explorer hex form). */
+/**
+ * Display-order txid (the usual block-explorer hex form). The txid never covers witness data —
+ * hashing the raw serialization of a segwit transaction would yield its wtxid instead.
+ */
 export function txId(txBytes: Uint8Array): string {
-  return bytesToHex(sha256(sha256(txBytes)).reverse());
+  return parseTransaction(txBytes).id;
 }
 
 /** Internal byte order for the txid (hash byte order as written in outpoints). */
 export function txIdBytes(txBytes: Uint8Array): Uint8Array {
-  return sha256(sha256(txBytes));
+  return hexToBytes(parseTransaction(txBytes).id).reverse();
 }
 
 /**
@@ -65,7 +67,7 @@ export function txIdBytes(txBytes: Uint8Array): Uint8Array {
  * internally when serializing the outpoint).
  */
 export function txIdInputBytes(txBytes: Uint8Array): Uint8Array {
-  return sha256(sha256(txBytes)).reverse();
+  return hexToBytes(parseTransaction(txBytes).id);
 }
 
 /** Subtracts `feeSats` when the amount can cover it; otherwise returns the amount unchanged. */

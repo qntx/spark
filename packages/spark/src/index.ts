@@ -24,5 +24,6 @@ export type { Bolt11Invoice, Bolt11Network } from "./core/index.ts";
 export { createSparkClient } from "./client/index.ts";
 export type { SparkClient, SparkClientOptions } from "./client/index.ts";
 export type { SparkEvent } from "./connection/index.ts";
+export type { UnusedDepositAddress } from "./deposit/index.ts";
 export type { SparkLeaf } from "./tree/index.ts";
 export type { SparkTransfer, SparkTransferLeaf } from "./transfer/index.ts";
