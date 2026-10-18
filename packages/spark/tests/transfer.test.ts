@@ -35,6 +35,8 @@ import {
   RequestedSigningCommitmentsSchema,
   StartTransferResponseSchema,
   TransferLeafSchema,
+  TransferReceiverSchema,
+  TransferReceiverStatus,
   TransferSchema,
   TransferStatus,
   TransferType,
@@ -45,6 +47,7 @@ import type {
   ClaimTransferRequest,
   GetSigningCommitmentsRequest,
   StartTransferRequest,
+  TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
@@ -358,30 +361,136 @@ describe("transfers.send", () => {
     ).rejects.toThrow("no leaf combination sums exactly");
     signer.dispose();
   });
+
+  test("rejects when the coordinator returns too few signing commitments", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const node = create(TreeNodeSchema, {
+      id: leaf.id,
+      treeId: leaf.treeId,
+      value: 100_000n,
+      nodeTx: leaf.nodeTx,
+      refundTx: leaf.refundTx,
+      vout: 0,
+      verifyingPublicKey: leaf.verifyingPublicKey,
+      ownerIdentityPublicKey: identity,
+      ownerSigningPublicKey: leaf.ownerSigningPublicKey,
+      signingKeyshare: {
+        ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+        threshold: THRESHOLD,
+        publicKey: leaf.verifyingPublicKey,
+        publicShares: {},
+      },
+      status: "AVAILABLE",
+      network: Network.REGTEST,
+      treenodeStatus: TreeNodeStatus.AVAILABLE,
+    });
+    const client = makeClient(signer, {
+      query_nodes: () => nodesResponse([node]),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(2),
+        }),
+    });
+    await expect(
+      client.transfers.send({
+        receiver: secp256k1.getPublicKey(RECEIVER_SECRET, true),
+        amountSats: 100_000,
+      }),
+    ).rejects.toThrow("expected 3 signing commitments, got 2");
+    signer.dispose();
+  });
+
+  test("rejects when the signer returns too few commitments or shares", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const node = create(TreeNodeSchema, {
+      id: leaf.id,
+      treeId: leaf.treeId,
+      value: 100_000n,
+      nodeTx: leaf.nodeTx,
+      refundTx: leaf.refundTx,
+      vout: 0,
+      verifyingPublicKey: leaf.verifyingPublicKey,
+      ownerIdentityPublicKey: identity,
+      ownerSigningPublicKey: leaf.ownerSigningPublicKey,
+      signingKeyshare: {
+        ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+        threshold: THRESHOLD,
+        publicKey: leaf.verifyingPublicKey,
+        publicShares: {},
+      },
+      status: "AVAILABLE",
+      network: Network.REGTEST,
+      treenodeStatus: TreeNodeStatus.AVAILABLE,
+    });
+    const sparkImpl: SparkImpl = {
+      query_nodes: () => nodesResponse([node]),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+    };
+    const receiver = secp256k1.getPublicKey(RECEIVER_SECRET, true);
+
+    const shortCommitments = makeClient(
+      { ...signer, newCommitments: async () => Promise.resolve([]) },
+      sparkImpl,
+    );
+    await expect(
+      shortCommitments.transfers.send({ receiver, amountSats: 100_000 }),
+    ).rejects.toThrow("signer returned fewer commitments than requested");
+
+    const shortShares = makeClient(
+      { ...signer, signFrost: async () => Promise.resolve([]) },
+      sparkImpl,
+    );
+    await expect(shortShares.transfers.send({ receiver, amountSats: 100_000 })).rejects.toThrow(
+      "signer returned fewer shares than requested",
+    );
+    signer.dispose();
+  });
 });
 
+const OTHER_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000ff";
+const OTHER_IDENTITY_SECRET = new Uint8Array(32).fill(66);
+
 describe("transfers.claim", () => {
-  /** A pending transfer whose leaf the receiver can open: cipher seals `receivedSecret`. */
-  async function pendingTransfer(options: {
-    receiverSigner: SparkSigner;
+  /** A pending transfer leaf whose `secretCipher` seals `receivedSecret` to `receiverIdentity`. */
+  async function pendingLeaf(options: {
+    receiverIdentity: Uint8Array;
     receivedSecret: Uint8Array;
+    leafId?: string;
     leafOwnerKey?: Uint8Array;
     corruptSig?: boolean;
     typedSig?: boolean;
+    transferReceiverId?: string;
   }) {
-    const receiverIdentity = await options.receiverSigner.identityPublicKey();
+    const leafId = options.leafId ?? LEAF_ID;
     const receivedPublicKey = secp256k1.getPublicKey(options.receivedSecret, true);
     const crypto = await loadWasmBackend();
     const secretCipher = crypto.eciesEncrypt(
-      receiverIdentity,
+      options.receiverIdentity,
       options.receivedSecret,
       new Uint8Array(32).fill(6),
     );
     const ownerKey = options.leafOwnerKey ?? receivedPublicKey;
     const { nodeTx, verifyingKey } = fabricateLeaf({
-      leafId: LEAF_ID,
+      leafId,
       signingPublicKey: ownerKey,
-      ownerIdentityPublicKey: receiverIdentity,
+      ownerIdentityPublicKey: options.receiverIdentity,
     });
     // Intermediate refund at the decremented sequence (1900) — the leaf's state after send.
     const intermediateRefundTx = createCurrentTimelockRefundTxs({
@@ -390,7 +499,7 @@ describe("transfers.claim", () => {
       receivingPublicKey: receivedPublicKey,
       network: "regtest",
     }).cpfpRefund.txBytes;
-    const digest = sendLeafSigningDigest(LEAF_ID, TRANSFER_ID, secretCipher);
+    const digest = sendLeafSigningDigest(leafId, TRANSFER_ID, secretCipher);
     const signature = secp256k1.sign(
       options.corruptSig === true ? sha256(digest) : digest,
       SENDER_SECRET,
@@ -406,41 +515,76 @@ describe("transfers.claim", () => {
             }),
           }
         : { case: "signature" as const, value: signature };
+    return create(TransferLeafSchema, {
+      leaf: create(TreeNodeSchema, {
+        id: leafId,
+        treeId: `tree-${leafId}`,
+        value: 100_000n,
+        nodeTx,
+        refundTx: intermediateRefundTx,
+        vout: 0,
+        verifyingPublicKey: verifyingKey,
+        ownerIdentityPublicKey: options.receiverIdentity,
+        ownerSigningPublicKey: ownerKey,
+        signingKeyshare: {
+          ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+          threshold: THRESHOLD,
+          publicKey: verifyingKey,
+          publicShares: {},
+        },
+        status: "AVAILABLE",
+        network: Network.REGTEST,
+        treenodeStatus: TreeNodeStatus.AVAILABLE,
+      }),
+      secretCipher,
+      sig,
+      intermediateRefundTx,
+      ...(options.transferReceiverId === undefined
+        ? {}
+        : { transferReceiverId: options.transferReceiverId }),
+    });
+  }
+
+  /** A pending transfer (single-receiver V2 by default) addressed to the receiver signer. */
+  async function pendingTransfer(options: {
+    receiverSigner: SparkSigner;
+    receivedSecret: Uint8Array;
+    leafOwnerKey?: Uint8Array;
+    corruptSig?: boolean;
+    typedSig?: boolean;
+    status?: TransferStatus;
+    receiverIdentityPublicKey?: Uint8Array;
+    receivers?: ReadonlyArray<{ id: string; identityPublicKey: Uint8Array }>;
+    extraLeaves?: ReadonlyArray<TransferLeaf>;
+    transferReceiverId?: string;
+  }) {
+    const receiverIdentity = await options.receiverSigner.identityPublicKey();
+    const leaf = await pendingLeaf({
+      receiverIdentity,
+      receivedSecret: options.receivedSecret,
+      ...(options.leafOwnerKey === undefined ? {} : { leafOwnerKey: options.leafOwnerKey }),
+      ...(options.corruptSig === undefined ? {} : { corruptSig: options.corruptSig }),
+      ...(options.typedSig === undefined ? {} : { typedSig: options.typedSig }),
+      ...(options.transferReceiverId === undefined
+        ? {}
+        : { transferReceiverId: options.transferReceiverId }),
+    });
     return create(TransferSchema, {
       id: TRANSFER_ID,
       senderIdentityPublicKey: secp256k1.getPublicKey(SENDER_SECRET, true),
-      receiverIdentityPublicKey: receiverIdentity,
-      status: TransferStatus.SENDER_KEY_TWEAKED,
+      receiverIdentityPublicKey: options.receiverIdentityPublicKey ?? receiverIdentity,
+      status: options.status ?? TransferStatus.SENDER_KEY_TWEAKED,
       type: TransferType.TRANSFER,
       network: Network.REGTEST,
       totalValue: 100_000n,
-      leaves: [
-        create(TransferLeafSchema, {
-          leaf: create(TreeNodeSchema, {
-            id: LEAF_ID,
-            treeId: `tree-${LEAF_ID}`,
-            value: 100_000n,
-            nodeTx,
-            refundTx: intermediateRefundTx,
-            vout: 0,
-            verifyingPublicKey: verifyingKey,
-            ownerIdentityPublicKey: receiverIdentity,
-            ownerSigningPublicKey: ownerKey,
-            signingKeyshare: {
-              ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-              threshold: THRESHOLD,
-              publicKey: verifyingKey,
-              publicShares: {},
-            },
-            status: "AVAILABLE",
-            network: Network.REGTEST,
-            treenodeStatus: TreeNodeStatus.AVAILABLE,
-          }),
-          secretCipher,
-          sig,
-          intermediateRefundTx,
+      leaves: [leaf, ...(options.extraLeaves ?? [])],
+      receivers: (options.receivers ?? []).map((receiver) =>
+        create(TransferReceiverSchema, {
+          id: receiver.id,
+          identityPublicKey: receiver.identityPublicKey,
+          status: TransferReceiverStatus.KEY_TWEAKED,
         }),
-      ],
+      ),
     });
   }
 
@@ -569,6 +713,170 @@ describe("transfers.claim", () => {
     });
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("rejects a transfer whose status is not claimable", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      status: TransferStatus.SENDER_INITIATED,
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow("not claimable");
+    receiver.dispose();
+  });
+
+  test("claimPending skips transfers whose status is not claimable", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      status: TransferStatus.SENDER_INITIATED,
+    });
+    let claimCalls = 0;
+    const client = makeClient(receiver, {
+      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+      claim_transfer: () => {
+        claimCalls += 1;
+        return create(ClaimTransferResponseSchema, {});
+      },
+    });
+    await expect(client.transfers.claimPending()).resolves.toStrictEqual([]);
+    expect(claimCalls).toBe(0);
+    receiver.dispose();
+  });
+
+  test("rejects a transfer that names a different receiver (fail closed)", async () => {
+    const receiver = await testSigner();
+    const otherIdentity = secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true);
+    const foreign = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      receiverIdentityPublicKey: otherIdentity,
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(foreign))).rejects.toThrow(
+      "not addressed to this identity",
+    );
+
+    const anonymous = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      receiverIdentityPublicKey: new Uint8Array(),
+    });
+    await expect(client.transfers.claim(mapTransfer(anonymous))).rejects.toThrow(
+      "not addressed to this identity",
+    );
+    receiver.dispose();
+  });
+
+  test("claims a single-receiver transfer via receivers[0] when the top-level key is empty", async () => {
+    const receiver = await testSigner();
+    const self = await receiver.identityPublicKey();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      receiverIdentityPublicKey: new Uint8Array(),
+      receivers: [{ id: "r-self", identityPublicKey: self }],
+      transferReceiverId: "r-self",
+    });
+    const client = makeClient(receiver, {
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      claim_transfer: (req) =>
+        create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves: [required(pending.leaves[0], "pending leaf")],
+          }),
+        }),
+    });
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("claims only the caller's receiver edge on a multi-receiver transfer", async () => {
+    const receiver = await testSigner();
+    const self = await receiver.identityPublicKey();
+    const otherIdentity = secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true);
+    const otherLeaf = await pendingLeaf({
+      receiverIdentity: otherIdentity,
+      receivedSecret: new Uint8Array(32).fill(44),
+      leafId: OTHER_LEAF_ID,
+      transferReceiverId: "r-other",
+    });
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      transferReceiverId: "r-self",
+      receivers: [
+        { id: "r-self", identityPublicKey: self },
+        { id: "r-other", identityPublicKey: otherIdentity },
+      ],
+      extraLeaves: [otherLeaf],
+    });
+
+    let commitmentsReq: GetSigningCommitmentsRequest | undefined;
+    let claimReq: ClaimTransferRequest | undefined;
+    const client = makeClient(receiver, {
+      get_signing_commitments: (req) => {
+        commitmentsReq = req;
+        return create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        });
+      },
+      claim_transfer: (req) => {
+        claimReq = req;
+        // The SO response carries every receiver's leaves; only ours may be claimed.
+        return create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves: [required(pending.leaves[0], "own leaf"), otherLeaf],
+          }),
+        });
+      },
+    });
+
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+    expect(required(commitmentsReq, "get_signing_commitments request").nodeIdCount).toBe(1);
+    const pkg = required(
+      required(claimReq, "claim_transfer request").claimPackage,
+      "claim package",
+    );
+    expect(pkg.leavesToClaim).toHaveLength(1);
+    expect(pkg.leavesToClaim[0]?.leafId).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("rejects a multi-receiver transfer this identity does not receive", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      receivers: [
+        {
+          id: "r-a",
+          identityPublicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(44), true),
+        },
+        { id: "r-b", identityPublicKey: secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true) },
+      ],
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+      "not a receiver of this multi-receiver transfer",
+    );
     receiver.dispose();
   });
 });

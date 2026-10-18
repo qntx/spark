@@ -15,6 +15,7 @@ import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
 import {
   claimTransfer,
+  CLAIMABLE_TRANSFER_STATUSES,
   queryAllTransfers,
   queryPendingTransfers,
   selectLeavesExact,
@@ -159,11 +160,6 @@ export function createSparkClientWith(
       network: options.network,
     });
 
-  /**
-   * Events against the coordinator. The caller's signal and the client's close() are linked into a
-   * per-stream AbortController via listeners (no AbortSignal.any — Hermes support is uncertain);
-   * listeners are dropped when the stream ends.
-   */
   /** Resolves a spark address string or raw identity public key to the receiver's identity key. */
   const receiverIdentityKey = (receiver: string | Uint8Array): Uint8Array => {
     if (typeof receiver !== "string") {
@@ -189,6 +185,11 @@ export function createSparkClientWith(
     return address.identityPublicKey;
   };
 
+  /**
+   * Events against the coordinator. The caller's signal and the client's close() are linked into a
+   * per-stream AbortController via listeners (no AbortSignal.any — Hermes support is uncertain);
+   * listeners are dropped when the stream ends.
+   */
   const events = (callerSignal?: AbortSignal): AsyncIterable<SparkEvent> => {
     const controller = new AbortController();
     const stop = (): void => {
@@ -267,17 +268,15 @@ export function createSparkClientWith(
           identityPublicKey: await options.signer.identityPublicKey(),
           network: options.network,
         });
-        const claimAt = async (index: number): Promise<ReadonlyArray<SparkLeaf>> => {
-          const transfer = pending[index];
-          if (transfer === undefined) {
-            return [];
+        const claimed: SparkLeaf[] = [];
+        for (const transfer of pending) {
+          if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
+            continue;
           }
-          return [
-            ...(await claimTransfer({ ...transferCoordinator, transfer })),
-            ...(await claimAt(index + 1)),
-          ];
-        };
-        return claimAt(0);
+          // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order; each consumes signer nonces
+          claimed.push(...(await claimTransfer({ ...transferCoordinator, transfer })));
+        }
+        return claimed;
       },
     },
     swapFeeEstimate: async (amountSats) => sspClient.swapFeeEstimate(amountSats),
