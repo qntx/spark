@@ -31,15 +31,22 @@ test("package exports resolve to packed files, not source", () => {
   expect(exportTarget(pkg.exports["."])).toBe("./dist/index.mjs");
   expect(exportTarget(pkg.exports["./crypto"])).toBe("./dist/crypto.mjs");
   expect(exportTarget(pkg.exports["./signer"])).toBe("./dist/signer.mjs");
+  expect(exportTarget(pkg.exports["./lnurl"])).toBe("./dist/lnurl.mjs");
   expect(pkg.publishConfig?.exports).toBeUndefined();
 });
 
-test.each(["index.mjs", "index.d.mts", "crypto.mjs", "crypto.d.mts", "signer.mjs", "signer.d.mts"])(
-  "dist/%s exists after vp pack",
-  (file) => {
-    expect(existsSync(resolve(root, "dist", file))).toBe(true);
-  },
-);
+test.each([
+  "index.mjs",
+  "index.d.mts",
+  "crypto.mjs",
+  "crypto.d.mts",
+  "signer.mjs",
+  "signer.d.mts",
+  "lnurl.mjs",
+  "lnurl.d.mts",
+])("dist/%s exists after vp pack", (file) => {
+  expect(existsSync(resolve(root, "dist", file))).toBe(true);
+});
 
 test("files and license fields match the Apache-2.0 contract", () => {
   expect(pkg.files).toStrictEqual(["dist", "LICENSE", "NOTICE"]);

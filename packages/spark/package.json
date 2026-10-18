@@ -37,6 +37,11 @@
       "import": "./dist/crypto.mjs",
       "default": "./dist/crypto.mjs"
     },
+    "./lnurl": {
+      "types": "./dist/lnurl.d.mts",
+      "import": "./dist/lnurl.mjs",
+      "default": "./dist/lnurl.mjs"
+    },
     "./signer": {
       "types": "./dist/signer.d.mts",
       "import": "./dist/signer.mjs",
