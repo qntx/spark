@@ -313,6 +313,10 @@
         "rust": {
           "module": "crates/interop/tests/lnurl_auth.rs",
           "tests": ["crates/interop/tests/lnurl_auth.rs"]
+        },
+        "ts": {
+          "module": "packages/spark/src/signer/lnurl-auth.ts",
+          "tests": ["packages/spark/tests/signer-lnurl-auth.test.ts"]
         }
       },
       "vectors": ["vectors/lnurl-auth.json"]
