@@ -18,6 +18,8 @@ import {
   transferPackageDigest,
 } from "../src/core/hashing/statements.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
+import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import { SignatureScheme, SignatureSchema } from "../src/proto/gen/common_pb.ts";
 import {
   ChallengeSchema,
@@ -188,7 +190,7 @@ type SparkImpl = Partial<{
   query_transfers_by_id: (req: unknown) => unknown;
 }>;
 
-function makeClient(signer: SparkSigner, sparkImpl: SparkImpl) {
+function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStore) {
   return createSparkClientWith(
     {
       network: "regtest",
@@ -196,6 +198,7 @@ function makeClient(signer: SparkSigner, sparkImpl: SparkImpl) {
       fetch: async () => Promise.reject(new Error("no fetch")),
       random: fixedRandom(),
       operators: OPERATORS,
+      ...(store === undefined ? {} : { store }),
     },
     {
       transportFactory: (interceptors) =>
@@ -1019,5 +1022,115 @@ describe("transfers.claim", () => {
       "not a receiver of this multi-receiver transfer",
     );
     receiver.dispose();
+  });
+
+  test("claimPending puts a chain for each returned leaf", async () => {
+    const receiver = await testSigner();
+    const receivedSecret = new Uint8Array(32).fill(88);
+    const pending = await pendingTransfer({ receiverSigner: receiver, receivedSecret });
+    const store = createMemorySparkStore();
+    const client = makeClient(
+      receiver,
+      {
+        query_pending_transfers: () =>
+          create(QueryTransfersResponseSchema, { transfers: [pending] }),
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        claim_transfer: (req) =>
+          create(ClaimTransferResponseSchema, {
+            transfer: create(TransferSchema, {
+              id: req.transferId,
+              status: TransferStatus.COMPLETED,
+              type: TransferType.TRANSFER,
+              network: Network.REGTEST,
+              leaves: [required(pending.leaves[0], "pending leaf")],
+            }),
+          }),
+      },
+      store,
+    );
+
+    const claimed = await client.transfers.claimPending();
+    const chains = await store.exitChains();
+    expect(chains.map((chain) => chain.leafId)).toStrictEqual([
+      required(claimed[0], "claimed leaf").id,
+    ]);
+    receiver.dispose();
+  });
+});
+
+function storedChain(leafId: string): SparkExitChain {
+  return {
+    leafId,
+    nodes: [{ nodeId: leafId, nodeTx: new Uint8Array([1]) }],
+    refundTx: new Uint8Array([2]),
+  };
+}
+
+describe("transfer stores exit chains", () => {
+  test("send deletes the chains of the leaves it spent", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const node = create(TreeNodeSchema, {
+      id: leaf.id,
+      treeId: leaf.treeId,
+      value: 100_000n,
+      nodeTx: leaf.nodeTx,
+      refundTx: leaf.refundTx,
+      vout: 0,
+      verifyingPublicKey: leaf.verifyingPublicKey,
+      ownerIdentityPublicKey: identity,
+      ownerSigningPublicKey: leaf.ownerSigningPublicKey,
+      signingKeyshare: {
+        ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+        threshold: THRESHOLD,
+        publicKey: leaf.verifyingPublicKey,
+        publicShares: {},
+      },
+      status: "AVAILABLE",
+      network: Network.REGTEST,
+      treenodeStatus: TreeNodeStatus.AVAILABLE,
+    });
+
+    const store = createMemorySparkStore();
+    await store.putExitChains([storedChain(LEAF_ID)]);
+    const client = makeClient(
+      signer,
+      {
+        query_nodes: () => nodesResponse([node]),
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        start_transfer_v2: (req) =>
+          create(StartTransferResponseSchema, {
+            transfer: create(TransferSchema, {
+              id: req.transferId,
+              senderIdentityPublicKey: req.ownerIdentityPublicKey,
+              receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+              status: TransferStatus.SENDER_INITIATED,
+              type: TransferType.TRANSFER,
+              network: Network.REGTEST,
+              totalValue: 100_000n,
+            }),
+          }),
+      },
+      store,
+    );
+
+    await client.transfers.send({
+      receiver: secp256k1.getPublicKey(RECEIVER_SECRET, true),
+      amountSats: 100_000,
+    });
+    await expect(store.exitChains()).resolves.toStrictEqual([]);
+    signer.dispose();
   });
 });

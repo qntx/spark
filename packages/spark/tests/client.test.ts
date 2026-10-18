@@ -3,11 +3,16 @@ import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import { createRouterTransport } from "@connectrpc/connect";
 import type { HandlerContext } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
+import { Transaction } from "@scure/btc-signer";
 import { expect, test } from "vite-plus/test";
 
 import { createSparkClientWith } from "../src/client/index.ts";
+import { p2trScriptFromPublicKey, txId } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
+import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import {
   ChallengeSchema,
   ProtectedChallengeSchema,
@@ -99,7 +104,11 @@ const sspFetch: typeof globalThis.fetch = async (_input, init) => {
   return new Response("not found", { status: 404 });
 };
 
-function makeClient(signer: ReturnType<typeof createTestSigner>, sparkImpl: object) {
+function makeClient(
+  signer: ReturnType<typeof createTestSigner>,
+  sparkImpl: object,
+  store?: SparkStore,
+) {
   return createSparkClientWith(
     {
       network: "mainnet",
@@ -108,6 +117,7 @@ function makeClient(signer: ReturnType<typeof createTestSigner>, sparkImpl: obje
       random: (length) => new Uint8Array(length).fill(1),
       sleep: async () => Promise.resolve(),
       operators: OPERATORS,
+      ...(store === undefined ? {} : { store }),
     },
     {
       transportFactory: (interceptors) =>
@@ -271,4 +281,69 @@ test("close() stops an event stream started with a caller signal", async () => {
   const last = await iterator.next();
   expect(first.done).not.toBe(true);
   expect(last.done).toBe(true);
+});
+
+const KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
+
+function fakeTxid(label: number): Uint8Array {
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    out[i] = (label + i) % 256;
+  }
+  return out;
+}
+
+function txSpending(prevTxid: Uint8Array, sequence: number): Uint8Array {
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({ txid: prevTxid, index: 0, sequence });
+  tx.addOutput({ script: p2trScriptFromPublicKey(KEY, "mainnet"), amount: 1000n });
+  return tx.toBytes(true);
+}
+
+function storedChain(leafId: string): SparkExitChain {
+  return {
+    leafId,
+    nodes: [{ nodeId: leafId, nodeTx: new Uint8Array([1]) }],
+    refundTx: new Uint8Array([2]),
+  };
+}
+
+test("leaves() reconciles stored exit chains with the current leaf set", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("stale-leaf"), storedChain("leaf-1")]);
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({ nodes: { "leaf-1": makeLeaf("leaf-1", 100n) }, offset: 1n }),
+    },
+    store,
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
+  expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["leaf-1"]);
+});
+
+test("unilateralExit persists the queried exit chain in the store", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const nodeTx = txSpending(fakeTxid(0x50), 0);
+  const refundTx = txSpending(hexToBytes(txId(nodeTx)), 500);
+  const leaf = makeLeaf("leaf-exit", 1000n);
+  leaf.nodeTx = nodeTx;
+  leaf.refundTx = refundTx;
+  const store = createMemorySparkStore();
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({ nodes: { "leaf-exit": leaf }, offset: 0n }),
+    },
+    store,
+  );
+  const txs = await client.withdrawals.unilateralExit(["leaf-exit"]);
+  expect(txs.map((tx) => tx.kind)).toStrictEqual(["node", "refund"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-exit"]);
+  expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["leaf-exit"]);
 });

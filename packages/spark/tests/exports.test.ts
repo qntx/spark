@@ -39,6 +39,9 @@ export type {
 } from "../src/signer/index.ts";
 export type {
   ExitTransaction,
+  FundingInput,
+  SparkExitChain,
+  SparkStore,
   SparkClient,
   SparkClientOptions,
   SparkEvent,
@@ -57,10 +60,13 @@ test("root runtime exports are exactly the core surface", () => {
     "SparkError",
     "SparkInputError",
     "SparkRequestError",
+    "buildCpfpChild",
+    "createMemorySparkStore",
     "createSparkClient",
     "decodeBolt11",
     "decodeSparkAddress",
     "encodeSparkAddress",
+    "exitTransactions",
     "isExpired",
     "sparkNetworkConfig",
     "verifySparkAddressSignature",

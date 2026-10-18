@@ -18,6 +18,8 @@ import {
 import { proofOfPossessionDigest } from "../src/core/hashing/statements.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError } from "../src/errors/index.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
+import type { SparkStore } from "../src/exit/store.ts";
 import {
   ChallengeSchema,
   ProtectedChallengeSchema,
@@ -151,7 +153,7 @@ type SparkImpl = Partial<{
   finalize_deposit_tree_creation: (req: FinalizeDepositTreeCreationRequest) => unknown;
 }>;
 
-function makeClient(signer: SparkSigner, sparkImpl: SparkImpl) {
+function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStore) {
   return createSparkClientWith(
     {
       network: "regtest",
@@ -159,6 +161,7 @@ function makeClient(signer: SparkSigner, sparkImpl: SparkImpl) {
       fetch: async () => Promise.reject(new Error("no fetch")),
       random: fixedRandom(),
       operators: OPERATORS,
+      ...(store === undefined ? {} : { store }),
     },
     {
       transportFactory: (interceptors) =>
@@ -452,6 +455,53 @@ describe("deposits.claim", () => {
         OPERATORS.map((op) => op.identifier),
       );
     }
+    signer.dispose();
+  });
+
+  test("stores the claimed exit chain in the client store", async () => {
+    const signer = await testSigner();
+    const [signingPublicKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { verifyingKeyFor } = buildClaimFixture();
+    const verifyingKey = verifyingKeyFor(signingPublicKey!);
+    const address = p2trAddressFromPublicKey(verifyingKey, "regtest");
+    const transaction = depositTxTo(address, 100_000n);
+
+    const store = createMemorySparkStore();
+    const client = makeClient(
+      signer,
+      {
+        query_unused_deposit_addresses: () =>
+          create(QueryUnusedDepositAddressesResponseSchema, {
+            depositAddresses: [
+              create(DepositAddressQueryResultSchema, {
+                depositAddress: address,
+                userSigningPublicKey: signingPublicKey!,
+                verifyingPublicKey: verifyingKey,
+                leafId: LEAF_ID,
+              }),
+            ],
+            offset: 1n,
+          }),
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: [0, 1, 2].map(() =>
+              create(RequestedSigningCommitmentsSchema, {
+                signingNonceCommitments: {},
+              }),
+            ),
+          }),
+        finalize_deposit_tree_creation: () =>
+          create(FinalizeDepositTreeCreationResponseSchema, {
+            rootNode: fakeLeaf("claimed-1"),
+          }),
+      },
+      store,
+    );
+
+    const leaf = await client.deposits.claim({ transaction });
+    expect(leaf.id).toBe("claimed-1");
+    const chains = await store.exitChains();
+    expect(chains.map((chain) => chain.leafId)).toStrictEqual(["claimed-1"]);
     signer.dispose();
   });
 
