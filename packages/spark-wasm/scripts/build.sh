@@ -8,7 +8,7 @@ pkg="$(cd "$(dirname "$0")/.." && pwd)"
 root="$(cd "${pkg}/../.." && pwd)"
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 1; }; }
-# binaryen (devDependency) provides wasm-opt on PATH inside bun/npm scripts.
+# Runs inside the pinned image (scripts/Dockerfile), which provides wasm-opt.
 need wasm-opt
 need cargo
 need openssl
@@ -27,12 +27,14 @@ RUSTFLAGS="--remap-path-prefix=${root}=. \
   --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=cargo \
   --remap-path-prefix=${sysroot}/lib/rustlib/src/rust=/rustc/${commit} \
   --remap-path-prefix=${sysroot}=rustc" \
-  cargo build -p spark-ffi --profile wasm --target wasm32-unknown-unknown
+  cargo build -p spark-ffi --profile wasm --target wasm32-unknown-unknown --locked
 
 out="${pkg}/src/spark.wasm"
+# Honour CARGO_TARGET_DIR: the container build redirects it away from the
+# mounted checkout, so the cdylib is not necessarily under ./target.
+cdylib="${CARGO_TARGET_DIR:-${root}/target}/wasm32-unknown-unknown/wasm/spark_ffi.wasm"
 # Rust emits memory.copy/memory.fill; binaryen needs the feature enabled.
-wasm-opt -Oz --enable-bulk-memory \
-  "target/wasm32-unknown-unknown/wasm/spark_ffi.wasm" -o "${out}"
+wasm-opt -Oz --enable-bulk-memory "${cdylib}" -o "${out}"
 
 digest="$(openssl dgst -sha256 -binary "${out}" | openssl base64 -A)"
 printf 'export const SPARK_WASM_INTEGRITY = "sha256-%s";\n' "${digest}" \
