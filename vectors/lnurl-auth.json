@@ -1,0 +1,153 @@
+{
+  "cases": [
+    {
+      "domain": "site.com",
+      "domainInput": "Site.COM",
+      "hashingKey": "21bb08e5349e42d874770a935abb4ac5c986c34a59d87c2a1cf4afb426c98c37",
+      "hmac": "d901232472773f935cff052695f9a593966ca83a0fe4dcfc0d81382e854eb5fe",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "027da5d64331f61260eb8e2b356403446555f525bc7dc35b991ec1447e4f58991f",
+      "path": [
+        3640730404,
+        1920417683,
+        1560216870,
+        2516166035
+      ],
+      "rootKey": "073c09c9d514a456addfb05479736383270d120ae88f20bd841f48e0457cec8c1605e57d7613bb1d44d1bd18b1d44b5f60f21eae739f57eedda920623bc98d85",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "signature": "3045022100fea478533fe923d9cc48633de6473e244b0c54d8de69fb77616b9ade3a5dbccd022074975d5d7f8356330b97b3b1aa99babd426075eb37d92f70a2e19e83fcce6103"
+    },
+    {
+      "domain": "auth.example.com",
+      "hashingKey": "21bb08e5349e42d874770a935abb4ac5c986c34a59d87c2a1cf4afb426c98c37",
+      "hmac": "3433ab025dd20551c2c6e0904b8ecff582d44c0691c1d6c99ca75422304232a0",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "03c7a3c0c8a7e4f27fd78037e02505dc9e3be872ebae901373c7cf9b9f453d3ad1",
+      "path": [
+        875801346,
+        1574045009,
+        3267813520,
+        1267650549
+      ],
+      "rootKey": "073c09c9d514a456addfb05479736383270d120ae88f20bd841f48e0457cec8c1605e57d7613bb1d44d1bd18b1d44b5f60f21eae739f57eedda920623bc98d85",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "signature": "304402202651d95fa08868bcebe141f9eb0de09eefae6a04b766fdfaf85660ddaf8d03b802207d1e194a9c7620594a2e88e7827084d3a55ba68a50e72c19328f8cd7b7d3a873"
+    },
+    {
+      "domain": "k1r3v4t9z2x5c8mnbv7qwertyu.onion",
+      "hashingKey": "21bb08e5349e42d874770a935abb4ac5c986c34a59d87c2a1cf4afb426c98c37",
+      "hmac": "e5b293da5cc3bd9da1bd4198e8833d7ee0c4faf3d2b05e650b3ee0da3db193bc",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "033451f83ba895854f11c4553102e4a5d7bc063217334395598cd29d1f86d6dcdb",
+      "path": [
+        3853685722,
+        1556331933,
+        2713534872,
+        3900915070
+      ],
+      "rootKey": "073c09c9d514a456addfb05479736383270d120ae88f20bd841f48e0457cec8c1605e57d7613bb1d44d1bd18b1d44b5f60f21eae739f57eedda920623bc98d85",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "signature": "304402201997e9e7ae16689139de63392de17057e2fbc4cc922df6be5e069ed8bda2f22f02206e93d026c317ea65492e5327fc9b324097e4d16e6d43341b6160f41fdd515549"
+    },
+    {
+      "domain": "site.com",
+      "domainInput": "Site.COM",
+      "hashingKey": "10fcf7cc8a2e59b9ae6d61d6c9b6812da119070415ee08dbb22962804b08fa26",
+      "hmac": "bfe717bf817eb6b6fc3d35fb1ef5784313a2e442940c4c4aa41586645759c814",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "02f7212733d2be9982cfa8e9e1f87a9287e23deb344a8773f019501a2424011306",
+      "path": [
+        3219593151,
+        2172565174,
+        4231869947,
+        519403587
+      ],
+      "rootKey": "283731fc5cf3e72962929d801b95acc188b9e38f2a5b256ad69a527c47babb9e5e75dd907ff7a1b2d34bee23439ec5bc41425a2e98acb85a8959d382291c4d8f",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30",
+      "signature": "3045022100c9d584b09645e7f5337d64e3333169ced334c2e5baae71f635919d283c5bcc7c022046900bb241db458424fbff9ce1d22adca729f63c8002a172795899c7053b3c47"
+    },
+    {
+      "domain": "auth.example.com",
+      "hashingKey": "10fcf7cc8a2e59b9ae6d61d6c9b6812da119070415ee08dbb22962804b08fa26",
+      "hmac": "e69a292b5b388ba7973f70ff659d24be7de2b61477b7c7b50be08d5717243cd4",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "03db0f7495dc3338525b36858ecb81c3566e75a0239078895f559c4aaabfb6d3f7",
+      "path": [
+        3868862763,
+        1530432423,
+        2537517311,
+        1704797374
+      ],
+      "rootKey": "283731fc5cf3e72962929d801b95acc188b9e38f2a5b256ad69a527c47babb9e5e75dd907ff7a1b2d34bee23439ec5bc41425a2e98acb85a8959d382291c4d8f",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30",
+      "signature": "30440220519ff9b05b466e71919c4b68d128ff8bb24f9a4664b8413891623fa31df9611602202ab015ab18eefc6981ebfa98e7228cf2ed2433ae4cde000026dd0fa0f5886566"
+    },
+    {
+      "domain": "k1r3v4t9z2x5c8mnbv7qwertyu.onion",
+      "hashingKey": "10fcf7cc8a2e59b9ae6d61d6c9b6812da119070415ee08dbb22962804b08fa26",
+      "hmac": "8ee565f534c3df9a523f0baf18571511cf62db8ee3ced915cc5b65e48b1880df",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "0304dbe98c05945af13b150da6caa1d7ad4d535eb541c3370cde7380081d581976",
+      "path": [
+        2397398517,
+        885251994,
+        1379863471,
+        408360209
+      ],
+      "rootKey": "283731fc5cf3e72962929d801b95acc188b9e38f2a5b256ad69a527c47babb9e5e75dd907ff7a1b2d34bee23439ec5bc41425a2e98acb85a8959d382291c4d8f",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30",
+      "signature": "304402204a1c81b3572d7abf7ab6d1b86bb9fa2cfd4882c8eb43349f6eef145647feb19e02201f85643cb8c85176cd88fbf0ee1e97eab6816eeded485f8f4a866b14cfdf55b9"
+    },
+    {
+      "domain": "site.com",
+      "domainInput": "Site.COM",
+      "hashingKey": "8d89ca1ee633ee05126873fbeeb6c5d280dc3e30f48e0b9027a510c4b8774ceb",
+      "hmac": "6d93108ff3c3bf9e1a13e020022dda979dcf433a2b31f401c46f0937bc1e48cc",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "033a754c701670bbe752bfb25e039d7a5a5695709ce84bac48dd721e5f60f1f133",
+      "path": [
+        1838354575,
+        4089692062,
+        437510176,
+        36559511
+      ],
+      "rootKey": "5c06c88def1aa81396d92d7b3da091dd712c7d909788c034c262c0e353db2099cbdff5ebaf14c1861f7f2813d3e679d64c84c8ba5d3548d7a4b926bdd0db2c61",
+      "seed": "fdfbf9f7f5f3f1efedebe9e7e5e3e1dfddd9d7d5d3d1cfcfcdcdcbc9c7c5c3c1bfbdbbb9b7b5b3b1afadaba9a7a5a3a1",
+      "signature": "304402207b8e165ce86ab23f22324de67bed4fe8c58ff98ed127892d19dd3c471896062f02206def99c7b06abbbb618e4467b56dcd5b39c6add7e131a9e96085932b36483305"
+    },
+    {
+      "domain": "auth.example.com",
+      "hashingKey": "8d89ca1ee633ee05126873fbeeb6c5d280dc3e30f48e0b9027a510c4b8774ceb",
+      "hmac": "1b5c9530101457a8066f1a36fd81f0e53a732309f99a3f050b6375586373dadc",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "024b09a2568ae7a9c19f5ab7a4742c0b5be53941d27d940b32508a4a717a25bde0",
+      "path": [
+        459052336,
+        269768616,
+        107944502,
+        4253151461
+      ],
+      "rootKey": "5c06c88def1aa81396d92d7b3da091dd712c7d909788c034c262c0e353db2099cbdff5ebaf14c1861f7f2813d3e679d64c84c8ba5d3548d7a4b926bdd0db2c61",
+      "seed": "fdfbf9f7f5f3f1efedebe9e7e5e3e1dfddd9d7d5d3d1cfcfcdcdcbc9c7c5c3c1bfbdbbb9b7b5b3b1afadaba9a7a5a3a1",
+      "signature": "3045022100d64c23dafc83a50f4457cac05914a74e32a52483ad9ed27c054a9fba1d01dc6b02203f85fffaef43768e470053344b5b47ac37c7d1ccd8ded7fb0faa9b8a04c266da"
+    },
+    {
+      "domain": "k1r3v4t9z2x5c8mnbv7qwertyu.onion",
+      "hashingKey": "8d89ca1ee633ee05126873fbeeb6c5d280dc3e30f48e0b9027a510c4b8774ceb",
+      "hmac": "8d70d535e2f47166add183a4d1273476fbc44bd00c39993b1baa201f4b29ccf9",
+      "k1": "e2af6254a8df433264fa23f67eb8188635d15ce883e8fc020989d5f82ae6f11e",
+      "linkingKey": "02dec3849be5cff5ef686a474603b835e252befde98c3fa836473a8f869c757f5e",
+      "path": [
+        2372982069,
+        3807670630,
+        2916189092,
+        3509007478
+      ],
+      "rootKey": "5c06c88def1aa81396d92d7b3da091dd712c7d909788c034c262c0e353db2099cbdff5ebaf14c1861f7f2813d3e679d64c84c8ba5d3548d7a4b926bdd0db2c61",
+      "seed": "fdfbf9f7f5f3f1efedebe9e7e5e3e1dfddd9d7d5d3d1cfcfcdcdcbc9c7c5c3c1bfbdbbb9b7b5b3b1afadaba9a7a5a3a1",
+      "signature": "30440220262110e7d69f2618e8fe38880b9c327914f0d855b7d87b6fb5c5cd3a5829f387022015b84b4f7a5a69fca765d1f51f4e60d253679ceeed7ec498e43b91f928f69325"
+    }
+  ],
+  "note": "Test vectors only. Never use these keys for funds.",
+  "source": "breez-spark-sdk crates/breez-sdk/common/src/lnurl/auth.rs + core/src/signer (LUD-04/LUD-05) @ breez-spark-sdk@956ff90b44bed9da9a559372ed3cf1fefe06b8a8"
+}
