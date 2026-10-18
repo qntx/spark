@@ -15,7 +15,7 @@ import type { RefundTxTrio } from "../core/bitcoin/index.ts";
 import { sendLeafSigningDigest } from "../core/hashing/statements.ts";
 import { sparkNetworkFromProto, sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
-import { SparkError, SparkInputError } from "../errors/index.ts";
+import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.ts";
 import { SignatureScheme } from "../proto/gen/common_pb.ts";
 import type { Signature } from "../proto/gen/common_pb.ts";
 import {
@@ -27,6 +27,7 @@ import {
   TransferType,
 } from "../proto/gen/spark_pb.ts";
 import type {
+  ClaimTransferResponse,
   RequestedSigningCommitments,
   SparkService,
   Transfer,
@@ -492,6 +493,66 @@ function verifyLeafSignature(
 }
 
 /**
+ * Whether the caller's own receiver leg is complete (upstream `isReceiverLegComplete`): the
+ * whole-transfer status flips to COMPLETED only once every receiver claims, so multi-receiver
+ * claimants key off their own receiver edge, with the whole status as a safety net.
+ */
+function isReceiverLegComplete(transfer: SparkTransfer, self: Uint8Array): boolean {
+  const wholeComplete = transfer.status === "COMPLETED";
+  if (transfer.receivers.length <= 1) {
+    return wholeComplete;
+  }
+  const own = transfer.receivers.find((receiver) => equalBytes(receiver.identityPublicKey, self));
+  return own !== undefined && (own.status === "COMPLETED" || wholeComplete);
+}
+
+/**
+ * Maps wire transfer leaves down to this receiver's SparkLeaves — claim responses may carry every
+ * receiver's leaves, and only `receiverId`'s edge (when set) becomes ours.
+ */
+function receiverLeaves(
+  leaves: ReadonlyArray<TransferLeaf>,
+  receiverId: string | undefined,
+): SparkLeaf[] {
+  const out: SparkLeaf[] = [];
+  for (const leaf of leaves) {
+    if (
+      leaf.leaf !== undefined &&
+      (receiverId === undefined || leaf.transferReceiverId === receiverId)
+    ) {
+      out.push(mapTreeNode(leaf.leaf));
+    }
+  }
+  return out;
+}
+
+/**
+ * `claim_transfer` answered `already_exists`: the operators finished this claim without us seeing
+ * the response (lost response or retried call). Re-query and return this receiver's leaves when its
+ * leg completed; rethrow the original error otherwise.
+ */
+async function recoverCompletedClaim(options: {
+  readonly spark: Client<typeof SparkService>;
+  readonly network: SparkNetwork;
+  readonly transferId: string;
+  readonly self: Uint8Array;
+  readonly receiverId: string | undefined;
+  readonly error: SparkRequestError;
+  readonly call?: CallOptions;
+}): Promise<SparkLeaf[]> {
+  const { error } = options;
+  const updated = await options.spark.query_transfers_by_id(
+    { transferIds: [options.transferId], network: sparkNetworkProto(options.network) },
+    options.call,
+  );
+  const [found] = updated.transfers;
+  if (found === undefined || !isReceiverLegComplete(mapTransfer(found), options.self)) {
+    throw error;
+  }
+  return receiverLeaves(found.leaves, options.receiverId);
+}
+
+/**
  * `claim_transfer` — receiver claim. Verifies the sender's per-leaf signature over
  * `sendLeafSigningDigest` and that each `secret_cipher` decrypts (inside the signer) to the key
  * whose public key the leaf was tweaked to, re-signs the refund transactions at their current
@@ -622,29 +683,36 @@ export async function claimTransfer(
     package: toBinary(ClaimPackageSchema, claimPackage),
   });
 
-  const response = await spark.claim_transfer(
-    {
+  let response: ClaimTransferResponse;
+  try {
+    response = await spark.claim_transfer(
+      {
+        transferId: transfer.id,
+        ownerIdentityPublicKey: self,
+        claimPackage,
+      },
+      options.call,
+    );
+  } catch (error) {
+    // The operators may have already finished this claim (e.g. a lost response or a
+    // retried call). Re-query and return this receiver's leaves if its leg completed.
+    if (!(error instanceof SparkRequestError) || error.code !== "already_exists") {
+      throw error;
+    }
+    return recoverCompletedClaim({
+      spark,
+      network,
       transferId: transfer.id,
-      ownerIdentityPublicKey: self,
-      claimPackage,
-    },
-    options.call,
-  );
+      self,
+      receiverId,
+      error,
+      ...(options.call === undefined ? {} : { call: options.call }),
+    });
+  }
   if (response.transfer === undefined) {
     throw new SparkError("claimTransfer: coordinator returned no transfer");
   }
-  // Scope the response to our receiver edge: claim responses may carry every receiver's
-  // leaves, and only ours become our leaves.
-  const claimed: SparkLeaf[] = [];
-  for (const leaf of response.transfer.leaves) {
-    if (
-      leaf.leaf !== undefined &&
-      (receiverId === undefined || leaf.transferReceiverId === receiverId)
-    ) {
-      claimed.push(mapTreeNode(leaf.leaf));
-    }
-  }
-  return claimed;
+  return receiverLeaves(response.transfer.leaves, receiverId);
 }
 
 /**

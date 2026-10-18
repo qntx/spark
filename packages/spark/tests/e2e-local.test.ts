@@ -101,6 +101,23 @@ async function claimPendingUntil(client: ReturnType<typeof createSparkClient>, d
   return claimPendingUntil(client, deadline);
 }
 
+function requiredTransfer<T>(value: T | undefined): T {
+  if (value === undefined) {
+    throw new Error("expected a pending transfer");
+  }
+  return value;
+}
+
+/** Polls `transfers.pending` until at least one incoming transfer is visible (bounded). */
+async function pendingUntil(client: ReturnType<typeof createSparkClient>, deadline: number) {
+  const pending = await client.transfers.pending();
+  if (pending.length > 0 || Date.now() > deadline) {
+    return pending;
+  }
+  await sleep(3000);
+  return pendingUntil(client, deadline);
+}
+
 /** Polls `leaves` until at least one AVAILABLE leaf is visible (bounded). */
 async function leavesUntil(client: ReturnType<typeof createSparkClient>, deadline: number) {
   const leaves = await client.leaves();
@@ -287,11 +304,20 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO deposit flow",
     });
     console.log("A sent transfer:", transfer.id, "status:", transfer.status);
 
-    const claimedByB = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    const [pendingTransfer] = await pendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    const claimedByB = await clientB.transfers.claim(requiredTransfer(pendingTransfer));
     expect(claimedByB.length).toBeGreaterThan(0);
     console.log("B claimed leaves:", claimedByB.map((l) => `${l.id}=${l.valueSats}`).join(", "));
     await expect(clientB.balance()).resolves.toBe(100_000);
     await expect(clientA.balance()).resolves.toBe(0);
+
+    // A second claim of the same transfer hits the SO's already_exists path and
+    // recovers the same leaves instead of failing.
+    const recovered = await clientB.transfers.claim(requiredTransfer(pendingTransfer));
+    expect(recovered.map((l) => l.id).toSorted()).toStrictEqual(
+      claimedByB.map((l) => l.id).toSorted(),
+    );
+    console.log("B recovered leaves on re-claim:", recovered.map((l) => l.id).join(", "));
 
     // Round trip: B sends the leaf back to A's identity key.
     const leavesB = await leavesUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
