@@ -112,9 +112,11 @@ jobs:
       - run: git diff --exit-code crates/spark-ffi/include/qntx_spark.h
 
   # spark.wasm and its SRI integrity hash are committed artifacts: rebuild and
-  # diff so the checked-in bytes always come from the pinned toolchain. With
-  # the exact rustc patch version and the path remaps in build.sh, x86_64
-  # Linux and aarch64 macOS builds are byte-identical (see SIZES.md).
+  # diff so the checked-in bytes always come from the pinned toolchain. wasm32
+  # codegen is host-dependent (x86_64-linux and aarch64-darwin rustc 1.99.1
+  # emit different modules from identical sources), so build:wasm always runs
+  # the pinned linux/amd64 image from packages/spark-wasm/scripts/Dockerfile —
+  # on this runner and on developer machines alike (see SIZES.md).
   wasm:
     runs-on: ubuntu-latest
     steps:
@@ -122,11 +124,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: "1.99.1"
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/spark-wasm build:wasm
       - run: git diff --exit-code packages/spark-wasm/src/spark.wasm packages/spark-wasm/src/integrity.ts

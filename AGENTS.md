@@ -45,7 +45,7 @@
 bun run lint && bun run typecheck && bun run test
 bun run test:parity
 bun run test:ffi-host                            # C host drives the shared vectors
-bun run --cwd packages/spark-wasm build:wasm     # cargo wasm profile + wasm-opt -Oz
+bun run --cwd packages/spark-wasm build:wasm     # hermetic docker build (pinned linux/amd64)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features -- -D warnings
