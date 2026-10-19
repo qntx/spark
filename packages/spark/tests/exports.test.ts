@@ -52,6 +52,10 @@ export type {
 export type {
   ExitTransaction,
   FundingInput,
+  LightningInvoice,
+  LightningPayment,
+  LightningReceiveStatus,
+  LightningSendStatus,
   ParsedSparkInvoice,
   SparkExitChain,
   SparkStore,
@@ -105,6 +109,7 @@ test("lnurl runtime exports are exactly the LNURL protocol surface", () => {
   expect(names(lnurl)).toStrictEqual([
     "checkLnurlUrl",
     "decodeLnurl",
+    "decryptSuccessAction",
     "encodeLnurl",
     "lightningAddressUrl",
     "lnurlGetJson",
