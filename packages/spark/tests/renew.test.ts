@@ -2,7 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { createRouterTransport, createClient } from "@connectrpc/connect";
 import type { Client, HandlerContext } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
@@ -107,11 +107,21 @@ function inputSequence(txBytes: Uint8Array): number {
 }
 
 /** A synthetic single-input single-output tx with the given input sequence. */
-function txWithSequence(sequence: number, scriptKey: Uint8Array, amountSats: bigint): Uint8Array {
+function txWithSequence(
+  sequence: number,
+  scriptKey: Uint8Array,
+  amountSats: bigint,
+  prevTxid: Uint8Array = new Uint8Array(32).fill(7),
+): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });
-  tx.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence });
+  tx.addInput({ txid: prevTxid, index: 0, sequence });
   tx.addOutput({ script: p2trScriptFromPublicKey(scriptKey, "regtest"), amount: amountSats });
   return tx.toBytes(true);
+}
+
+function txidBytes(tx: Uint8Array): Uint8Array {
+  const bytes = hexToBytes(txId(tx));
+  return bytes;
 }
 
 function fabricateLeaf(options: {
@@ -122,8 +132,20 @@ function fabricateLeaf(options: {
   parentNodeId?: string;
 }): SparkLeaf {
   const verifyingKey = verifyingKeyFor(options.signingPublicKey);
-  const nodeTx = txWithSequence(options.nodeSequence, verifyingKey, 100_000n);
-  const refundTx = txWithSequence(options.refundSequence, verifyingKey, 100_000n);
+  // A leaf with a parent spends the parent node tx; the deterministic parent
+  // fixture builds it as fabricateParent(verifyingKey) below.
+  const prevTxid =
+    options.parentNodeId === undefined
+      ? new Uint8Array(32).fill(7)
+      : txidBytes(txWithSequence(0, verifyingKey, 100_000n));
+  const nodeTx = txWithSequence(options.nodeSequence, verifyingKey, 100_000n, prevTxid);
+  // The refund must spend the node tx output 0 for exit-chain linkage checks.
+  const refundTx = txWithSequence(
+    options.refundSequence,
+    verifyingKey,
+    100_000n,
+    txidBytes(nodeTx),
+  );
   return {
     id: LEAF_ID,
     treeId: `tree-${LEAF_ID}`,
