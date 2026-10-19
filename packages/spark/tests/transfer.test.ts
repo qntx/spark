@@ -3,6 +3,7 @@ import { Code, ConnectError, createClient, createRouterTransport } from "@connec
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { base64 } from "@scure/base";
 import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
@@ -53,6 +54,7 @@ import type {
   ClaimTransferRequest,
   GetSigningCommitmentsRequest,
   InitiateSwapPrimaryTransferRequest,
+  QueryNodesRequest,
   StartTransferRequest,
   TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
@@ -197,15 +199,30 @@ type SparkImpl = Partial<{
   initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) => unknown;
 }>;
 
-function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStore) {
+function makeClient(
+  signer: SparkSigner,
+  sparkImpl: SparkImpl,
+  store?: SparkStore,
+  sspFetch?: typeof globalThis.fetch,
+  sspIdentity?: Uint8Array,
+) {
   return createSparkClientWith(
     {
       network: "regtest",
       signer,
-      fetch: async () => Promise.reject(new Error("no fetch")),
+      fetch: sspFetch ?? (async () => Promise.reject(new Error("no fetch"))),
       random: fixedRandom(),
       operators: OPERATORS,
       ...(store === undefined ? {} : { store }),
+      ...(sspIdentity === undefined
+        ? {}
+        : {
+            ssp: {
+              baseUrl: "https://ssp.test",
+              graphqlPath: "graphql",
+              identityPublicKey: sspIdentity,
+            },
+          }),
     },
     {
       transportFactory: (interceptors) =>
@@ -1146,14 +1163,12 @@ const SSP_SECRET = new Uint8Array(32).fill(0x53);
 const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
 const INBOUND_ID = "01989abc-def0-7000-8000-00000000000a";
 const SWAP_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000bb";
+const CHANGE_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000cc";
 
 describe("transfers.swap", () => {
-  /** The SSP's counter transfer to us: SSP sender, leaves sealed to our identity. */
-  async function sspInboundTransfer(
-    receiverIdentity: Uint8Array,
-    options?: { valueSats?: bigint; senderIdentity?: Uint8Array },
-  ) {
-    const receivedSecret = new Uint8Array(32).fill(88);
+  /** One inbound swap leaf: sealed to `receiverIdentity`, sender-signed by the SSP key. */
+  async function sspInboundLeaf(leafId: string, valueSats: bigint, receiverIdentity: Uint8Array) {
+    const receivedSecret = sha256(new TextEncoder().encode(leafId));
     const receivedPublicKey = secp256k1.getPublicKey(receivedSecret, true);
     const crypto = await loadWasmBackend();
     const secretCipher = crypto.eciesEncrypt(
@@ -1162,10 +1177,10 @@ describe("transfers.swap", () => {
       new Uint8Array(32).fill(6),
     );
     const { nodeTx, verifyingKey } = fabricateLeaf({
-      leafId: SWAP_LEAF_ID,
+      leafId,
       signingPublicKey: receivedPublicKey,
       ownerIdentityPublicKey: receiverIdentity,
-      ...(options?.valueSats === undefined ? {} : { valueSats: options.valueSats }),
+      valueSats,
     });
     const intermediateRefundTx = createCurrentTimelockRefundTxs({
       nodeTx,
@@ -1173,8 +1188,48 @@ describe("transfers.swap", () => {
       receivingPublicKey: receivedPublicKey,
       network: "regtest",
     }).cpfpRefund.txBytes;
-    const digest = sendLeafSigningDigest(SWAP_LEAF_ID, INBOUND_ID, secretCipher);
+    const digest = sendLeafSigningDigest(leafId, INBOUND_ID, secretCipher);
     const signature = secp256k1.sign(digest, SSP_SECRET, { prehash: false, lowS: true });
+    return create(TransferLeafSchema, {
+      leaf: create(TreeNodeSchema, {
+        id: leafId,
+        treeId: `tree-${leafId}`,
+        value: valueSats,
+        nodeTx,
+        refundTx: intermediateRefundTx,
+        vout: 0,
+        verifyingPublicKey: verifyingKey,
+        ownerIdentityPublicKey: receiverIdentity,
+        ownerSigningPublicKey: receivedPublicKey,
+        signingKeyshare: {
+          ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+          threshold: THRESHOLD,
+          publicKey: verifyingKey,
+          publicShares: {},
+        },
+        status: "AVAILABLE",
+        network: Network.REGTEST,
+        treenodeStatus: TreeNodeStatus.AVAILABLE,
+      }),
+      secretCipher,
+      sig: { case: "signature" as const, value: signature },
+      intermediateRefundTx,
+    });
+  }
+
+  /** The SSP's counter transfer to us: SSP sender, leaves sealed to our identity. */
+  async function sspInboundTransfer(
+    receiverIdentity: Uint8Array,
+    leaves: ReadonlyArray<{ leafId: string; valueSats: bigint }>,
+    options?: { senderIdentity?: Uint8Array },
+  ) {
+    const transferLeaves = await Promise.all(
+      leaves.map(async (leaf) => sspInboundLeaf(leaf.leafId, leaf.valueSats, receiverIdentity)),
+    );
+    let totalValue = 0n;
+    for (const leaf of leaves) {
+      totalValue += leaf.valueSats;
+    }
     return create(TransferSchema, {
       id: INBOUND_ID,
       senderIdentityPublicKey: options?.senderIdentity ?? SSP_IDENTITY,
@@ -1182,34 +1237,8 @@ describe("transfers.swap", () => {
       status: TransferStatus.SENDER_KEY_TWEAKED,
       type: TransferType.COUNTER_SWAP_V3,
       network: Network.REGTEST,
-      totalValue: options?.valueSats ?? 100_000n,
-      leaves: [
-        create(TransferLeafSchema, {
-          leaf: create(TreeNodeSchema, {
-            id: SWAP_LEAF_ID,
-            treeId: `tree-${SWAP_LEAF_ID}`,
-            value: options?.valueSats ?? 100_000n,
-            nodeTx,
-            refundTx: intermediateRefundTx,
-            vout: 0,
-            verifyingPublicKey: verifyingKey,
-            ownerIdentityPublicKey: receiverIdentity,
-            ownerSigningPublicKey: receivedPublicKey,
-            signingKeyshare: {
-              ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-              threshold: THRESHOLD,
-              publicKey: verifyingKey,
-              publicShares: {},
-            },
-            status: "AVAILABLE",
-            network: Network.REGTEST,
-            treenodeStatus: TreeNodeStatus.AVAILABLE,
-          }),
-          secretCipher,
-          sig: { case: "signature" as const, value: signature },
-          intermediateRefundTx,
-        }),
-      ],
+      totalValue,
+      leaves: transferLeaves,
     });
   }
 
@@ -1253,6 +1282,53 @@ describe("transfers.swap", () => {
     });
   }
 
+  /** SSP GraphQL stub: challenge/verify plus a SUCCEEDED RequestSwap pointing at INBOUND_ID. */
+  function sspFetch(operations: string[]): typeof globalThis.fetch {
+    return async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { operationName: string };
+      operations.push(body.operationName);
+      const json = async (data: unknown) => Promise.resolve(Response.json({ data }));
+      switch (body.operationName) {
+        case "GetChallenge":
+          return json({
+            get_challenge: {
+              get_challenge_output_protected_challenge: base64.encode(new Uint8Array(32).fill(9)),
+            },
+          });
+        case "VerifyChallenge":
+          return json({
+            verify_challenge: {
+              verify_challenge_output_session_token: "ssp-tok",
+              verify_challenge_output_valid_until: new Date(Date.now() + 600_000).toISOString(),
+            },
+          });
+        case "RequestSwap":
+          return json({
+            request_swap: {
+              request: {
+                leaves_swap_request_status: "SUCCEEDED",
+                leaves_swap_request_inbound_transfer: { transfer_spark_id: INBOUND_ID },
+                leaves_swap_request_fee: {
+                  currency_amount_original_value: 0,
+                  currency_amount_original_unit: "SATOSHI",
+                },
+              },
+            },
+          });
+        default:
+          return Promise.resolve(new Response("not found", { status: 404 }));
+      }
+    };
+  }
+
+  /** Query_nodes handler: owner queries get `owner`, nodeIds queries get `byId`. */
+  function nodesHandler(
+    owner: ReturnType<typeof nodesResponse>,
+    byId: ReturnType<typeof nodesResponse>,
+  ) {
+    return (req: unknown) => ((req as QueryNodesRequest).source.case === "nodeIds" ? byId : owner);
+  }
+
   /** A fabricated initiate_swap_primary_transfer response for one input leaf. */
   function swapResponse(
     req: InitiateSwapPrimaryTransferRequest,
@@ -1284,7 +1360,9 @@ describe("transfers.swap", () => {
       signingPublicKey: required(leafKey, "leaf public key"),
       ownerIdentityPublicKey: identity,
     });
-    const inbound = await sspInboundTransfer(identity);
+    const inbound = await sspInboundTransfer(identity, [
+      { leafId: SWAP_LEAF_ID, valueSats: 100_000n },
+    ]);
 
     // The fake SO cannot produce real operator shares; aggregateFrost is wrapped to capture the
     // jobs and return stand-in signatures. Real FROST adaptor math is covered by frost vectors.
@@ -1496,9 +1574,11 @@ describe("transfers.swap", () => {
       signingPublicKey: required(leafKey, "leaf public key"),
       ownerIdentityPublicKey: identity,
     });
-    const inbound = await sspInboundTransfer(identity, {
-      senderIdentity: secp256k1.getPublicKey(new Uint8Array(32).fill(0x77), true),
-    });
+    const inbound = await sspInboundTransfer(
+      identity,
+      [{ leafId: SWAP_LEAF_ID, valueSats: 100_000n }],
+      { senderIdentity: secp256k1.getPublicKey(new Uint8Array(32).fill(0x77), true) },
+    );
     const spark = swapSpark({
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -1536,7 +1616,9 @@ describe("transfers.swap", () => {
       signingPublicKey: required(leafKey, "leaf public key"),
       ownerIdentityPublicKey: identity,
     });
-    const inbound = await sspInboundTransfer(identity, { valueSats: 50_000n });
+    const inbound = await sspInboundTransfer(identity, [
+      { leafId: SWAP_LEAF_ID, valueSats: 50_000n },
+    ]);
     const spark = swapSpark({
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -1572,6 +1654,109 @@ describe("transfers.swap", () => {
         random: fixedRandom(),
       }),
     ).rejects.toThrow("already ours");
+    signer.dispose();
+  });
+
+  test("sendSats swaps leaves first when no exact combination exists", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const node = create(TreeNodeSchema, {
+      id: leaf.id,
+      treeId: leaf.treeId,
+      value: 100_000n,
+      nodeTx: leaf.nodeTx,
+      refundTx: leaf.refundTx,
+      vout: 0,
+      verifyingPublicKey: leaf.verifyingPublicKey,
+      ownerIdentityPublicKey: identity,
+      ownerSigningPublicKey: leaf.ownerSigningPublicKey,
+      signingKeyshare: {
+        ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+        threshold: THRESHOLD,
+        publicKey: leaf.verifyingPublicKey,
+        publicShares: {},
+      },
+      status: "AVAILABLE",
+      network: Network.REGTEST,
+      treenodeStatus: TreeNodeStatus.AVAILABLE,
+    });
+    const inbound = await sspInboundTransfer(identity, [
+      { leafId: SWAP_LEAF_ID, valueSats: 60_000n },
+      { leafId: CHANGE_LEAF_ID, valueSats: 40_000n },
+    ]);
+    const claimedNodes = inbound.leaves.map((entry) => required(entry.leaf, "inbound leaf"));
+
+    let swapReq: InitiateSwapPrimaryTransferRequest | undefined;
+    let startReq: StartTransferRequest | undefined;
+    const operations: string[] = [];
+    const store = createMemorySparkStore();
+    await store.putExitChains([storedChain(LEAF_ID)]);
+    const client = makeClient(
+      signer,
+      {
+        query_nodes: nodesHandler(nodesResponse([node]), nodesResponse([node, ...claimedNodes])),
+        get_signing_commitments: (req) =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3 * Math.max(req.nodeIds.length, req.nodeIdCount)),
+          }),
+        initiate_swap_primary_transfer: (req) => {
+          swapReq = req;
+          return swapResponse(req, leaf);
+        },
+        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+        claim_transfer: (req) =>
+          create(ClaimTransferResponseSchema, {
+            transfer: create(TransferSchema, {
+              id: req.transferId,
+              status: TransferStatus.COMPLETED,
+              type: TransferType.COUNTER_SWAP_V3,
+              network: Network.REGTEST,
+              leaves: inbound.leaves,
+            }),
+          }),
+        start_transfer_v2: (req) => {
+          startReq = req;
+          return create(StartTransferResponseSchema, {
+            transfer: create(TransferSchema, {
+              id: req.transferId,
+              senderIdentityPublicKey: req.ownerIdentityPublicKey,
+              receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+              status: TransferStatus.SENDER_INITIATED,
+              type: TransferType.TRANSFER,
+              network: Network.REGTEST,
+              totalValue: 60_000n,
+            }),
+          });
+        },
+      },
+      store,
+      sspFetch(operations),
+      SSP_IDENTITY,
+    );
+
+    const receiver = secp256k1.getPublicKey(RECEIVER_SECRET, true);
+    const sent = await client.transfers.send({ receiver, amountSats: 60_000 });
+    expect(sent.status).toBe("SENDER_INITIATED");
+    expect(operations).toContain("RequestSwap");
+
+    const swapRequest = required(swapReq, "initiate_swap_primary_transfer request");
+    expect(swapRequest.adaptorPublicKeys?.adaptorPublicKey).toHaveLength(33);
+    expect(swapRequest.transfer?.receiverIdentityPublicKey).toStrictEqual(SSP_IDENTITY);
+
+    const start = required(startReq, "start_transfer_v2 request");
+    const sendPackage = required(start.transferPackage, "send transfer package");
+    expect(sendPackage.leavesToSend.map((job) => job.leafId)).toStrictEqual([SWAP_LEAF_ID]);
+    expect(start.receiverIdentityPublicKey).toStrictEqual(receiver);
+
+    // The swap input and the sent leaf chains are gone; the change leaf's chain stays.
+    const chains = await store.exitChains();
+    expect(chains.map((chain) => chain.leafId)).toStrictEqual([CHANGE_LEAF_ID]);
     signer.dispose();
   });
 });
