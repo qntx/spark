@@ -1,3 +1,4 @@
+import { serverErrorText } from "../core/text.ts";
 import { SparkRequestError } from "../errors/index.ts";
 
 export type JsonObject = Record<string, unknown>;
@@ -44,7 +45,7 @@ export async function lnurlGetJson(
   if (parsed["status"] === "ERROR") {
     const { reason } = parsed;
     throw new SparkRequestError(
-      `lnurl error: ${typeof reason === "string" ? reason : "no reason given"}`,
+      `lnurl error: ${typeof reason === "string" ? serverErrorText(reason) : "no reason given"}`,
       { code: "lnurl_error" },
     );
   }

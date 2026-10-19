@@ -217,6 +217,24 @@ test("graphql errors map to SparkRequestError with the extensions code", async (
   });
 });
 
+test("graphql error messages are sanitized", async () => {
+  const { fetchImpl } = fakeSsp({
+    graphqlError: { message: `oops\nforged\u0007 ${"y".repeat(300)}` },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const thrown = await client.swapFeeEstimate(1).then(
+    () => {
+      throw new Error("expected rejection");
+    },
+    (error: unknown) => error,
+  );
+  const { message } = thrown as Error;
+  expect(message).toContain("oopsforged");
+  expect(message).not.toContain("\n");
+  expect(message).not.toContain("\u0007");
+  expect(message.length).toBeLessThanOrEqual("ssp error: ".length + 256 + 1);
+});
+
 const SWAP_INPUT = {
   adaptorPublicKey: new Uint8Array(33).fill(2),
   totalAmountSats: 150,
