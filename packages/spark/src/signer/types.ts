@@ -82,7 +82,9 @@ export type FrostAggregateJob = {
  *
  * - `so-challenge`: `challenge` is a serialized `spark_authn.Challenge`; decoded strictly (no unknown
  *   fields), its `publicKey` must equal the identity public key as a curve point.
- * - `ssp-challenge`: `protectedChallenge` is the base64 SSP session challenge.
+ * - `ssp-challenge`: `protectedChallenge` is the base64 SSP session challenge; decoded bytes must be
+ *   an `ssp_authn.ProtectedChallenge` (unknown fields tolerated) whose `challenge.public_key` is
+ *   the identity public key in either encoding.
  * - `transfer-package` / `claim-package`: `package` is the serialized `spark.TransferPackage` /
  *   `spark.ClaimPackage`; the digest is computed from the decoded message fields.
  * - `static-deposit-claim`: the fixed-quote claim statement (`txid` in display byte order,

@@ -59,10 +59,11 @@ export function createTestSigner(secretKey: Uint8Array): SparkSigner & {
             { format: "der", prehash: false },
           );
         case "ssp-challenge":
-          return secp256k1.sign(sspChallengeDigest(statement.protectedChallenge), secretKey, {
-            format: "der",
-            prehash: false,
-          });
+          return secp256k1.sign(
+            sspChallengeDigest(statement.protectedChallenge, publicKey),
+            secretKey,
+            { format: "der", prehash: false },
+          );
         case "token-transaction":
           return schnorr.sign(
             hashPartialTokenTransaction(

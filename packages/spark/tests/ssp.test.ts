@@ -1,13 +1,34 @@
+import { toBinary } from "@bufbuild/protobuf";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
 import { expect, test } from "vite-plus/test";
 
 import { sspChallengeDigest } from "../src/core/hashing/index.ts";
+import { ProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createSspClient } from "../src/ssp/index.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 const SIGNER = createTestSigner(new Uint8Array(32).fill(7));
+const SIGNER_PUBLIC_KEY = secp256k1.getPublicKey(SIGNER.secretKey, true);
+
+/** A valid ssp_authn.ProtectedChallenge issued to `publicKey`, base64-encoded. */
+export function protectedChallengeFor(publicKey: Uint8Array): string {
+  return base64.encode(
+    toBinary(ProtectedChallengeSchema, {
+      $typeName: "ssp_authn.ProtectedChallenge",
+      version: 1,
+      challenge: {
+        $typeName: "ssp_authn.Challenge",
+        version: 1,
+        timestamp: 1_786_974_052n,
+        nonce: new Uint8Array(32).fill(9),
+        publicKey,
+      },
+      serverHmac: new Uint8Array(32).fill(7),
+    }),
+  );
+}
 
 type CapturedRequest = {
   operationName: string;
@@ -25,8 +46,7 @@ function fakeSsp(handlers: {
   swap?: { status?: string; sparkId?: string | null; feeValue?: number; feeUnit?: string };
 }) {
   const requests: CapturedRequest[] = [];
-  const challengeBytes = new Uint8Array(32).fill(9);
-  const challenge = handlers.challenge ?? base64.encode(challengeBytes);
+  const challenge = handlers.challenge ?? protectedChallengeFor(SIGNER_PUBLIC_KEY);
   let authedCalls = 0;
   const fetchImpl: typeof globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as {
@@ -43,7 +63,10 @@ function fakeSsp(handlers: {
         });
       case "VerifyChallenge": {
         const signature = base64.decode(String(body.variables["signature"]));
-        const digest = sspChallengeDigest(String(body.variables["protected_challenge"]));
+        const digest = sspChallengeDigest(
+          String(body.variables["protected_challenge"]),
+          hexToBytes(String(body.variables["identity_public_key"])),
+        );
         const valid = secp256k1.verify(
           signature,
           digest,

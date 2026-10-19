@@ -45,3 +45,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Breez Spark SDK
+
+- Repository: <https://github.com/breez/spark-sdk>
+- License: MIT
+- Copyright: Breez
+- Used by: `proto/ssp/ssp_authn.proto` vendors Breez's transcription of the SSP
+  authentication challenge schema (`crates/spark/protos/ssp/ssp_authn.proto`,
+  pinned commit 956ff90), and the challenge validation that consumes it follows
+  `crates/spark/src/ssp/challenge.rs`. The MIT license text is reproduced in the
+  `frost` section above.
