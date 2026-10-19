@@ -51,7 +51,10 @@ function verifyLeafSignature(
       return false;
     }
     if (sig?.case === "signature") {
-      return secp256k1.verify(sig.value, digest, senderPublicKey, { prehash: false });
+      return secp256k1.verify(sig.value, digest, senderPublicKey, {
+        format: sig.value.length === 64 ? "compact" : "der",
+        prehash: false,
+      });
     }
     return false;
   } catch {

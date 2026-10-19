@@ -56,6 +56,7 @@ import type {
   InitiateSwapPrimaryTransferRequest,
   QueryNodesRequest,
   StartTransferRequest,
+  Transfer,
   TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
@@ -504,6 +505,7 @@ describe("transfers.claim", () => {
     leafOwnerKey?: Uint8Array;
     corruptSig?: boolean;
     typedSig?: boolean;
+    legacySignature?: "der" | "malformed";
     transferReceiverId?: string;
   }) {
     const leafId = options.leafId ?? LEAF_ID;
@@ -533,6 +535,12 @@ describe("transfers.claim", () => {
       SENDER_SECRET,
       { prehash: false, lowS: true },
     );
+    const legacyValue =
+      options.legacySignature === "der"
+        ? secp256k1.Signature.fromBytes(signature, "compact").toBytes("der")
+        : options.legacySignature === "malformed"
+          ? new Uint8Array(70).fill(0xab)
+          : signature;
     const sig =
       options.typedSig === true
         ? {
@@ -542,7 +550,7 @@ describe("transfers.claim", () => {
               signature: secp256k1.Signature.fromBytes(signature, "compact").toBytes("der"),
             }),
           }
-        : { case: "signature" as const, value: signature };
+        : { case: "signature" as const, value: legacyValue };
     return create(TransferLeafSchema, {
       leaf: create(TreeNodeSchema, {
         id: leafId,
@@ -580,6 +588,7 @@ describe("transfers.claim", () => {
     leafOwnerKey?: Uint8Array;
     corruptSig?: boolean;
     typedSig?: boolean;
+    legacySignature?: "der" | "malformed";
     status?: TransferStatus;
     receiverIdentityPublicKey?: Uint8Array;
     receivers?: ReadonlyArray<{ id: string; identityPublicKey: Uint8Array }>;
@@ -593,6 +602,9 @@ describe("transfers.claim", () => {
       ...(options.leafOwnerKey === undefined ? {} : { leafOwnerKey: options.leafOwnerKey }),
       ...(options.corruptSig === undefined ? {} : { corruptSig: options.corruptSig }),
       ...(options.typedSig === undefined ? {} : { typedSig: options.typedSig }),
+      ...(options.legacySignature === undefined
+        ? {}
+        : { legacySignature: options.legacySignature }),
       ...(options.transferReceiverId === undefined
         ? {}
         : { transferReceiverId: options.transferReceiverId }),
@@ -741,6 +753,62 @@ describe("transfers.claim", () => {
     });
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  const legacyClaimFakes = (pending: Transfer) => ({
+    get_signing_commitments: () =>
+      create(GetSigningCommitmentsResponseSchema, {
+        signingCommitments: commitmentGroup(3),
+      }),
+    claim_transfer: (req: ClaimTransferRequest) =>
+      create(ClaimTransferResponseSchema, {
+        transfer: create(TransferSchema, {
+          id: req.transferId,
+          status: TransferStatus.COMPLETED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          leaves: [required(pending.leaves[0], "pending leaf")],
+        }),
+      }),
+  });
+
+  test("accepts a legacy compact sender signature", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+    });
+    const client = makeClient(receiver, legacyClaimFakes(pending));
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("accepts a legacy DER sender signature", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      legacySignature: "der",
+    });
+    const client = makeClient(receiver, legacyClaimFakes(pending));
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("rejects malformed legacy signature bytes", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      legacySignature: "malformed",
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+      "sender signature verification failed",
+    );
     receiver.dispose();
   });
 
