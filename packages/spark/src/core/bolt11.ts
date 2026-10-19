@@ -65,7 +65,7 @@ const TIMESTAMP_WORDS = 7;
 const SIGNATURE_WORDS = 104;
 const HASH_WORDS = 52; // 32 bytes + 4 padding bits
 const PAYEE_WORDS = 53; // 33 bytes
-const ROUTE_HOP_WORDS = 82; // 51 bytes
+const ROUTE_HOP_BYTES = 51; // 408 bits — not a whole number of 5-bit words
 
 const DEFAULT_EXPIRY_SECONDS = 3600;
 const DEFAULT_MIN_FINAL_CLTV = 18;
@@ -192,12 +192,15 @@ function parseAmount(hrpAmount: string): bigint | undefined {
 }
 
 function parseRouteHint(words: ReadonlyArray<number>): Bolt11RouteHintHop[] {
-  if (words.length === 0 || words.length % ROUTE_HOP_WORDS !== 0) {
+  // A 51-byte entry is not word-aligned, so multi-hop fields must be decoded to bytes before
+  // they are sliced — slicing words at 82-word boundaries desyncs every hop after the first.
+  const data = wordsToBytes(words);
+  if (data.length === 0 || data.length % ROUTE_HOP_BYTES !== 0) {
     fail("route hint: data is not a multiple of the 51-byte entry size");
   }
   const hops: Bolt11RouteHintHop[] = [];
-  for (let offset = 0; offset < words.length; offset += ROUTE_HOP_WORDS) {
-    const entry = wordsToBytes(words.slice(offset, offset + ROUTE_HOP_WORDS));
+  for (let offset = 0; offset < data.length; offset += ROUTE_HOP_BYTES) {
+    const entry = data.subarray(offset, offset + ROUTE_HOP_BYTES);
     hops.push({
       publicKey: entry.slice(0, 33),
       shortChannelId: entry.slice(33, 41),
