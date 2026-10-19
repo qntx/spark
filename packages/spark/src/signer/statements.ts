@@ -1,7 +1,7 @@
 import { fromBinary } from "@bufbuild/protobuf";
 import type { DescMessage, MessageShape } from "@bufbuild/protobuf";
 import { secp256k1, schnorr } from "@noble/curves/secp256k1.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 import { taprootKeySpendSighash } from "../core/bitcoin/sighash.ts";
 import { hashSparkInvoice } from "../core/hashing/invoice.ts";
@@ -93,7 +93,7 @@ export function statementDigest(
         network: statement.network,
         requestType: "fixed",
         creditAmountSats: statement.creditAmountSats,
-        payload: utf8ToBytes(statement.sspSignature),
+        payload: hexField(statement.sspSignature, "static-deposit-claim sspSignature"),
       }),
       format: "der",
     };
@@ -106,7 +106,7 @@ export function statementDigest(
         network: statement.network,
         requestType: "refund",
         creditAmountSats: statement.amount,
-        payload: utf8ToBytes(bytesToHex(taprootKeySpendSighash(statement.target))),
+        payload: taprootKeySpendSighash(statement.target),
       }),
       format: "der",
     };
@@ -202,6 +202,13 @@ function decode<Desc extends DescMessage>(
   } catch (error) {
     throw new SparkInputError(`${name}: failed to decode protobuf`, { cause: error });
   }
+}
+
+function hexField(hex: string, field: string): Uint8Array {
+  if (!/^(?:[0-9a-fA-F]{2})*$/.test(hex)) {
+    throw new SparkInputError(`${field}: expected a hex string`);
+  }
+  return hexToBytes(hex);
 }
 
 function decodePoint(

@@ -442,7 +442,7 @@ describe("signIdentity", () => {
         network: "regtest",
         requestType: "fixed",
         creditAmountSats: 50_000,
-        payload: utf8ToBytes("aabbcc"),
+        payload: hexToBytes("aabbcc"),
       }),
       identity,
     );
@@ -469,7 +469,7 @@ describe("signIdentity", () => {
         network: "regtest",
         requestType: "refund",
         creditAmountSats: 21_000,
-        payload: utf8ToBytes(bytesToHex(taprootKeySpendSighash(TARGET))),
+        payload: taprootKeySpendSighash(TARGET),
       }),
       identity,
     );
@@ -1121,7 +1121,7 @@ describe("claimStaticDeposit + receivedPublicKeys", () => {
         network: "regtest",
         requestType: "fixed",
         creditAmountSats: 10_000,
-        payload: utf8ToBytes("ff00"),
+        payload: hexToBytes("ff00"),
       }),
       identity,
     );

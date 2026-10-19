@@ -94,9 +94,9 @@ export type StaticDepositStatement = {
 /**
  * The static-deposit user statement digest: SHA-256 over the concatenation "claim_static_deposit" ‖
  * network ‖ txid(hex text) ‖ vout(u32 LE) ‖ requestType(u8) ‖ creditAmount(u64 LE) ‖ payload where
- * payload is the SSP signature for claims/max-fee and the refund spend transaction's sighash for
- * refunds. Network is the lowercase network name ("mainnet"/"regtest"). This is the only form the
- * SDK signs (spark-wallet.ts `getStaticDepositSigningPayload` + sha256).
+ * payload is the raw SSP signature bytes for claims/max-fee and the raw sighash of the refund spend
+ * transaction for refunds. Network is the lowercase network name ("mainnet"/"regtest"). This is the
+ * only form the SDK signs (spark-wallet.ts `getStaticDepositSigningPayload` + sha256).
  */
 export function staticDepositStatementDigest({
   transactionId,
