@@ -15,8 +15,8 @@ import { uuidFromBytes, uuidToBytes } from "../uuid.ts";
 import { newHasher } from "./hashstructure.ts";
 
 // Upstream references: sdks/js/packages/spark-sdk/src/utils/{transfer_package,
-// proof}.ts, spark-wallet/spark-wallet.ts (static deposit + instant claim +
-// watchtower statements), services/transfer.ts (per-leaf send digest), and the
+// proof}.ts, spark-wallet/spark-wallet.ts (static deposit + watchtower
+// statements), services/transfer.ts (per-leaf send digest), and the
 // Go counterparts in spark/common/{transfer_package,proof}.go and
 // spark/so/handler (buildonspark/spark@0b3a32a).
 
@@ -130,36 +130,6 @@ export function staticDepositStatementDigest({
       payload,
     ),
   );
-}
-
-/**
- * The 0-confirmation instant static deposit statement digest: a tagged hashstructure digest
- * (requestType 3 = Instant) over the claim terms.
- */
-export function instantStaticDepositStatementDigest({
-  network,
-  creditAmountSats,
-  secondaryCreditAmountSats,
-  destinationAddress,
-  satsValue,
-  sspSignature,
-}: {
-  readonly network: SparkNetwork;
-  readonly creditAmountSats: number;
-  readonly secondaryCreditAmountSats: number;
-  readonly destinationAddress: string;
-  readonly satsValue: number;
-  readonly sspSignature: Uint8Array;
-}): Uint8Array {
-  return newHasher(["spark", "claim_instant_static_deposit"])
-    .addString(network)
-    .addUint8(3) // requestType = Instant
-    .addUint64(creditAmountSats)
-    .addUint64(secondaryCreditAmountSats)
-    .addString(destinationAddress)
-    .addUint64(satsValue)
-    .addBytes(sspSignature)
-    .hash();
 }
 
 const NETWORK_STATEMENT_NAME: Record<SparkNetwork, string> = {

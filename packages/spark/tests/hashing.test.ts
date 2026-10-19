@@ -17,22 +17,15 @@ import type { Hasher } from "../src/core/hashing/index.ts";
 import {
   authnChallengeDigest,
   claimPackageDigest,
-  coopExitTarget,
   hashFinalTokenTransaction,
   hashPartialTokenTransaction,
   hashProto,
   hashSparkInvoice,
   hashTokenTransactionV3,
-  hashTransferManifest,
-  instantStaticDepositStatementDigest,
   newHasher,
   proofOfPossessionDigest,
-  quoteEnvelopeDigest,
-  receiveAttestorTarget,
   sendLeafSigningDigest,
-  sendTarget,
   staticDepositStatementDigest,
-  staticDepositTarget,
   transferPackageDigest,
   watchtowerRecoveryStatementDigest,
 } from "../src/core/hashing/index.ts";
@@ -94,28 +87,6 @@ type HasherOp =
   | { uint64: string }
   | { mapStringToBytes: Record<string, string> };
 
-type QuoteTargetCase = {
-  name: string;
-  kind: string;
-  expected: string;
-  paymentHashHex?: string;
-  withdrawalAddress?: string;
-  leafSetHashHex?: string;
-  txidHex?: string;
-  vout?: number;
-};
-
-type QuoteEnvelopeCase = {
-  name: string;
-  network: number;
-  manifestHashHex: string;
-  reason: number;
-  role: number;
-  targetHex: string;
-  expected?: string;
-  error?: string;
-};
-
 type HashingVectors = {
   hashstructure: Array<{
     name: string;
@@ -134,9 +105,6 @@ type HashingVectors = {
   }>;
   partialTokenTransaction: Array<{ name: string; messageHex: string; expected: string }>;
   finalTokenTransaction: Array<{ name: string; messageHex: string; expected: string }>;
-  transferManifest: Array<{ name: string; manifestHex: string; expected?: string; error?: string }>;
-  quoteEnvelope: QuoteEnvelopeCase[];
-  quoteTargets: QuoteTargetCase[];
   tokenInvoice: Array<{
     name: string;
     receiverIdentityPublicKey: string;
@@ -191,21 +159,6 @@ function replayHasherOps(tag: ReadonlyArray<string>, values: HasherOp[]): Hasher
   return h;
 }
 
-function quoteTargetDigest(c: QuoteTargetCase): Uint8Array {
-  switch (c.kind) {
-    case "receiveAttestor":
-      return receiveAttestorTarget(hexToBytes(c.paymentHashHex ?? ""));
-    case "send":
-      return sendTarget(hexToBytes(c.paymentHashHex ?? ""));
-    case "coopExit":
-      return coopExitTarget(c.withdrawalAddress ?? "", hexToBytes(c.leafSetHashHex ?? ""));
-    case "staticDeposit":
-      return staticDepositTarget(hexToBytes(c.txidHex ?? ""), c.vout ?? 0);
-    default:
-      throw new Error(`unknown quote target kind ${c.kind}`);
-  }
-}
-
 test.each(VECTORS.hashstructure)("hashstructure vector $name", (c) => {
   expect(bytesToHex(replayHasherOps(c.tag, c.values).hash())).toBe(c.expected);
 });
@@ -250,56 +203,6 @@ test.each(VECTORS.partialTokenTransaction)("partialTokenTransaction vector $name
 test.each(VECTORS.finalTokenTransaction)("finalTokenTransaction vector $name", (c) => {
   const msg = fromBinary(FinalTokenTransactionSchema, hexToBytes(c.messageHex));
   expect(bytesToHex(hashFinalTokenTransaction(msg))).toBe(c.expected);
-});
-
-test.each(VECTORS.transferManifest.filter((c) => c.error === undefined))(
-  "transferManifest vector $name",
-  (c) => {
-    const msg = fromBinary(TransferManifestSchema, hexToBytes(c.manifestHex));
-    expect(bytesToHex(hashTransferManifest(msg))).toBe(c.expected);
-  },
-);
-
-test.each(VECTORS.transferManifest.filter((c) => c.error !== undefined))(
-  "transferManifest vector $name rejects",
-  (c) => {
-    const msg = fromBinary(TransferManifestSchema, hexToBytes(c.manifestHex));
-    expect(() => hashTransferManifest(msg)).toThrow(SparkInputError);
-  },
-);
-
-function quoteEnvelopeRequest(c: QuoteEnvelopeCase): {
-  network: number;
-  manifestHash: Uint8Array;
-  reason: number;
-  role: number;
-  target: Uint8Array;
-} {
-  return {
-    network: c.network,
-    manifestHash: hexToBytes(c.manifestHashHex),
-    reason: c.reason,
-    role: c.role,
-    target: hexToBytes(c.targetHex),
-  };
-}
-
-test.each(VECTORS.quoteEnvelope.filter((c) => c.error === undefined))(
-  "quoteEnvelope vector $name",
-  (c) => {
-    expect(bytesToHex(quoteEnvelopeDigest(quoteEnvelopeRequest(c)))).toBe(c.expected);
-  },
-);
-
-test.each(VECTORS.quoteEnvelope.filter((c) => c.error !== undefined))(
-  "quoteEnvelope vector $name rejects",
-  (c) => {
-    expect(() => quoteEnvelopeDigest(quoteEnvelopeRequest(c))).toThrow(SparkInputError);
-  },
-);
-
-test.each(VECTORS.quoteTargets)("quoteTarget vector $name ($kind)", (c) => {
-  expect(bytesToHex(quoteTargetDigest(c))).toBe(c.expected);
 });
 
 test.each(VECTORS.tokenInvoice)("tokenInvoice prepare vector $name", (c) => {
@@ -441,34 +344,6 @@ test.each(STATIC_DEPOSIT_CASES)(
   },
 );
 
-test("instant static deposit statement (Go generated)", () => {
-  const destination = "bcrt1qqqqsyqcyq5rqwzqfpg9scrgwpugpzysnard0ew";
-  expect(
-    bytesToHex(
-      instantStaticDepositStatementDigest({
-        network: "mainnet",
-        creditAmountSats: 12345,
-        secondaryCreditAmountSats: 678,
-        destinationAddress: destination,
-        satsValue: 99999,
-        sspSignature: GO_SSP_SIG,
-      }),
-    ),
-  ).toBe("4dc6fa0183d1f995c84f78d1ea88bd89892f15cc5f4cb71cbecf38d14228e211");
-  expect(
-    bytesToHex(
-      instantStaticDepositStatementDigest({
-        network: "regtest",
-        creditAmountSats: 12345,
-        secondaryCreditAmountSats: 678,
-        destinationAddress: destination,
-        satsValue: 99999,
-        sspSignature: GO_SSP_SIG,
-      }),
-    ),
-  ).toBe("b246b6c2858fdeb2a9278a56cdc5e104cb8fdb46347887fae7f7c6cc737561bc");
-});
-
 test("watchtower recovery statement (Go generated)", () => {
   const leafId = "11111111-2222-4333-8444-555555555555";
   const sighash = hexToBytes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -592,12 +467,6 @@ type UpstreamPartialTxCase = {
   partialTokenTransaction: JsonObject;
 };
 
-type UpstreamManifestCase = {
-  name: string;
-  expectedHash: string;
-  transferManifest: JsonObject;
-};
-
 const invoiceHashCases = loadJsonFile(resolve(upstreamDir, "invoice_hash_cases.json")) as {
   testCases: UpstreamInvoiceCase[];
 };
@@ -662,126 +531,4 @@ const partialTxCases = loadJsonFile(
 test.each(partialTxCases.testCases)("upstream partial_token_transaction_hash $name", (c) => {
   const msg = fromJson(PartialTokenTransactionSchema, c.partialTokenTransaction);
   expect(bytesToHex(hashPartialTokenTransaction(msg))).toBe(c.expectedHash);
-});
-
-const manifestCases = loadJsonFile(resolve(upstreamDir, "transfer_manifest_hash_cases.json")) as {
-  testCases: UpstreamManifestCase[];
-};
-
-test.each(manifestCases.testCases)("upstream transfer_manifest_hash $name", (c) => {
-  const msg = fromJson(TransferManifestSchema, c.transferManifest);
-  expect(bytesToHex(hashTransferManifest(msg))).toBe(c.expectedHash);
-});
-
-type QuoteEnvelopeTestCase = {
-  name: string;
-  network: number | string;
-  manifestHash: string;
-  reason: number;
-  role: number;
-  target: string;
-  expectedDigest?: string;
-};
-
-type QuoteEnvelopeInvalidCase = {
-  name: string;
-  call: string;
-  expectedError: string;
-  network?: number | string;
-  manifestHash?: string;
-  reason?: number;
-  role?: number;
-  target?: string;
-  paymentHash?: string;
-};
-
-type QuoteEnvelopeTargetCase = {
-  name: string;
-  call: string;
-  expectedDigest?: string;
-  paymentHash?: string;
-  withdrawalAddress?: string;
-  leafSetHash?: string;
-  txid?: string;
-  vout?: number;
-};
-
-type QuoteEnvelopeFile = {
-  testCases: QuoteEnvelopeTestCase[];
-  distinctDigestPairs: Array<{ name: string; a: string; b: string }>;
-  invalidCases: QuoteEnvelopeInvalidCase[];
-  targetCases: QuoteEnvelopeTargetCase[];
-};
-
-const quoteEnvelopeFile = loadJsonFile(
-  resolve(upstreamDir, "quote_envelope_cases.json"),
-) as QuoteEnvelopeFile;
-
-function upstreamQuoteDigest(c: QuoteEnvelopeTestCase): Uint8Array {
-  return quoteEnvelopeDigest({
-    network: Number(c.network),
-    manifestHash: hexToBytes(c.manifestHash),
-    reason: c.reason,
-    role: c.role,
-    target: hexToBytes(c.target),
-  });
-}
-
-test.each(quoteEnvelopeFile.testCases)("upstream quote_envelope $name", (c) => {
-  expect(bytesToHex(upstreamQuoteDigest(c))).toBe(c.expectedDigest);
-});
-
-function quoteCaseByName(name: string): QuoteEnvelopeTestCase {
-  const found = quoteEnvelopeFile.testCases.find((c) => c.name === name);
-  if (found === undefined) {
-    throw new Error(`unknown quote envelope case ${name}`);
-  }
-  return found;
-}
-
-test.each(quoteEnvelopeFile.distinctDigestPairs)(
-  "upstream quote_envelope distinct pair $name",
-  (pair) => {
-    const da = upstreamQuoteDigest(quoteCaseByName(pair.a));
-    const db = upstreamQuoteDigest(quoteCaseByName(pair.b));
-    expect(bytesToHex(da)).not.toBe(bytesToHex(db));
-  },
-);
-
-function runQuoteInvalidCase(c: QuoteEnvelopeInvalidCase): void {
-  if (c.call === "quoteEnvelopeDigest") {
-    quoteEnvelopeDigest({
-      network: Number(c.network),
-      manifestHash: hexToBytes(c.manifestHash ?? ""),
-      reason: c.reason ?? 0,
-      role: c.role ?? 0,
-      target: hexToBytes(c.target ?? ""),
-    });
-    return;
-  }
-  // "receiveAttestationTarget" is the Go name for receiveAttestorTarget.
-  receiveAttestorTarget(hexToBytes(c.paymentHash ?? ""));
-}
-
-test.each(quoteEnvelopeFile.invalidCases)("upstream quote_envelope invalid $name", (c) => {
-  expect(() => runQuoteInvalidCase(c)).toThrow(c.expectedError);
-});
-
-function upstreamQuoteTarget(c: QuoteEnvelopeTargetCase): Uint8Array {
-  switch (c.call) {
-    case "receiveAttestorTarget":
-      return receiveAttestorTarget(hexToBytes(c.paymentHash ?? ""));
-    case "sendTarget":
-      return sendTarget(hexToBytes(c.paymentHash ?? ""));
-    case "coopExitTarget":
-      return coopExitTarget(c.withdrawalAddress ?? "", hexToBytes(c.leafSetHash ?? ""));
-    case "staticDepositTarget":
-      return staticDepositTarget(hexToBytes(c.txid ?? ""), c.vout ?? 0);
-    default:
-      throw new Error(`unknown quote target call ${c.call}`);
-  }
-}
-
-test.each(quoteEnvelopeFile.targetCases)("upstream quote target $name ($call)", (c) => {
-  expect(bytesToHex(upstreamQuoteTarget(c))).toBe(c.expectedDigest);
 });

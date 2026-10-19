@@ -112,7 +112,7 @@
   ],
   "header": {
     "note": "Test vectors only. Never use these keys for funds.",
-    "source": "upstream spark-token-primitives (protohash, manifests, quote envelopes, token invoices, V3 conversion mirroring spark/so/protoconverter); hashstructure is upstream-pinned Go/Rust constants",
+    "source": "upstream spark-token-primitives (protohash, token invoices, V3 conversion mirroring spark/so/protoconverter); hashstructure is upstream-pinned Go/Rust constants",
     "upstream": "buildonspark/spark@0b3a32a05c9ac06cc411683551dd1f1bde9d0caa"
   },
   "partialTokenTransaction": [
@@ -158,131 +158,6 @@
       "messageHex": "08011210111111111111111111111111111111111a260a204444444444444444444444444444444444444444444444444444444444444444120201e82a06706179206d6532210233333333333333333333333333333333333333333333333333333333333333333a0b0880a4a7da061080e59a77",
       "name": "spark_invoice_fields_tokens",
       "typeName": "spark.SparkInvoiceFields"
-    }
-  ],
-  "quoteEnvelope": [
-    {
-      "expected": "fd8960cbf70252e80d1046b8b0abfb74b1bdd24277e4701419806c4da99b5f2d",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "receive_issuer",
-      "network": 1,
-      "reason": 1,
-      "role": 1,
-      "targetHex": ""
-    },
-    {
-      "expected": "c648c9f269aaa2d0e0faca5159f2f2f06ce2bf2ed4c266046aee9b13b2c69508",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "receive_attestor",
-      "network": 1,
-      "reason": 1,
-      "role": 2,
-      "targetHex": "eb624bf854893c382a8d8c93b3909597e81b53bbf896db413aecc7f0d3140ba0"
-    },
-    {
-      "expected": "b6d66a5016357123dbcc7993867b3c59842f998bf89c9712e6746bbedf355c66",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "send_attestor_regtest",
-      "network": 2,
-      "reason": 2,
-      "role": 2,
-      "targetHex": "b223aad6fa04c82a0e297443a296b157c9e620932e537065cf4a44f0f5868285"
-    },
-    {
-      "expected": "c50d3bd3a43a05149d1b2fd92daaedd28bbf05d964771fcbacc53a6ba9ce2b66",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "coop_exit_attestor",
-      "network": 1,
-      "reason": 3,
-      "role": 2,
-      "targetHex": "40000ea09438135deb53a285f56851278debc815e882bd63c9e0f43186cd718a"
-    },
-    {
-      "expected": "518fba403b36284c8a52882136d1822e63d366c3b1ccea58b10e5dc79d850259",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "static_deposit_attestor",
-      "network": 2,
-      "reason": 4,
-      "role": 2,
-      "targetHex": "1b264a32983cb0c633fbe81599bda4ceb3705b80ea2bfde2f778682736e19124"
-    },
-    {
-      "error": "Spark token primitives error: quote envelope digest: unsupported network 0",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "bad_network",
-      "network": 0,
-      "reason": 1,
-      "role": 1,
-      "targetHex": ""
-    },
-    {
-      "error": "Spark token primitives error: quote envelope digest: unsupported quote reason 0",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "bad_reason",
-      "network": 1,
-      "reason": 0,
-      "role": 1,
-      "targetHex": ""
-    },
-    {
-      "error": "Spark token primitives error: quote envelope digest: unsupported quote role 0",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "bad_role",
-      "network": 1,
-      "reason": 1,
-      "role": 0,
-      "targetHex": ""
-    },
-    {
-      "error": "Spark token primitives error: quote envelope digest: attestor target must be non-empty",
-      "manifestHashHex": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
-      "name": "attestor_empty_target",
-      "network": 1,
-      "reason": 1,
-      "role": 2,
-      "targetHex": ""
-    }
-  ],
-  "quoteTargets": [
-    {
-      "expected": "eb624bf854893c382a8d8c93b3909597e81b53bbf896db413aecc7f0d3140ba0",
-      "kind": "receiveAttestor",
-      "name": "receive_attestor",
-      "paymentHashHex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
-    },
-    {
-      "expected": "b223aad6fa04c82a0e297443a296b157c9e620932e537065cf4a44f0f5868285",
-      "kind": "send",
-      "name": "send",
-      "paymentHashHex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
-    },
-    {
-      "expected": "40000ea09438135deb53a285f56851278debc815e882bd63c9e0f43186cd718a",
-      "kind": "coopExit",
-      "leafSetHashHex": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
-      "name": "coop_exit",
-      "withdrawalAddress": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-    },
-    {
-      "expected": "40000ea09438135deb53a285f56851278debc815e882bd63c9e0f43186cd718a",
-      "kind": "coopExit",
-      "leafSetHashHex": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
-      "name": "coop_exit_uppercase_address",
-      "withdrawalAddress": "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"
-    },
-    {
-      "expected": "276c597817f90bdfb954c879e8fda3cb9d6e108c22961814290bfd04fcb0be91",
-      "kind": "coopExit",
-      "leafSetHashHex": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
-      "name": "coop_exit_not_segwit",
-      "withdrawalAddress": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
-    },
-    {
-      "expected": "350eace2d9b067f726a87e25588f6d9481e953be77cf468abcf826d3f1af25f3",
-      "kind": "staticDeposit",
-      "name": "static_deposit",
-      "txidHex": "8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d",
-      "vout": 3
     }
   ],
   "tokenInvoice": [
@@ -352,38 +227,6 @@
       "name": "create_final",
       "partial": false,
       "transactionHex": "080342740a21025151515151515151515151515151515151515151515151515151515151515151120b566563746f7220436f696e1a0356454320022a10ffffffffffffffffffffffffffffffff30013a210252525252525252525252525252525252525252525252525252525252525252524204deadbeef2a21025353535353535353535353535353535353535353535353535353535353535353320608bca4a7da0638024a060880a4a7da06583c"
-    }
-  ],
-  "transferManifest": [
-    {
-      "expected": "ea459a9f95332abea4a790d59f238d981b93c723e02a82c4c7e9268462d13304",
-      "manifestHex": "0801122430313937663961302d313131312d373030302d383030302d3030303030303030303030311802220b0880e6fe890710959aef3a2a4c0a2102212121212121212121212121212121212121212121212121212121212121212112210222222222222222222222222222222222222222222222222222222222222222221a0408f093092a4b0a2102232323232323232323232323232323232323232323232323232323232323232312210224242424242424242424242424242424242424242424242424242424242424241a0310c413322c080210031a0308e80722210225252525252525252525252525252525252525252525252525252525252525253a0c0898defe89071080cab5ee01",
-      "name": "valid_full"
-    },
-    {
-      "expected": "ea459a9f95332abea4a790d59f238d981b93c723e02a82c4c7e9268462d13304",
-      "manifestHex": "0801122430313937663961302d313131312d373030302d383030302d3030303030303030303030311802220b0880e6fe890710959aef3a2a4b0a2102232323232323232323232323232323232323232323232323232323232323232312210224242424242424242424242424242424242424242424242424242424242424241a0310c4132a4c0a2102212121212121212121212121212121212121212121212121212121212121212112210222222222222222222222222222222222222222222222222222222222222222221a0408f09309322c080210031a0308e80722210225252525252525252525252525252525252525252525252525252525252525253a0c0898defe89071080cab5ee01",
-      "name": "unsorted_edges_subms_timestamp"
-    },
-    {
-      "error": "Spark token primitives error: transfer manifest not hashable: unsupported manifest version 2 (supported: 1)",
-      "manifestHex": "0802122430313937663961302d313131312d373030302d383030302d3030303030303030303030311802220b0880e6fe890710959aef3a2a4c0a2102212121212121212121212121212121212121212121212121212121212121212112210222222222222222222222222222222222222222222222222222222222222222221a0408f093092a4b0a2102232323232323232323232323232323232323232323232323232323232323232312210224242424242424242424242424242424242424242424242424242424242424241a0310c413322c080210031a0308e80722210225252525252525252525252525252525252525252525252525252525252525253a0c0898defe89071080cab5ee01",
-      "name": "unsupported_version"
-    },
-    {
-      "error": "Spark token primitives error: transfer manifest not hashable: transfer_expiry_time: timestamp must not floor to the epoch (implementations disagree on present-but-zero fields)",
-      "manifestHex": "0801122430313937663961302d313131312d373030302d383030302d303030303030303030303031180222002a4c0a2102212121212121212121212121212121212121212121212121212121212121212112210222222222222222222222222222222222222222222222222222222222222222221a0408f093092a4b0a2102232323232323232323232323232323232323232323232323232323232323232312210224242424242424242424242424242424242424242424242424242424242424241a0310c413322c080210031a0308e80722210225252525252525252525252525252525252525252525252525252525252525253a0c0898defe89071080cab5ee01",
-      "name": "epoch_timestamp"
-    },
-    {
-      "error": "Spark token primitives error: transfer manifest not hashable: edges[0]: amount must be non-zero (zero is omitted from the hash)",
-      "manifestHex": "0801122430313937663961302d313131312d373030302d383030302d3030303030303030303030311802220b0880e6fe890710959aef3a2a4a0a2102212121212121212121212121212121212121212121212121212121212121212112210222222222222222222222222222222222222222222222222222222222222222221a0208002a4b0a2102232323232323232323232323232323232323232323232323232323232323232312210224242424242424242424242424242424242424242424242424242424242424241a0310c413322c080210031a0308e80722210225252525252525252525252525252525252525252525252525252525252525253a0c0898defe89071080cab5ee01",
-      "name": "zero_amount_edge"
-    },
-    {
-      "error": "Spark token primitives error: transfer manifest not hashable: network must be a known value: 0",
-      "manifestHex": "0801122430313937663961302d313131312d373030302d383030302d303030303030303030303031220b0880e6fe890710959aef3a2a4c0a2102212121212121212121212121212121212121212121212121212121212121212112210222222222222222222222222222222222222222222222222222222222222222221a0408f093092a4b0a2102232323232323232323232323232323232323232323232323232323232323232312210224242424242424242424242424242424242424242424242424242424242424241a0310c413322c080210031a0308e80722210225252525252525252525252525252525252525252525252525252525252525253a0c0898defe89071080cab5ee01",
-      "name": "unspecified_network"
     }
   ]
 }

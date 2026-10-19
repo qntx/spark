@@ -53,9 +53,10 @@ export function sparkAccountKey(
 
 /**
  * The signer's derived private-key material: the `m/8797555'/a'` extended key expanded into the
- * identity (`0'`), signing (`1'`), deposit (`2'`) and static-deposit (`3'`) nodes. All references
- * held on this object are live private material — `resolve` hands out copies the caller wipes; the
- * identity fields must never be wiped by callers. `wipe` zeroizes everything.
+ * identity (`0'`), signing (`1'`) and static-deposit (`3'`) nodes — `2'` (upstream's deposit key)
+ * is unused: single-use deposits bind leaf keys. All references held on this object are live
+ * private material — `resolve` hands out copies the caller wipes; the identity fields must never be
+ * wiped by callers. `wipe` zeroizes everything.
  */
 export type SignerKeys = {
   /** Identity private key — live reference; sign with it, never wipe it. */
@@ -86,7 +87,6 @@ export function openKeys(accountKey: Uint8Array, crypto: SparkCrypto): SignerKey
   let root: HDKey;
   let identityNode: HDKey;
   let signingRoot: HDKey;
-  let depositNode: HDKey;
   let staticRoot: HDKey;
   try {
     if (!secp256k1.utils.isValidSecretKey(privateHalf)) {
@@ -99,7 +99,6 @@ export function openKeys(accountKey: Uint8Array, crypto: SparkCrypto): SignerKey
     });
     identityNode = root.deriveChild(HARDENED_OFFSET);
     signingRoot = root.deriveChild(HARDENED_OFFSET + 1);
-    depositNode = root.deriveChild(HARDENED_OFFSET + 2);
     staticRoot = root.deriveChild(HARDENED_OFFSET + 3);
   } catch (error) {
     privateHalf.fill(0);
@@ -107,7 +106,6 @@ export function openKeys(accountKey: Uint8Array, crypto: SparkCrypto): SignerKey
   }
 
   const identityPrivateKey = requiredPrivateKey(identityNode, "identity");
-  const depositPrivateKey = requiredPrivateKey(depositNode, "deposit");
   const identityPublicKey = secp256k1.getPublicKey(identityPrivateKey, true);
   const identityPoint = secp256k1.Point.fromBytes(identityPublicKey);
   const leafKeyCache = new Map<string, Uint8Array>();
@@ -149,14 +147,8 @@ export function openKeys(accountKey: Uint8Array, crypto: SparkCrypto): SignerKey
 
   /** Resolves a key descriptor to a private-key copy the caller wipes after use. */
   function resolve(key: SparkKey): Uint8Array {
-    if (key.type === "identity") {
-      return new Uint8Array(identityPrivateKey);
-    }
     if (key.type === "leaf") {
       return new Uint8Array(leafPrivateKey(key.leafId));
-    }
-    if (key.type === "deposit") {
-      return new Uint8Array(depositPrivateKey);
     }
     if (key.type === "static-deposit") {
       // Fresh derivation each call — the returned reference is owned by the caller.
@@ -202,7 +194,6 @@ export function openKeys(accountKey: Uint8Array, crypto: SparkCrypto): SignerKey
       leafKeyCache.clear();
       privateHalf.fill(0);
       staticRoot.wipePrivateData();
-      depositNode.wipePrivateData();
       signingRoot.wipePrivateData();
       identityNode.wipePrivateData();
       root.wipePrivateData();
