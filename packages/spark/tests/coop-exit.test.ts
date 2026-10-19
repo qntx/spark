@@ -645,7 +645,8 @@ describe("cooperativeExit", () => {
     const identity = await deps.signer.identityPublicKey();
     expect(bytesToHex(transfer["ownerIdentityPublicKey"])).toBe(bytesToHex(identity));
     expect(bytesToHex(transfer["receiverIdentityPublicKey"])).toBe(bytesToHex(SSP_IDENTITY));
-    // Internal (wire) byte order, as upstream sends it.
+    // Internal (wire) byte order — the SO's primary comparison, matching the
+    // serialized outpoint convention; upstream's accept-either check tolerates both.
     expect(input["exitTxid"]).toStrictEqual(txIdBytes(payoutTx));
     expect(input["connectorTx"]).toStrictEqual(connectorTx);
     const expiryDelta = Number(transfer["expiryTime"].seconds) * 1000 - NOW_MS;
@@ -672,8 +673,10 @@ describe("cooperativeExit", () => {
       expect(refund.inputsLength).toBe(2);
       const connectorInput = refund.getInput(1);
       expect(connectorInput.index).toBe(leafIndex);
+      // Input 1 is the connector-tx outpoint bound to this leaf — the connector
+      // tx's own txid, not the coop-exit (payout) txid.
       expect(bytesToHex(required(connectorInput.txid, "connector input txid"))).toBe(
-        result.coopExitTxid,
+        txId(connectorTx),
       );
       // No adaptor signatures — plain key-spend jobs only.
       expect(job.adaptorPublicKey).toBeUndefined();

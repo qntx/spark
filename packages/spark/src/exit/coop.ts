@@ -10,6 +10,7 @@ import {
   createConnectorRefundTxs,
   parseTransaction,
   taprootKeySpendSighash,
+  txId,
   validateConnectorTxBindsToCoopExitTxid,
   validateCoopExitPayoutTransaction,
 } from "../core/bitcoin/index.ts";
@@ -268,6 +269,8 @@ export async function cooperativeExit(
 
   const exitTxidInternal = hexToBytes(request.coopExitTxid).reverse();
   validateConnectorTxBindsToCoopExitTxid(request.rawConnectorTransaction, exitTxidInternal);
+  // btc-signer inputs carry display-order txid bytes (it reverses on serialize).
+  const connectorTxidDisplay = txId(request.rawConnectorTransaction);
 
   const connectorTx = parseTransaction(request.rawConnectorTransaction);
   if (connectorTx.outputsLength !== leaves.length + 1) {
@@ -306,8 +309,7 @@ export async function cooperativeExit(
         sequence,
         receivingPublicKey: sspIdentityPublicKey,
         network,
-        // btc-signer inputs carry display-order txid bytes (it reverses on serialize).
-        connectorInput: { txid: hexToBytes(request.coopExitTxid), index },
+        connectorInput: { txid: hexToBytes(connectorTxidDisplay), index },
       });
       const job = (
         txBytes: Uint8Array,
