@@ -15,7 +15,10 @@ const NOT_IMPLEMENTED = "test signer: not implemented";
  * DER-encoded ECDSA over the identity key. Only `identityPublicKey` and the challenge statements
  * are implemented — connection tests never exercise the rest of the surface.
  */
-export function createTestSigner(secretKey: Uint8Array): SparkSigner & {
+export function createTestSigner(
+  secretKey: Uint8Array,
+  leafPublicKeys: ReadonlyMap<string, Uint8Array> = new Map(),
+): SparkSigner & {
   readonly secretKey: Uint8Array;
 } {
   if (secretKey.length !== 32) {
@@ -29,9 +32,15 @@ export function createTestSigner(secretKey: Uint8Array): SparkSigner & {
       await ready;
       return publicKey;
     },
-    publicKeys: async () => {
+    publicKeys: async (keys) => {
       await ready;
-      throw new Error(NOT_IMPLEMENTED);
+      return keys.map((key) => {
+        const resolved = key.type === "leaf" ? leafPublicKeys.get(key.leafId) : undefined;
+        if (resolved === undefined) {
+          throw new Error(NOT_IMPLEMENTED);
+        }
+        return resolved;
+      });
     },
     receivedPublicKeys: async () => {
       await ready;

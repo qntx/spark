@@ -58,10 +58,14 @@ export type ConnectionDeps = {
   readonly sleep?: (ms: number) => Promise<void>;
   /**
    * Test seam: replaces the gRPC-web transport factory (for example wrapping
-   * `createRouterTransport`). The interceptor chain is always applied, so injected transports get
-   * the same auth, retry and error-mapping behavior as the default.
+   * `createRouterTransport`). Called once per operator connection with that operator's config, so a
+   * fake can serve different responses per operator. The interceptor chain is always applied, so
+   * injected transports get the same auth, retry and error-mapping behavior as the default.
    */
-  readonly transportFactory?: (interceptors: Interceptor[]) => Transport;
+  readonly transportFactory?: (
+    interceptors: Interceptor[],
+    operator: SparkOperatorConfig,
+  ) => Transport;
 };
 
 /** Sent as `X-Client-Env`, the header the SOs accept from SDK clients. */
@@ -312,7 +316,7 @@ export function connectOperator(
         useBinaryFormat: true,
         interceptors,
       }));
-  const transport = transportFactory([interceptor]);
+  const transport = transportFactory([interceptor], operator);
   const authn = createClient(SparkAuthnService, transport);
 
   let cached: { readonly token: string; readonly expiresAtMs: number } | undefined;

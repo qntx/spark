@@ -120,3 +120,4 @@ export function leavesBalance(leaves: ReadonlyArray<SparkLeaf>): number {
 
 export { selectExact, selectLeaves } from "./select.ts";
 export type { LeafSelection } from "./select.ts";
+export { malformedLeafTx, operatorsDisagree, ownsLeaf } from "./verify.ts";

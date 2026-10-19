@@ -62,6 +62,7 @@ const THRESHOLD = 2;
 const LEAF_ID = "01989abc-def0-7abc-89ab-cdef01234567";
 const PARENT_ID = "01989abc-def0-7abc-89ab-00000000beef";
 const SHARE_SECRET = 0x5ea5n;
+const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
 
 function fixedRandom(): (length: number) => Uint8Array {
   let counter = 0;
@@ -136,7 +137,7 @@ function fabricateLeaf(options: {
     signingKeyshare: {
       ownerIdentifiers: OPERATORS.map((op) => op.identifier),
       threshold: THRESHOLD,
-      publicKey: verifyingKey,
+      publicKey: SHARE_PUB,
     },
     vout: 0,
     ...(options.parentNodeId === undefined ? {} : { parentNodeId: options.parentNodeId }),
@@ -157,7 +158,7 @@ function fabricateParent(verifyingKey: Uint8Array) {
     signingKeyshare: {
       ownerIdentifiers: OPERATORS.map((op) => op.identifier),
       threshold: THRESHOLD,
-      publicKey: verifyingKey,
+      publicKey: SHARE_PUB,
       publicShares: {},
     },
     status: "AVAILABLE",
@@ -238,7 +239,7 @@ function leafNode(leaf: SparkLeaf) {
     signingKeyshare: {
       ownerIdentifiers: OPERATORS.map((op) => op.identifier),
       threshold: THRESHOLD,
-      publicKey: leaf.verifyingPublicKey,
+      publicKey: leaf.signingKeyshare.publicKey,
       publicShares: {},
     },
     status: "AVAILABLE",

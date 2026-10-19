@@ -208,9 +208,15 @@ export function createSparkClientWith(
     throw new SparkInputError(`coordinator ${config.coordinator} is not in the operator set`);
   }
   const coordinatorConnection: OperatorConnection = connectOperator(coordinator, deps);
+  // Cross-checks (leaf agreement in leaves()) need a connection per operator; the coordinator
+  // stays the only one used for writes.
+  const otherConnections = operators
+    .filter((operator) => operator !== coordinator)
+    .map((operator) => connectOperator(operator, deps));
 
   const context = createClientContext({
     coordinatorConnection,
+    otherConnections,
     signer: options.signer,
     network: options.network,
     config: { ...config, ssp },
