@@ -7,4 +7,4 @@ export type {
   TransferCoordinator,
 } from "./model.ts";
 export { queryAllTransfers, queryPendingTransfers } from "./query.ts";
-export { selectLeavesExact, sendTransfer } from "./send.ts";
+export { sendTransfer } from "./send.ts";

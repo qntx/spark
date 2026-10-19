@@ -1,15 +1,16 @@
 import { uuidv7 } from "../core/uuid.ts";
+import { SparkInputError } from "../errors/index.ts";
 import {
   claimTransfer,
   CLAIMABLE_TRANSFER_STATUSES,
   queryAllTransfers,
   queryPendingTransfers,
-  selectLeavesExact,
   sendTransfer,
 } from "../transfer/index.ts";
 import type { SparkTransfer } from "../transfer/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { renewLeaf, renewalKind } from "../tree/renew.ts";
+import { selectLeaves } from "../tree/select.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
 
@@ -27,7 +28,13 @@ export async function sendSats(
 ): Promise<SparkTransfer> {
   const { coordinatorConnection, signer, network, store, random, now } = context;
   const { spark } = coordinatorConnection;
-  const selected = selectLeavesExact(await context.leaves(), options.amountSats);
+  const selection = selectLeaves(await context.leaves(), options.amountSats);
+  if (selection.kind === "swap") {
+    throw new SparkInputError(
+      `send: no leaf combination sums exactly to ${options.amountSats} sats — leaf swaps land with S8`,
+    );
+  }
+  const selected = selection.leaves;
   // Renew any leaf whose refund timelock is spent before handing it to the receiver.
   const sendLeaves: SparkLeaf[] = [];
   for (const leaf of selected) {
