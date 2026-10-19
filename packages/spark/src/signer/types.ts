@@ -112,7 +112,7 @@ export type IdentityStatement =
       readonly txid: Uint8Array;
       readonly vout: number;
       readonly creditAmountSats: number;
-      /** The SSP quote signature string (ASCII hex). */
+      /** The SSP quote signature as hex; its decoded bytes enter the statement payload. */
       readonly sspSignature: string;
     }
   | {
