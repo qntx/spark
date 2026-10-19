@@ -55,7 +55,7 @@ const UNUSED_PAGE_SIZE = 100;
  * script funds at a deposit address may pay to (breez-spark-sdk
  * `validate_address_pays_to_verifying_key`, services/deposit.rs @956ff90).
  */
-function depositScript(verifyingKey: Uint8Array, network: SparkNetwork): Uint8Array {
+export function depositScript(verifyingKey: Uint8Array, network: SparkNetwork): Uint8Array {
   try {
     return p2trScriptFromPublicKey(verifyingKey, network);
   } catch (error) {
@@ -66,7 +66,7 @@ function depositScript(verifyingKey: Uint8Array, network: SparkNetwork): Uint8Ar
 }
 
 /** Output script of a coordinator-supplied address, decoded under our network only. */
-function depositAddressScript(address: string, network: SparkNetwork): Uint8Array {
+export function depositAddressScript(address: string, network: SparkNetwork): Uint8Array {
   try {
     return OutScript.encode(BitcoinAddress(btcNetwork(network)).decode(address));
   } catch (error) {
@@ -79,12 +79,14 @@ function depositAddressScript(address: string, network: SparkNetwork): Uint8Arra
  * is a BIP-340 signature over `sha256("proof_of_possession" ‖ identity ‖ operatorShare ‖ address)`
  * made by the key-path-tweaked operator share (`verifyingKey − signingPublicKey`), and each
  * non-coordinator operator attaches a DER ECDSA signature over `sha256(address)`.
+ * `verifyCoordinatorProof` also checks the coordinator's signature — upstream enables it for static
+ * deposit addresses only.
  */
-function validateDepositAddress(
+export function validateDepositAddress(
   result: Address,
   signingPublicKey: Uint8Array,
   identityPublicKey: Uint8Array,
-  options: DepositCoordinator,
+  options: DepositCoordinator & { readonly verifyCoordinatorProof?: boolean },
 ): void {
   if (result.address.length === 0) {
     throw new SparkInputError("deposit address is empty");
@@ -104,7 +106,12 @@ function validateDepositAddress(
   }
   const addressHash = sha256(utf8ToBytes(result.address));
   for (const operator of options.operators) {
-    if (operator.identifier === options.coordinatorIdentifier) {
+    // Single-use addresses skip the coordinator (its PoP is self-issued); static
+    // addresses verify it too (upstream validateDepositAddress verifyCoordinatorProof).
+    if (
+      operator.identifier === options.coordinatorIdentifier &&
+      options.verifyCoordinatorProof !== true
+    ) {
       continue;
     }
     const signature = proof.addressSignatures[operator.identifier];
