@@ -213,7 +213,7 @@ export function createSparkClientWith(
     coordinatorConnection,
     signer: options.signer,
     network: options.network,
-    config,
+    config: { ...config, ssp },
     operators,
     store,
     random,
