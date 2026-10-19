@@ -62,9 +62,7 @@ export async function sendSats(
     await context.storeChainsFor(claimed);
     const exact = selectExact(claimed, options.amountSats);
     if (exact === undefined) {
-      throw new SparkError(
-        `send: swap result cannot cover ${options.amountSats} sats exactly — this cannot happen`,
-      );
+      throw new SparkError(`send: swapped leaves cannot cover ${options.amountSats} sats exactly`);
     }
     sendLeaves = await renewForSend(exact);
   } else {

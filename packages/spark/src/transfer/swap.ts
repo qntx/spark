@@ -27,9 +27,8 @@ import { refundJobGroups } from "./refunds.ts";
  * Flow (mirrors upstream `sendSwapTransfer` + Breez swap v3): the sender key-tweaks each leaf
  * toward the SSP identity, signs only the CPFP refund jobs under an adaptor point, and submits the
  * primary transfer without `expiryTime` — for a v3 primary swap the SO assigns the expiry itself
- * and holds the key tweaks until the counter transfer. The adaptor signatures go to the SSP, which
- * completes the refunds, creates the inbound transfer, and reveals the adaptor secret to us in
- * doing so.
+ * and holds the key tweaks until the counter transfer. The adaptor-added signatures go to the SSP
+ * in `request_swap`; the SSP then starts the counter transfer this function claims.
  */
 export async function swapLeaves(
   options: TransferCoordinator & {
@@ -108,8 +107,8 @@ export async function swapLeaves(
     "swapLeaves",
   );
 
-  // The adaptor secret is not wallet key material: it only gates when the SSP may complete the
-  // refund signatures. Both upstream and Breez generate it in the service layer, outside the signer.
+  // The adaptor secret is discarded immediately — no party needs it (upstream and Breez discard it
+  // too) — so it is not wallet key material and is generated outside the signer.
   const adaptorSecret = secp256k1.utils.randomSecretKey(options.random(48));
   const adaptorPublicKey = secp256k1.getPublicKey(adaptorSecret, true);
   adaptorSecret.fill(0);
