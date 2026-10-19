@@ -1,6 +1,7 @@
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
 
+import type { SparkNetwork } from "../core/network.ts";
 import { SESSION_EXPIRY_BUFFER_MS } from "../core/session.ts";
 import { serverErrorText } from "../core/text.ts";
 import { SparkInputError, SparkRequestError } from "../errors/index.ts";
@@ -11,6 +12,23 @@ export type SspClient = {
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
   /** `request_swap` — submits the adaptor-signed leaves swap; resolves to the inbound transfer. */
   readonly requestSwap: (request: SspSwapRequest) => Promise<SspSwapResult>;
+  /** `request_lightning_receive` — asks the SSP to issue a BOLT-11 invoice for `paymentHash`. */
+  readonly requestLightningReceive: (
+    request: SspLightningReceiveRequest,
+  ) => Promise<SspLightningReceiveResult>;
+  /** `request_lightning_send` — asks the SSP to pay `encodedInvoice` over Lightning. */
+  readonly requestLightningSend: (
+    request: SspLightningSendRequest,
+  ) => Promise<SspLightningSendResult>;
+  /** `lightning_send_fee_estimate` — the sats fee the SSP quotes for paying the invoice. */
+  readonly lightningSendFeeEstimate: (
+    encodedInvoice: string,
+    amountSats?: number,
+  ) => Promise<number>;
+  /** `user_request` — status of a lightning send request by id. */
+  readonly lightningSendRequest: (id: string) => Promise<SspLightningSendResult>;
+  /** `user_request` — status of a lightning receive request by id. */
+  readonly lightningReceiveRequest: (id: string) => Promise<SspLightningReceiveResult>;
 };
 
 /** One swapped-out leaf: the unsigned CPFP refund tx and its adaptor-completed signature. */
@@ -33,6 +51,44 @@ export type SspSwapResult = {
   readonly status: string;
   readonly inboundTransferId: string;
   readonly feeSats: number;
+};
+
+export type SspLightningReceiveRequest = {
+  readonly network: SparkNetwork;
+  readonly amountSats: number;
+  readonly paymentHash: Uint8Array;
+  readonly expirySecs: number;
+  readonly receiverIdentityPublicKey: Uint8Array;
+  readonly memo?: string;
+  readonly descriptionHash?: Uint8Array;
+  readonly includeSparkAddress?: boolean;
+};
+
+export type SspLightningReceiveResult = {
+  readonly id: string;
+  readonly status: string;
+  /** The encoded BOLT-11 invoice the SSP issued. */
+  readonly invoice: string;
+  /** `transfer_spark_id` of the preimage-swap transfer, once the payment arrived. */
+  readonly transferId?: string;
+  readonly paymentPreimage?: Uint8Array;
+};
+
+export type SspLightningSendRequest = {
+  readonly encodedInvoice: string;
+  /** Amount for amountless invoices; must be absent for fixed-amount ones. */
+  readonly amountSats?: number;
+  /** The preimage-swap transfer id — the SSP's idempotency key for this send. */
+  readonly userOutboundTransferExternalId: string;
+};
+
+export type SspLightningSendResult = {
+  readonly id: string;
+  readonly status: string;
+  readonly encodedInvoice: string;
+  readonly feeSats: number;
+  readonly transferId?: string;
+  readonly paymentPreimage?: Uint8Array;
 };
 
 export type SspDeps = {
@@ -178,6 +234,343 @@ fragment LeavesSwapRequestFragment on LeavesSwapRequest {
     }
 }`;
 
+// Upstream builds this document to gate the `committed_quote` variant; we never send it, so this is
+// `requestLightningReceiveDocument(false)` unrolled.
+const REQUEST_LIGHTNING_RECEIVE = `
+mutation RequestLightningReceive(
+    $network: BitcoinNetwork!
+    $amount_sats: Long!
+    $payment_hash: Hash32!
+    $expiry_secs: Int
+    $memo: String
+    $include_spark_address: Boolean
+    $receiver_identity_pubkey: PublicKey
+    $description_hash: Hash32
+    $spark_invoice: String
+  ) {
+    request_lightning_receive(
+      input: {
+        network: $network
+        amount_sats: $amount_sats
+        payment_hash: $payment_hash
+        expiry_secs: $expiry_secs
+        memo: $memo
+        include_spark_address: $include_spark_address
+        receiver_identity_pubkey: $receiver_identity_pubkey
+        description_hash: $description_hash
+        spark_invoice: $spark_invoice
+      }
+    ) {
+      request {
+        ...LightningReceiveRequestFragment
+      }
+    }
+  }
+
+fragment LightningReceiveRequestFragment on LightningReceiveRequest {
+    __typename
+    lightning_receive_request_id: id
+    lightning_receive_request_created_at: created_at
+    lightning_receive_request_updated_at: updated_at
+    lightning_receive_request_network: network
+    lightning_receive_request_invoice: invoice {
+        __typename
+        invoice_encoded_invoice: encoded_invoice
+        invoice_bitcoin_network: bitcoin_network
+        invoice_payment_hash: payment_hash
+        invoice_amount: amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        invoice_created_at: created_at
+        invoice_expires_at: expires_at
+        invoice_memo: memo
+    }
+    lightning_receive_request_status: status
+    lightning_receive_request_transfer: transfer {
+        __typename
+        transfer_total_amount: total_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        transfer_spark_id: spark_id
+        transfer_user_request: user_request {
+            id
+        }
+    }
+    lightning_receive_request_payment_preimage: payment_preimage
+    lightning_receive_request_receiver_identity_public_key: receiver_identity_public_key
+}`;
+
+const REQUEST_LIGHTNING_SEND = `
+mutation RequestLightningSend(
+    $encoded_invoice: String!
+    $idempotency_key: String
+    $amount_sats: Long
+    $user_outbound_transfer_external_id: UUID
+  ) {
+    request_lightning_send(input: {
+      encoded_invoice: $encoded_invoice
+      idempotency_key: $idempotency_key
+      amount_sats: $amount_sats
+      user_outbound_transfer_external_id: $user_outbound_transfer_external_id
+    }) {
+      request {
+        ...LightningSendRequestFragment
+      }
+    }
+  }
+
+fragment LightningSendRequestFragment on LightningSendRequest {
+    __typename
+    lightning_send_request_id: id
+    lightning_send_request_created_at: created_at
+    lightning_send_request_updated_at: updated_at
+    lightning_send_request_network: network
+    lightning_send_request_encoded_invoice: encoded_invoice
+    lightning_send_request_fee: fee {
+        __typename
+        currency_amount_original_value: original_value
+        currency_amount_original_unit: original_unit
+    }
+    lightning_send_request_idempotency_key: idempotency_key
+    lightning_send_request_status: status
+    lightning_send_request_transfer: transfer {
+        __typename
+        transfer_total_amount: total_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        transfer_spark_id: spark_id
+        transfer_user_request: user_request {
+            id
+        }
+    }
+    lightning_send_request_payment_preimage: payment_preimage
+}`;
+
+const LIGHTNING_SEND_FEE_ESTIMATE = `
+query LightningSendFeeEstimate(
+    $encoded_invoice: String!
+    $amount_sats: Long
+  ) {
+    lightning_send_fee_estimate(
+      input: {
+        encoded_invoice: $encoded_invoice
+        amount_sats: $amount_sats
+      }
+    ) {
+      ...LightningSendFeeEstimateOutputFragment
+    }
+  }
+
+fragment LightningSendFeeEstimateOutputFragment on LightningSendFeeEstimateOutput {
+    __typename
+    lightning_send_fee_estimate_output_fee_estimate: fee_estimate {
+        __typename
+        currency_amount_original_value: original_value
+        currency_amount_original_unit: original_unit
+    }
+}`;
+
+// Upstream's UserRequest query — the document its `getLightningReceiveRequest`/
+// `getLightningSendRequest` use — copied verbatim including the other request-type fragments.
+const USER_REQUEST = `
+query UserRequest($request_id: ID!) {
+  user_request(request_id: $request_id) {
+    ...UserRequestFragment
+  }
+}
+
+fragment UserRequestFragment on UserRequest {
+    __typename
+    ... on ClaimStaticDeposit {
+        __typename
+        claim_static_deposit_id: id
+        claim_static_deposit_created_at: created_at
+        claim_static_deposit_updated_at: updated_at
+        claim_static_deposit_network: network
+        claim_static_deposit_credit_amount: credit_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        claim_static_deposit_max_fee: max_fee {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        claim_static_deposit_status: status
+        claim_static_deposit_transaction_id: transaction_id
+        claim_static_deposit_output_index: output_index
+        claim_static_deposit_bitcoin_network: bitcoin_network
+        claim_static_deposit_transfer_spark_id: transfer_spark_id
+    }
+    ... on CoopExitRequest {
+        __typename
+        coop_exit_request_id: id
+        coop_exit_request_created_at: created_at
+        coop_exit_request_updated_at: updated_at
+        coop_exit_request_network: network
+        coop_exit_request_fee: fee {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        coop_exit_request_l1_broadcast_fee: l1_broadcast_fee {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        coop_exit_request_fee_quote: fee_quote {
+            id
+        }
+        coop_exit_request_exit_speed: exit_speed
+        coop_exit_request_status: status
+        coop_exit_request_expires_at: expires_at
+        coop_exit_request_raw_connector_transaction: raw_connector_transaction
+        coop_exit_request_raw_coop_exit_transaction: raw_coop_exit_transaction
+        coop_exit_request_coop_exit_txid: coop_exit_txid
+        coop_exit_request_transfer: transfer {
+            __typename
+            transfer_total_amount: total_amount {
+                __typename
+                currency_amount_original_value: original_value
+                currency_amount_original_unit: original_unit
+            }
+            transfer_spark_id: spark_id
+            transfer_user_request: user_request {
+                id
+            }
+        }
+    }
+    ... on LeavesSwapRequest {
+        __typename
+        leaves_swap_request_id: id
+        leaves_swap_request_created_at: created_at
+        leaves_swap_request_updated_at: updated_at
+        leaves_swap_request_network: network
+        leaves_swap_request_status: status
+        leaves_swap_request_total_amount: total_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        leaves_swap_request_target_amount: target_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        leaves_swap_request_fee: fee {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        leaves_swap_request_inbound_transfer: inbound_transfer {
+            __typename
+            transfer_total_amount: total_amount {
+                __typename
+                currency_amount_original_value: original_value
+                currency_amount_original_unit: original_unit
+            }
+            transfer_spark_id: spark_id
+            transfer_user_request: user_request {
+                id
+            }
+        }
+        leaves_swap_request_outbound_transfer: outbound_transfer {
+            __typename
+            transfer_total_amount: total_amount {
+                __typename
+                currency_amount_original_value: original_value
+                currency_amount_original_unit: original_unit
+            }
+            transfer_spark_id: spark_id
+            transfer_user_request: user_request {
+                id
+            }
+        }
+        leaves_swap_request_expires_at: expires_at
+        leaves_swap_request_swap_leaves: swap_leaves {
+            __typename
+            swap_leaf_leaf_id: leaf_id
+            swap_leaf_raw_unsigned_refund_transaction: raw_unsigned_refund_transaction
+            swap_leaf_adaptor_signed_signature: adaptor_signed_signature
+            swap_leaf_direct_raw_unsigned_refund_transaction: direct_raw_unsigned_refund_transaction
+            swap_leaf_direct_adaptor_signed_signature: direct_adaptor_signed_signature
+            swap_leaf_direct_from_cpfp_raw_unsigned_refund_transaction: direct_from_cpfp_raw_unsigned_refund_transaction
+            swap_leaf_direct_from_cpfp_adaptor_signed_signature: direct_from_cpfp_adaptor_signed_signature
+        }
+    }
+    ... on LightningReceiveRequest {
+        __typename
+        lightning_receive_request_id: id
+        lightning_receive_request_created_at: created_at
+        lightning_receive_request_updated_at: updated_at
+        lightning_receive_request_network: network
+        lightning_receive_request_invoice: invoice {
+            __typename
+            invoice_encoded_invoice: encoded_invoice
+            invoice_bitcoin_network: bitcoin_network
+            invoice_payment_hash: payment_hash
+            invoice_amount: amount {
+                __typename
+                currency_amount_original_value: original_value
+                currency_amount_original_unit: original_unit
+            }
+            invoice_created_at: created_at
+            invoice_expires_at: expires_at
+            invoice_memo: memo
+        }
+        lightning_receive_request_status: status
+        lightning_receive_request_transfer: transfer {
+            __typename
+            transfer_total_amount: total_amount {
+                __typename
+                currency_amount_original_value: original_value
+                currency_amount_original_unit: original_unit
+            }
+            transfer_spark_id: spark_id
+            transfer_user_request: user_request {
+                id
+            }
+        }
+        lightning_receive_request_payment_preimage: payment_preimage
+        lightning_receive_request_receiver_identity_public_key: receiver_identity_public_key
+    }
+    ... on LightningSendRequest {
+        __typename
+        lightning_send_request_id: id
+        lightning_send_request_created_at: created_at
+        lightning_send_request_updated_at: updated_at
+        lightning_send_request_network: network
+        lightning_send_request_encoded_invoice: encoded_invoice
+        lightning_send_request_fee: fee {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        lightning_send_request_idempotency_key: idempotency_key
+        lightning_send_request_status: status
+        lightning_send_request_transfer: transfer {
+            __typename
+            transfer_total_amount: total_amount {
+                __typename
+                currency_amount_original_value: original_value
+                currency_amount_original_unit: original_unit
+            }
+            transfer_spark_id: spark_id
+            transfer_user_request: user_request {
+                id
+            }
+        }
+        lightning_send_request_payment_preimage: payment_preimage
+    }
+}`;
+
 type JsonObject = Record<string, unknown>;
 
 /** A malformed SSP response is a server fault, not caller input. */
@@ -233,6 +626,100 @@ function currencyAmountSats(value: unknown, field: string): number {
     amount["currency_amount_original_value"],
     `${field}.currency_amount_original_value`,
   );
+}
+
+/** Fee CurrencyAmount → sats: SATOSHI as-is, MILLISATOSHI rounded up, else unexpected (upstream). */
+function feeAmountSats(value: unknown, field: string): number {
+  const amount = asObject(value, field);
+  const unit = asString(
+    amount["currency_amount_original_unit"],
+    `${field}.currency_amount_original_unit`,
+  );
+  const valueSats = asSats(
+    amount["currency_amount_original_value"],
+    `${field}.currency_amount_original_value`,
+  );
+  switch (unit) {
+    case "SATOSHI":
+      return valueSats;
+    case "MILLISATOSHI":
+      return Math.ceil(valueSats / 1000);
+    default:
+      throw unexpectedResponse(`${field}.currency_amount_original_unit`, `is ${unit}`);
+  }
+}
+
+/** Hex-encoded 32-byte preimage → bytes; absent when the request has no preimage yet. */
+function optionalPreimage(value: unknown, field: string): Uint8Array | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const preimage = hexToBytes(asString(value, field));
+  if (preimage.length !== 32) {
+    throw unexpectedResponse(field, "is not a 32-byte hex preimage");
+  }
+  return preimage;
+}
+
+/** `transfer_spark_id` inside an optional transfer object. */
+function optionalTransferId(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return asString(asObject(value, field)["transfer_spark_id"], `${field}.transfer_spark_id`);
+}
+
+function parseLightningReceive(request: JsonObject, field: string): SspLightningReceiveResult {
+  const invoice = asObject(
+    request["lightning_receive_request_invoice"],
+    `${field}.lightning_receive_request_invoice`,
+  );
+  const transferId = optionalTransferId(
+    request["lightning_receive_request_transfer"],
+    `${field}.lightning_receive_request_transfer`,
+  );
+  const paymentPreimage = optionalPreimage(
+    request["lightning_receive_request_payment_preimage"],
+    `${field}.lightning_receive_request_payment_preimage`,
+  );
+  return {
+    id: asString(request["lightning_receive_request_id"], `${field}.lightning_receive_request_id`),
+    status: asString(
+      request["lightning_receive_request_status"],
+      `${field}.lightning_receive_request_status`,
+    ),
+    invoice: asString(invoice["invoice_encoded_invoice"], `${field}.invoice_encoded_invoice`),
+    ...(transferId === undefined ? {} : { transferId }),
+    ...(paymentPreimage === undefined ? {} : { paymentPreimage }),
+  };
+}
+
+function parseLightningSend(request: JsonObject, field: string): SspLightningSendResult {
+  const transferId = optionalTransferId(
+    request["lightning_send_request_transfer"],
+    `${field}.lightning_send_request_transfer`,
+  );
+  const paymentPreimage = optionalPreimage(
+    request["lightning_send_request_payment_preimage"],
+    `${field}.lightning_send_request_payment_preimage`,
+  );
+  return {
+    id: asString(request["lightning_send_request_id"], `${field}.lightning_send_request_id`),
+    status: asString(
+      request["lightning_send_request_status"],
+      `${field}.lightning_send_request_status`,
+    ),
+    encodedInvoice: asString(
+      request["lightning_send_request_encoded_invoice"],
+      `${field}.lightning_send_request_encoded_invoice`,
+    ),
+    feeSats: feeAmountSats(
+      request["lightning_send_request_fee"],
+      `${field}.lightning_send_request_fee`,
+    ),
+    ...(transferId === undefined ? {} : { transferId }),
+    ...(paymentPreimage === undefined ? {} : { paymentPreimage }),
+  };
 }
 
 /**
@@ -440,6 +927,87 @@ export function createSspClient(options: {
         "leaves_swap_request_fee",
       );
       return { status, inboundTransferId, feeSats };
+    },
+
+    async requestLightningReceive(
+      request: SspLightningReceiveRequest,
+    ): Promise<SspLightningReceiveResult> {
+      if (!Number.isSafeInteger(request.amountSats) || request.amountSats < 0) {
+        throw new SparkInputError("amount sats must be a non-negative integer");
+      }
+      if (!Number.isSafeInteger(request.expirySecs) || request.expirySecs <= 0) {
+        throw new SparkInputError("expiry secs must be a positive integer");
+      }
+      const data = await authedPost("RequestLightningReceive", REQUEST_LIGHTNING_RECEIVE, {
+        network: request.network === "mainnet" ? "MAINNET" : "REGTEST",
+        amount_sats: request.amountSats,
+        payment_hash: bytesToHex(request.paymentHash),
+        expiry_secs: request.expirySecs,
+        memo: request.memo,
+        include_spark_address: request.includeSparkAddress,
+        receiver_identity_pubkey: bytesToHex(request.receiverIdentityPublicKey),
+        description_hash:
+          request.descriptionHash === undefined ? undefined : bytesToHex(request.descriptionHash),
+        spark_invoice: undefined,
+      });
+      const output = asObject(data["request_lightning_receive"], "request_lightning_receive");
+      return parseLightningReceive(
+        asObject(output["request"], "request_lightning_receive.request"),
+        "request_lightning_receive.request",
+      );
+    },
+
+    async requestLightningSend(request: SspLightningSendRequest): Promise<SspLightningSendResult> {
+      const data = await authedPost("RequestLightningSend", REQUEST_LIGHTNING_SEND, {
+        encoded_invoice: request.encodedInvoice,
+        amount_sats: request.amountSats,
+        // The transfer id keys the request; the SSP refuses `idempotency_key` alongside it.
+        idempotency_key: undefined,
+        user_outbound_transfer_external_id: request.userOutboundTransferExternalId,
+      });
+      const output = asObject(data["request_lightning_send"], "request_lightning_send");
+      return parseLightningSend(
+        asObject(output["request"], "request_lightning_send.request"),
+        "request_lightning_send.request",
+      );
+    },
+
+    async lightningSendFeeEstimate(encodedInvoice: string, amountSats?: number): Promise<number> {
+      const data = await authedPost("LightningSendFeeEstimate", LIGHTNING_SEND_FEE_ESTIMATE, {
+        encoded_invoice: encodedInvoice,
+        amount_sats: amountSats,
+      });
+      const output = asObject(data["lightning_send_fee_estimate"], "lightning_send_fee_estimate");
+      return feeAmountSats(
+        output["lightning_send_fee_estimate_output_fee_estimate"],
+        "lightning_send_fee_estimate_output_fee_estimate",
+      );
+    },
+
+    async lightningSendRequest(id: string): Promise<SspLightningSendResult> {
+      const data = await authedPost("UserRequest", USER_REQUEST, { request_id: id });
+      const userRequest = data["user_request"];
+      if (userRequest === undefined || userRequest === null) {
+        throw unexpectedResponse("user_request", "is missing");
+      }
+      const request = asObject(userRequest, "user_request");
+      if (request["__typename"] !== "LightningSendRequest") {
+        throw unexpectedResponse("user_request.__typename", `is ${String(request["__typename"])}`);
+      }
+      return parseLightningSend(request, "user_request");
+    },
+
+    async lightningReceiveRequest(id: string): Promise<SspLightningReceiveResult> {
+      const data = await authedPost("UserRequest", USER_REQUEST, { request_id: id });
+      const userRequest = data["user_request"];
+      if (userRequest === undefined || userRequest === null) {
+        throw unexpectedResponse("user_request", "is missing");
+      }
+      const request = asObject(userRequest, "user_request");
+      if (request["__typename"] !== "LightningReceiveRequest") {
+        throw unexpectedResponse("user_request.__typename", `is ${String(request["__typename"])}`);
+      }
+      return parseLightningReceive(request, "user_request");
     },
   };
 }

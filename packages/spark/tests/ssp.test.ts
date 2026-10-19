@@ -50,6 +50,22 @@ function fakeSsp(handlers: {
     feeUnit?: string;
     swapLeaves?: unknown[];
   };
+  lightningReceive?: {
+    id?: string;
+    status?: string;
+    invoice?: string;
+    transferId?: string | null;
+  };
+  lightningSend?: {
+    id?: string;
+    status?: string;
+    feeValue?: number | string;
+    feeUnit?: string;
+    transferId?: string | null;
+    preimage?: string | null;
+  };
+  feeEstimate?: { value?: number | string; unit?: string } | null;
+  userRequest?: unknown;
 }) {
   const requests: CapturedRequest[] = [];
   const challenge = handlers.challenge ?? protectedChallengeFor(SIGNER_PUBLIC_KEY);
@@ -166,11 +182,93 @@ function fakeSsp(handlers: {
           },
         });
       }
+      case "RequestLightningReceive": {
+        const req = handlers.lightningReceive ?? {};
+        const transfer =
+          req.transferId === null || req.transferId === undefined
+            ? null
+            : { __typename: "Transfer", transfer_spark_id: req.transferId };
+        return json({
+          request_lightning_receive: {
+            request: {
+              __typename: "LightningReceiveRequest",
+              lightning_receive_request_id: req.id ?? "recv-1",
+              lightning_receive_request_created_at: "2025-01-01T00:00:00Z",
+              lightning_receive_request_updated_at: "2025-01-01T00:00:00Z",
+              lightning_receive_request_network: "REGTEST",
+              lightning_receive_request_invoice: {
+                __typename: "Invoice",
+                invoice_encoded_invoice: req.invoice ?? "lnbcrt10n1ptest",
+                invoice_bitcoin_network: "REGTEST",
+                invoice_payment_hash: "00".repeat(32),
+              },
+              lightning_receive_request_status: req.status ?? "LIGHTNING_PAYMENT_CREATED",
+              lightning_receive_request_transfer: transfer,
+              lightning_receive_request_payment_preimage: null,
+              lightning_receive_request_receiver_identity_public_key: bytesToHex(SIGNER_PUBLIC_KEY),
+            },
+          },
+        });
+      }
+      case "RequestLightningSend": {
+        const req = handlers.lightningSend ?? {};
+        return json({
+          request_lightning_send: {
+            request: lightningSendRequestJson(req),
+          },
+        });
+      }
+      case "LightningSendFeeEstimate":
+        return json({
+          lightning_send_fee_estimate:
+            handlers.feeEstimate === null
+              ? null
+              : {
+                  lightning_send_fee_estimate_output_fee_estimate: {
+                    __typename: "CurrencyAmount",
+                    currency_amount_original_value: handlers.feeEstimate?.value ?? 250,
+                    currency_amount_original_unit: handlers.feeEstimate?.unit ?? "SATOSHI",
+                  },
+                },
+        });
+      case "UserRequest":
+        return json({ user_request: handlers.userRequest ?? null });
       default:
         return new Response("not found", { status: 404 });
     }
   };
   return { fetchImpl, requests };
+}
+
+function lightningSendRequestJson(req: {
+  id?: string;
+  status?: string;
+  feeValue?: number | string;
+  feeUnit?: string;
+  transferId?: string | null;
+  preimage?: string | null;
+  encodedInvoice?: string;
+}): Record<string, unknown> {
+  return {
+    __typename: "LightningSendRequest",
+    lightning_send_request_id: req.id ?? "send-1",
+    lightning_send_request_created_at: "2025-01-01T00:00:00Z",
+    lightning_send_request_updated_at: "2025-01-01T00:00:00Z",
+    lightning_send_request_network: "REGTEST",
+    lightning_send_request_encoded_invoice: req.encodedInvoice ?? "lnbcrt10n1ptest",
+    lightning_send_request_fee: {
+      __typename: "CurrencyAmount",
+      currency_amount_original_value: req.feeValue ?? 7,
+      currency_amount_original_unit: req.feeUnit ?? "SATOSHI",
+    },
+    lightning_send_request_idempotency_key: null,
+    lightning_send_request_status: req.status ?? "LIGHTNING_PAYMENT_INITIATED",
+    lightning_send_request_transfer:
+      req.transferId === null || req.transferId === undefined
+        ? null
+        : { __typename: "Transfer", transfer_spark_id: req.transferId },
+    lightning_send_request_payment_preimage: req.preimage ?? null,
+  };
 }
 
 const SSP_OPTS = { baseUrl: "https://ssp.test", graphqlPath: "graphql/spark/2025-03-19" };
@@ -336,6 +434,160 @@ test("requestSwap rejects a non-SATOSHI fee", async () => {
   const { fetchImpl } = fakeSsp({ swap: { feeUnit: "MILLISATOSHI" } });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
   await expect(client.requestSwap(SWAP_INPUT)).rejects.toMatchObject({
+    code: "unexpected_response",
+  });
+});
+
+const RECEIVE_INPUT = {
+  network: "regtest" as const,
+  amountSats: 1000,
+  paymentHash: new Uint8Array(32).fill(1),
+  expirySecs: 3600,
+  receiverIdentityPublicKey: SIGNER_PUBLIC_KEY,
+  memo: "hello",
+  includeSparkAddress: true,
+};
+
+test("requestLightningReceive sends the invoice variables and parses the request", async () => {
+  const { fetchImpl, requests } = fakeSsp({
+    lightningReceive: { invoice: "lnbcrt10n1ptest", transferId: "tr-1" },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.requestLightningReceive(RECEIVE_INPUT);
+  expect(result).toStrictEqual({
+    id: "recv-1",
+    status: "LIGHTNING_PAYMENT_CREATED",
+    invoice: "lnbcrt10n1ptest",
+    transferId: "tr-1",
+  });
+  const call = requests.find((r) => r.operationName === "RequestLightningReceive");
+  expect(call?.variables).toStrictEqual({
+    network: "REGTEST",
+    amount_sats: 1000,
+    payment_hash: bytesToHex(RECEIVE_INPUT.paymentHash),
+    expiry_secs: 3600,
+    memo: "hello",
+    include_spark_address: true,
+    receiver_identity_pubkey: bytesToHex(RECEIVE_INPUT.receiverIdentityPublicKey),
+  });
+});
+
+test("requestLightningSend sends the external transfer id and no idempotency_key", async () => {
+  const { fetchImpl, requests } = fakeSsp({
+    lightningSend: { status: "LIGHTNING_PAYMENT_INITIATED", feeValue: 7, transferId: "tr-9" },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.requestLightningSend({
+    encodedInvoice: "lnbcrt10n1ptest",
+    userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+  });
+  expect(result.id).toBe("send-1");
+  expect(result.feeSats).toBe(7);
+  expect(result.transferId).toBe("tr-9");
+  const call = requests.find((r) => r.operationName === "RequestLightningSend");
+  expect(call?.variables).toStrictEqual({
+    encoded_invoice: "lnbcrt10n1ptest",
+    user_outbound_transfer_external_id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+  });
+  // Neither idempotency_key nor amount_sats may be sent for a fixed-amount invoice.
+  expect(call?.variables).not.toHaveProperty("idempotency_key");
+  expect(call?.variables).not.toHaveProperty("amount_sats");
+});
+
+test("requestLightningSend forwards amount_sats only for amountless invoices", async () => {
+  const { fetchImpl, requests } = fakeSsp({ lightningSend: {} });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await client.requestLightningSend({
+    encodedInvoice: "lnbcrt1ptest",
+    amountSats: 500,
+    userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+  });
+  const call = requests.find((r) => r.operationName === "RequestLightningSend");
+  expect(call?.variables["amount_sats"]).toBe(500);
+});
+
+test("lightningSendFeeEstimate handles SATOSHI, MILLISATOSHI and rejects other units", async () => {
+  const sat = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ feeEstimate: { value: 250, unit: "SATOSHI" } }).fetchImpl,
+  });
+  await expect(sat.lightningSendFeeEstimate("lnbcrt1x")).resolves.toBe(250);
+  const msat = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ feeEstimate: { value: 2501, unit: "MILLISATOSHI" } }).fetchImpl,
+  });
+  await expect(msat.lightningSendFeeEstimate("lnbcrt1x", 500)).resolves.toBe(3);
+  const other = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ feeEstimate: { value: 1, unit: "USD" } }).fetchImpl,
+  });
+  await expect(other.lightningSendFeeEstimate("lnbcrt1x")).rejects.toMatchObject({
+    code: "unexpected_response",
+  });
+  const missing = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ feeEstimate: null }).fetchImpl,
+  });
+  await expect(missing.lightningSendFeeEstimate("lnbcrt1x")).rejects.toMatchObject({
+    code: "unexpected_response",
+  });
+});
+
+test("lightningSendRequest parses a settled send with preimage and transfer id", async () => {
+  const { fetchImpl } = fakeSsp({
+    userRequest: lightningSendRequestJson({
+      status: "LIGHTNING_PAYMENT_SUCCEEDED",
+      preimage: "ab".repeat(32),
+      transferId: "tr-7",
+      feeValue: "12",
+      feeUnit: "MILLISATOSHI",
+    }),
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.lightningSendRequest("send-1");
+  expect(result.status).toBe("LIGHTNING_PAYMENT_SUCCEEDED");
+  expect(bytesToHex(result.paymentPreimage!)).toBe("ab".repeat(32));
+  expect(result.transferId).toBe("tr-7");
+  // 12 millisats → ceil → 1 sat.
+  expect(result.feeSats).toBe(1);
+});
+
+test("lightningSendRequest rejects a request of another type", async () => {
+  const { fetchImpl } = fakeSsp({
+    userRequest: { __typename: "CoopExitRequest" },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(client.lightningSendRequest("x")).rejects.toMatchObject({
+    code: "unexpected_response",
+  });
+});
+
+test("lightningReceiveRequest parses status and transfer id; missing request fails", async () => {
+  const { fetchImpl } = fakeSsp({
+    userRequest: {
+      __typename: "LightningReceiveRequest",
+      lightning_receive_request_id: "recv-9",
+      lightning_receive_request_status: "TRANSFER_COMPLETED",
+      lightning_receive_request_invoice: { invoice_encoded_invoice: "lnbcrt1x" },
+      lightning_receive_request_transfer: { transfer_spark_id: "tr-5" },
+      lightning_receive_request_payment_preimage: null,
+    },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.lightningReceiveRequest("recv-9");
+  expect(result.status).toBe("TRANSFER_COMPLETED");
+  expect(result.transferId).toBe("tr-5");
+
+  const missing = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ userRequest: null }).fetchImpl,
+  });
+  await expect(missing.lightningReceiveRequest("recv-x")).rejects.toMatchObject({
     code: "unexpected_response",
   });
 });
