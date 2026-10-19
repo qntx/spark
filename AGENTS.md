@@ -45,6 +45,7 @@
 bun run lint && bun run typecheck && bun run test
 bun run test:parity
 bun run test:ffi-host                            # C host drives the shared vectors
+SPARK_E2E_HOSTED=1 bun run --cwd packages/spark test tests/e2e-hosted-swap.test.ts  # seed from SPARK_HOSTED_SEED or the gitignored .env.hosted
 bun run --cwd packages/spark-wasm build:wasm     # hermetic docker build (pinned linux/amd64)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
