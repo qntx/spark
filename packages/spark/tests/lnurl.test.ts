@@ -253,6 +253,38 @@ test("rejects non-http schemes, userinfo, bad hosts and IPv6", () => {
   }
 });
 
+test("rejects non-canonical IPv4 host forms that WHATWG would reinterpret", () => {
+  const bad = [
+    "https://2130706433/",
+    "https://0x7f.0.0.1/",
+    "https://127.1/",
+    "https://10.0x0.1/",
+    "https://01.2.3.4/",
+    "https://256.1.1.1/",
+    "https://1.2.3.4.5/",
+  ];
+  for (const url of bad) {
+    expect(() => parseLnurlUrl(url)).toThrow(SparkInputError);
+  }
+});
+
+test("accepts dotted-quad IPv4 and numeric-looking DNS hosts", () => {
+  const good = [
+    "https://1.2.3.4/",
+    "https://0.0.0.0/",
+    "https://255.255.255.255/",
+    "https://example.com/",
+    "https://1a.example.com/",
+    // Last label is not an IPv4 number, so WHATWG keeps these as DNS names too.
+    "https://x.123abc/",
+    "https://x.123/",
+    "https://1.2.3.08/",
+  ];
+  for (const url of good) {
+    expect(() => parseLnurlUrl(url)).not.toThrow();
+  }
+});
+
 test("withQuery appends encoded params and preserves the existing query", () => {
   const callback = withQuery("https://service.com/cb?session=42#frag", [
     ["amount", "5000"],
