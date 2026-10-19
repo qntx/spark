@@ -201,6 +201,23 @@ fragment LeavesSwapFeeEstimateOutputFragment on LeavesSwapFeeEstimateOutput {
   }
 }`;
 
+/**
+ * Terminal failure/failing values of the SSP's `SparkLeavesSwapRequestStatus`. The upstream JS enum
+ * stops at FAILED/EXPIRED; the live schema's values come from Breez's graphql/models.rs.
+ */
+const SWAP_FAILED = new Set([
+  "INBOUND_TRANSFER_VERIFYING_FAILED",
+  "OUTBOUND_TRANSFER_SENDING_FAILED",
+  "OUTBOUND_TRANSFER_COMPLETING_FAILED",
+  "INBOUND_TRANSFER_CLAIMING_FAILED",
+  "REQUEST_FAILING_FROM_VERIFYING_SCHEDULED",
+  "REQUEST_FAILING_FROM_SENDING_SCHEDULED",
+  "REQUEST_FAILING_FROM_VERIFYING_FAILED",
+  "REQUEST_FAILING_FROM_SENDING_FAILED",
+  "EXPIRED",
+  "FAILED",
+]);
+
 const REQUEST_SWAP = `
 mutation RequestSwap(
   $adaptor_pubkey: PublicKey!
@@ -1217,8 +1234,9 @@ export function createSspClient(options: {
       if (!Array.isArray(swapLeaves) || swapLeaves.length === 0) {
         throw unexpectedResponse("leaves_swap_request_swap_leaves", "is missing or empty");
       }
-      // Terminal failure states of upstream SparkLeavesSwapRequestStatus.
-      if (status === "FAILED" || status === "EXPIRED") {
+      // Terminal failure/failing states of the live SparkLeavesSwapRequestStatus enum —
+      // the upstream JS list is stale; Breez models.rs carries the current values.
+      if (SWAP_FAILED.has(status)) {
         throw new SparkRequestError(`ssp leaves swap ${status.toLowerCase()}`, {
           code: "swap_failed",
         });

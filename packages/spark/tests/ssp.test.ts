@@ -470,8 +470,20 @@ test("requestSwap sends hex variables and parses the inbound transfer + fee", as
 });
 
 test("requestSwap maps terminal failure statuses to swap_failed", async () => {
+  const failed = [
+    "INBOUND_TRANSFER_VERIFYING_FAILED",
+    "OUTBOUND_TRANSFER_SENDING_FAILED",
+    "OUTBOUND_TRANSFER_COMPLETING_FAILED",
+    "INBOUND_TRANSFER_CLAIMING_FAILED",
+    "REQUEST_FAILING_FROM_VERIFYING_SCHEDULED",
+    "REQUEST_FAILING_FROM_SENDING_SCHEDULED",
+    "REQUEST_FAILING_FROM_VERIFYING_FAILED",
+    "REQUEST_FAILING_FROM_SENDING_FAILED",
+    "EXPIRED",
+    "FAILED",
+  ];
   const results = await Promise.all(
-    ["FAILED", "EXPIRED"].map(async (status) => {
+    failed.map(async (status) => {
       const { fetchImpl } = fakeSsp({ swap: { status } });
       const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
       return client.requestSwap(SWAP_INPUT).then(
@@ -480,7 +492,16 @@ test("requestSwap maps terminal failure statuses to swap_failed", async () => {
       );
     }),
   );
-  expect(results).toStrictEqual(["swap_failed", "swap_failed"]);
+  expect(results).toStrictEqual(failed.map(() => "swap_failed"));
+});
+
+test("requestSwap keeps accepting in-flight and succeeded statuses", async () => {
+  for (const status of ["TRANSFERS_COMPLETING_SCHEDULED", "OUTBOUND_TRANSFER_SENT", "SUCCEEDED"]) {
+    const { fetchImpl } = fakeSsp({ swap: { status, sparkId: "in-1" } });
+    const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+    // oxlint-disable-next-line no-await-in-loop -- serial checks keep failures attributable
+    await expect(client.requestSwap(SWAP_INPUT)).resolves.toMatchObject({ status });
+  }
 });
 
 test("requestSwap rejects a missing or empty swap_leaves list", async () => {
