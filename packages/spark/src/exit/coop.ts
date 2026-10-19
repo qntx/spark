@@ -16,6 +16,7 @@ import {
 } from "../core/bitcoin/index.ts";
 import type { RefundTxTrio } from "../core/bitcoin/index.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
+import { defaultSleep } from "../core/time.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
 import { StartTransferRequestSchema, TransferType } from "../proto/gen/spark_pb.ts";
@@ -153,12 +154,6 @@ export async function quoteCooperativeExit(
  * so between attempts the request status decides — accepted means the SSP has the payout, failed is
  * terminal, anything else sleeps and retries (Breez request_payout).
  */
-async function defaultSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 async function completeWithRetries(
   deps: Pick<CoopExitDeps, "ssp" | "sleep">,
   requestId: string,

@@ -7,6 +7,7 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import type { SparkOperatorConfig } from "../core/network.ts";
 import { SESSION_EXPIRY_BUFFER_MS } from "../core/session.ts";
 import { serverErrorText } from "../core/text.ts";
+import { defaultSleep } from "../core/time.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import { SparkError, SparkRequestError } from "../errors/index.ts";
 import { ChallengeSchema, SparkAuthnService } from "../proto/gen/spark_authn_pb.ts";
@@ -107,12 +108,6 @@ const RETRYABLE_CODES = new Set([
   Code.ResourceExhausted,
   Code.Aborted,
 ]);
-
-async function defaultSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 
 function codeName(code: Code): string {
   const name = Code[code];
