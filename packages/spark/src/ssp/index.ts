@@ -485,7 +485,7 @@ mutation RequestCoopExit(
   $exit_speed: ExitSpeed!
   $withdraw_all: Boolean
   $fee_leaf_external_ids: [UUID!]
-  $fee_quote_id: UUID
+  $fee_quote_id: ID
   $user_outbound_transfer_external_id: UUID
 ) {
   request_coop_exit(input: {
@@ -546,7 +546,7 @@ fragment CoopExitRequestFragment on CoopExitRequest {
 const COMPLETE_COOP_EXIT = `
 mutation CompleteCoopExit(
   $user_outbound_transfer_external_id: UUID!
-  $coop_exit_request_id: UUID!
+  $coop_exit_request_id: ID
 ) {
   complete_coop_exit(input: {
     user_outbound_transfer_external_id: $user_outbound_transfer_external_id
