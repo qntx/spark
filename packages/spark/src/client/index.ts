@@ -4,6 +4,12 @@ import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
 import type { UnusedDepositAddress } from "../deposit/index.ts";
 import { SparkInputError } from "../errors/index.ts";
+import type {
+  CooperativeExitQuote,
+  CooperativeExitResult,
+  CooperativeExitSpeed,
+  CooperativeExitStatus,
+} from "../exit/coop.ts";
 import { createMemorySparkStore } from "../exit/store.ts";
 import type { SparkStore } from "../exit/store.ts";
 import type { ExitTransaction } from "../exit/unilateral.ts";
@@ -166,6 +172,28 @@ export type SparkClient = {
       leafIds: ReadonlyArray<string>,
     ) => Promise<ReadonlyArray<ExitTransaction>>;
     /**
+     * The SSP's per-speed cooperative-exit fees for `address`. `amountSats` selects exactly that
+     * much to exit (swapping if needed); omitting it quotes for the whole balance.
+     */
+    readonly quoteCooperativeExit: (options: {
+      readonly address: string;
+      readonly amountSats?: number;
+    }) => Promise<CooperativeExitQuote>;
+    /**
+     * Cooperatively exits leaves to `address`, deducting `speed`'s quoted fee from the payout.
+     * `amountSats` exits exactly that much; omitting it exits the whole balance. Pass the same
+     * `transferId` to retry a call whose response was lost.
+     */
+    readonly cooperativeExit: (options: {
+      readonly address: string;
+      readonly speed: CooperativeExitSpeed;
+      readonly maxFeeSats: number;
+      readonly amountSats?: number;
+      readonly transferId?: string;
+    }) => Promise<CooperativeExitResult>;
+    /** The SSP's status for a cooperative-exit request id. */
+    readonly cooperativeExitStatus: (requestId: string) => Promise<CooperativeExitStatus>;
+    /**
      * Signed key-path sweep of a confirmed refund output (any of the leaf's refund variants, output 0)
      * to `destinationScript`.
      */
@@ -279,6 +307,7 @@ export function createSparkClientWith(
       operators,
       threshold: config.threshold,
     },
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
     sspClient: createSspClient({
       baseUrl: ssp.baseUrl,
       graphqlPath: ssp.graphqlPath,

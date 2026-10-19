@@ -27,6 +27,7 @@ export type ClientContext = {
   readonly store: SparkStore;
   readonly random: (length: number) => Uint8Array;
   readonly now: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
   readonly transferCoordinator: TransferCoordinator;
   readonly depositCoordinator: DepositCoordinator;
   readonly sspClient: ReturnType<typeof createSspClient>;

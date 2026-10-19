@@ -7,13 +7,43 @@ import {
   parseTransaction,
 } from "../core/bitcoin/index.ts";
 import { SparkInputError } from "../errors/index.ts";
+import { cooperativeExit, cooperativeExitStatus, quoteCooperativeExit } from "../exit/coop.ts";
 import { unilateralExitTransactions } from "../exit/unilateral.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
+import { selectSendLeaves } from "./leaves.ts";
 
 export function createWithdrawals(context: ClientContext): SparkClient["withdrawals"] {
-  const { coordinatorConnection, signer, network, store } = context;
+  const { coordinatorConnection, signer, network, config, store } = context;
+  // All spendable leaves withdraw everything; an amount selects exactly (swapping if needed).
+  const selectExitLeaves = async (amountSats?: number) =>
+    amountSats === undefined ? context.leaves() : selectSendLeaves(context, amountSats);
   return {
+    quoteCooperativeExit: async (options) =>
+      quoteCooperativeExit(
+        { ssp: context.sspClient, network, selectLeaves: selectExitLeaves },
+        options,
+      ),
+    cooperativeExit: async (options) =>
+      cooperativeExit(
+        {
+          spark: coordinatorConnection.spark,
+          ssp: context.sspClient,
+          sspIdentityPublicKey: config.ssp.identityPublicKey,
+          signer,
+          network,
+          operators: context.operators,
+          threshold: config.threshold,
+          random: context.random,
+          now: context.now,
+          selectLeaves: selectExitLeaves,
+          deleteExitChains: async (leafIds) => store.deleteExitChains(leafIds),
+          ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
+        },
+        options,
+      ),
+    cooperativeExitStatus: async (requestId) =>
+      cooperativeExitStatus({ ssp: context.sspClient }, requestId),
     unilateralExit: async (leafIds) => {
       const { transactions, chains } = await unilateralExitTransactions({
         spark: coordinatorConnection.spark,

@@ -34,6 +34,12 @@ export { buildCpfpChild } from "./core/bitcoin/cpfp.ts";
 export type { FundingInput } from "./core/bitcoin/cpfp.ts";
 export { exitTransactions } from "./exit/unilateral.ts";
 export type { ExitTransaction } from "./exit/unilateral.ts";
+export type {
+  CooperativeExitQuote,
+  CooperativeExitResult,
+  CooperativeExitSpeed,
+  CooperativeExitStatus,
+} from "./exit/coop.ts";
 export { createMemorySparkStore } from "./exit/store.ts";
 export type { SparkExitChain, SparkStore } from "./exit/store.ts";
 export type { SparkLeaf } from "./tree/index.ts";
