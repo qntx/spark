@@ -1,7 +1,5 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
-import type { Client } from "@connectrpc/connect";
-import { equalBytes } from "@noble/curves/utils.js";
 
 import {
   createRefundTxsForLightning,
@@ -16,10 +14,9 @@ import {
   StartTransferRequestSchema,
   TransferType,
 } from "../proto/gen/spark_pb.ts";
-import type { SparkService, Transfer } from "../proto/gen/spark_pb.ts";
 import { mapTransfer } from "../transfer/model.ts";
 import type { SparkTransfer } from "../transfer/model.ts";
-import { queryTransfersByIds } from "../transfer/query.ts";
+import { assertCommittedTransfer, queryCommittedTransfer } from "../transfer/query.ts";
 import { prepareTransferPackage } from "../transfer/send.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import type { LightningDeps } from "./types.ts";
@@ -67,49 +64,6 @@ export function lightningInvoiceAmount(
     throw new SparkInputError("lightning pay: invoice amount must be a positive integer");
   }
   return amount;
-}
-
-/**
- * The committed transfer must be exactly the preimage swap we signed for — us → the SSP. On a
- * recovered response in particular, continuing with a transfer to another receiver would commit our
- * leaves to terms we never agreed to.
- */
-function assertPreimageSwapTransfer(
-  transfer: SparkTransfer,
-  identityPublicKey: Uint8Array,
-  sspIdentityPublicKey: Uint8Array,
-): void {
-  if (
-    transfer.type !== "PREIMAGE_SWAP" ||
-    !equalBytes(transfer.senderIdentityPublicKey, identityPublicKey) ||
-    !equalBytes(transfer.receiverIdentityPublicKey, sspIdentityPublicKey)
-  ) {
-    throw new SparkError("lightning pay: committed transfer is not our preimage swap to the SSP");
-  }
-}
-
-/** The transfer the preimage swap committed, looked up after a lost `initiate` response. */
-async function recoverCommittedTransfer(
-  spark: Client<typeof SparkService>,
-  network: LightningDeps["network"],
-  transferId: string,
-  identityPublicKey: Uint8Array,
-  sspIdentityPublicKey: Uint8Array,
-): Promise<SparkTransfer | undefined> {
-  let transfers: Transfer[];
-  try {
-    transfers = await queryTransfersByIds({ spark, transferIds: [transferId], network });
-  } catch {
-    // The probe only diagnoses the original failure; its own error must not replace it.
-    return undefined;
-  }
-  const transfer = transfers.find(
-    (candidate) =>
-      candidate.type === TransferType.PREIMAGE_SWAP &&
-      equalBytes(candidate.senderIdentityPublicKey, identityPublicKey) &&
-      equalBytes(candidate.receiverIdentityPublicKey, sspIdentityPublicKey),
-  );
-  return transfer === undefined ? undefined : mapTransfer(transfer);
 }
 
 /**
@@ -188,9 +142,11 @@ export async function payLightningInvoice(
         sequenceLockDestinationPublicKey: identityPublicKey,
       });
       return {
-        cpfpRefund: refunds.cpfpRefundTx,
-        directRefund: refunds.directRefundTx,
-        directFromCpfpRefund: refunds.directFromCpfpRefundTx,
+        refunds: {
+          cpfpRefund: refunds.cpfpRefundTx,
+          directRefund: refunds.directRefundTx,
+          directFromCpfpRefund: refunds.directFromCpfpRefundTx,
+        },
       };
     },
   });
@@ -226,19 +182,28 @@ export async function payLightningInvoice(
   } catch (error) {
     // The swap can commit server-side and still lose its response. The committed transfer is the
     // only sound test — a retry must continue with it rather than fail or double-pay.
-    const recovered = await recoverCommittedTransfer(
+    const recovered = await queryCommittedTransfer({
       spark,
       network,
       transferId,
-      identityPublicKey,
-      sspIdentityPublicKey,
-    );
+      type: TransferType.PREIMAGE_SWAP,
+      senderIdentityPublicKey: identityPublicKey,
+      receiverIdentityPublicKey: sspIdentityPublicKey,
+    });
     if (recovered === undefined) {
       throw error;
     }
     transfer = recovered;
   }
-  assertPreimageSwapTransfer(transfer, identityPublicKey, sspIdentityPublicKey);
+  assertCommittedTransfer(
+    transfer,
+    {
+      type: TransferType.PREIMAGE_SWAP,
+      senderIdentityPublicKey: identityPublicKey,
+      receiverIdentityPublicKey: sspIdentityPublicKey,
+    },
+    "lightning pay",
+  );
 
   // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
   // failure on the SSP call below. The returned transfer — not the locally selected list —

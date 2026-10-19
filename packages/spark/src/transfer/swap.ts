@@ -96,14 +96,15 @@ export async function swapLeaves(
       }
       return { leaf, refundTx: leaf.refundTx, signingPublicKey };
     }),
-    (entry, sequence) =>
-      createDecrementedTimelockRefundTxs({
+    (entry, sequence) => ({
+      refunds: createDecrementedTimelockRefundTxs({
         nodeTx: entry.leaf.nodeTx,
         directNodeTx: entry.leaf.directTx,
         sequence,
         receivingPublicKey: options.sspIdentityPublicKey,
         network,
       }),
+    }),
     signingCommitments.signingCommitments,
     "swapLeaves",
   );

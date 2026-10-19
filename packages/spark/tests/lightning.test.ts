@@ -1061,7 +1061,7 @@ describe("payLightningInvoice", () => {
       }),
     });
     await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
-      "not our preimage swap",
+      "committed transfer is not ours",
     );
     expect(sendRequests).toHaveLength(0);
   });
@@ -1087,7 +1087,7 @@ describe("payLightningInvoice", () => {
       }),
     });
     await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
-      "not our preimage swap",
+      "committed transfer is not ours",
     );
     expect(sendRequests).toHaveLength(0);
   });
