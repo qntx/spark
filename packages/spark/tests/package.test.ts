@@ -53,6 +53,8 @@ test("files and license fields match the Apache-2.0 contract", () => {
   expect(pkg.license).toBe("Apache-2.0");
 });
 
+// Importing the packed dist entries is inherently slow (~4s); the default 5s limit flakes
+// under the parallel run.
 test("packed error classes are shared across entries", async () => {
   const index = (await import(dist("index.mjs"))) as { SparkCryptoError: unknown };
   const crypto = (await import(dist("crypto.mjs"))) as {
@@ -61,4 +63,4 @@ test("packed error classes are shared across entries", async () => {
   };
   expect(index.SparkCryptoError).toBe(crypto.SparkCryptoError);
   expect(crypto.SPARK_ABI_VERSION).toBe(1);
-});
+}, 30_000);
