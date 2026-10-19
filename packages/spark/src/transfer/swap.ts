@@ -94,16 +94,17 @@ export async function swapLeaves(
       if (signingPublicKey === undefined) {
         throw new SparkError("swapLeaves: signer returned fewer public keys than requested");
       }
-      return {
-        leaf,
-        refundTx: leaf.refundTx,
-        signingPublicKey,
-        receivingPublicKey: options.sspIdentityPublicKey,
-      };
+      return { leaf, refundTx: leaf.refundTx, signingPublicKey };
     }),
-    createDecrementedTimelockRefundTxs,
+    (entry, sequence) =>
+      createDecrementedTimelockRefundTxs({
+        nodeTx: entry.leaf.nodeTx,
+        directNodeTx: entry.leaf.directTx,
+        sequence,
+        receivingPublicKey: options.sspIdentityPublicKey,
+        network,
+      }),
     signingCommitments.signingCommitments,
-    network,
     "swapLeaves",
   );
 

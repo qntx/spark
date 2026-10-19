@@ -1,7 +1,6 @@
 import { u64ToSats } from "../core/assert.ts";
 import { parseTransaction } from "../core/bitcoin/index.ts";
-import type { createDecrementedTimelockRefundTxs, RefundTxTrio } from "../core/bitcoin/index.ts";
-import type { SparkNetwork } from "../core/network.ts";
+import type { RefundTxTrio } from "../core/bitcoin/index.ts";
 import { SparkError } from "../errors/index.ts";
 import type { RequestedSigningCommitments, UserSignedTxSigningJob } from "../proto/gen/spark_pb.ts";
 import type { SparkSigner } from "../signer/types.ts";
@@ -11,6 +10,13 @@ import type { UserSigningSpec } from "../tree/signing.ts";
 
 /** One refund signing spec: the leaf it covers, its SO commitments and the signing target. */
 type RefundJobSpec = UserSigningSpec & { readonly leafId: string };
+
+/** Per-leaf input to {@link refundJobGroups}: the leaf, its current refund tx and its signer key. */
+export type RefundJobLeaf = {
+  readonly leaf: SparkLeaf;
+  readonly refundTx: Uint8Array;
+  readonly signingPublicKey: Uint8Array;
+};
 
 function prevout(
   txBytes: Uint8Array,
@@ -38,17 +44,14 @@ function refundTxSequence(refundTxBytes: Uint8Array, context: string): number {
  * output 0, the direct refund spends the direct node tx output 0 and exists only when the leaf
  * carries a direct tx. `signingCommitments` must hold exactly `3 * leaves.length` entries, sliced
  * per group (CPFP first, then direct, then direct-from-CPFP).
+ *
+ * `buildRefunds` constructs the leaf's refund trio from its current refund sequence — plain
+ * timelock refunds for sends, swaps and claims, HTLC refunds for Lightning sends.
  */
 export function refundJobGroups(
-  leaves: ReadonlyArray<{
-    leaf: SparkLeaf;
-    refundTx: Uint8Array;
-    signingPublicKey: Uint8Array;
-    receivingPublicKey: Uint8Array;
-  }>,
-  createRefundTxs: typeof createDecrementedTimelockRefundTxs,
+  leaves: ReadonlyArray<RefundJobLeaf>,
+  buildRefunds: (entry: RefundJobLeaf, sequence: number) => RefundTxTrio,
   signingCommitments: ReadonlyArray<RequestedSigningCommitments>,
-  network: SparkNetwork,
   context: string,
 ): {
   cpfp: RefundJobSpec[];
@@ -66,13 +69,7 @@ export function refundJobGroups(
   const directFromCpfp: RefundJobSpec[] = [];
   for (const [i, entry] of leaves.entries()) {
     const nodeOutput = prevout(entry.leaf.nodeTx, 0, `${context} leaf ${entry.leaf.id} node tx`);
-    const refunds: RefundTxTrio = createRefundTxs({
-      nodeTx: entry.leaf.nodeTx,
-      directNodeTx: entry.leaf.directTx,
-      sequence: refundTxSequence(entry.refundTx, context),
-      receivingPublicKey: entry.receivingPublicKey,
-      network,
-    });
+    const refunds = buildRefunds(entry, refundTxSequence(entry.refundTx, context));
     const commitments = signingCommitments[i];
     const directCommitment = signingCommitments[count + i];
     const directFromCpfpCommitment = signingCommitments[2 * count + i];
