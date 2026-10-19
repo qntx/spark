@@ -11,13 +11,16 @@ import { cooperativeExit, cooperativeExitStatus, quoteCooperativeExit } from "..
 import { unilateralExitTransactions } from "../exit/unilateral.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
-import { selectSendLeaves } from "./leaves.ts";
+import { renewStaleLeaves, selectSendLeaves } from "./leaves.ts";
 
 export function createWithdrawals(context: ClientContext): SparkClient["withdrawals"] {
   const { coordinatorConnection, signer, network, config, store } = context;
   // All spendable leaves withdraw everything; an amount selects exactly (swapping if needed).
+  // Either way every leaf is renewed before it leaves the wallet.
   const selectExitLeaves = async (amountSats?: number) =>
-    amountSats === undefined ? context.leaves() : selectSendLeaves(context, amountSats);
+    amountSats === undefined
+      ? renewStaleLeaves(context, await context.leaves())
+      : selectSendLeaves(context, amountSats);
   return {
     quoteCooperativeExit: async (options) =>
       quoteCooperativeExit(
