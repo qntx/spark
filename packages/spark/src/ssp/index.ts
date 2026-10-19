@@ -43,6 +43,19 @@ export type SspClient = {
   }) => Promise<SspCoopExitStatus>;
   /** `user_request` — status of a cooperative-exit request by id. */
   readonly coopExitRequest: (id: string) => Promise<SspCoopExitStatus>;
+  /**
+   * `static_deposit_quote` — the sats the SSP credits for claiming the UTXO, plus its quote
+   * signature.
+   */
+  readonly staticDepositQuote: (request: {
+    readonly transactionId: string;
+    readonly outputIndex: number;
+    readonly network: SparkNetwork;
+  }) => Promise<SspStaticDepositQuote>;
+  /** `claim_static_deposit` — FIXED-amount claim authorized by the static-deposit secret key. */
+  readonly claimStaticDeposit: (
+    request: SspClaimStaticDepositRequest,
+  ) => Promise<SspClaimStaticDepositResult>;
 };
 
 /** One swapped-out leaf: the unsigned CPFP refund tx and its adaptor-completed signature. */
@@ -137,6 +150,32 @@ export type SspCoopExitResult = {
 export type SspCoopExitStatus = {
   readonly id: string;
   readonly status: string;
+  readonly transferId?: string;
+  /** The SSP-built payout transaction, when the request record carries it. */
+  readonly rawCoopExitTransaction?: Uint8Array;
+};
+
+export type SspStaticDepositQuote = {
+  readonly creditAmountSats: number;
+  /** The SSP's quote signature — echoed back as `quote_signature` on the claim. */
+  readonly signature: string;
+};
+
+export type SspClaimStaticDepositRequest = {
+  readonly transactionId: string;
+  readonly outputIndex: number;
+  readonly network: SparkNetwork;
+  readonly creditAmountSats: number;
+  /** Hex-encoded static-deposit secret key — the only flow that hands a private key to the SSP. */
+  readonly depositSecretKey: string;
+  /** Hex-encoded DER identity signature over the `static-deposit-claim` statement. */
+  readonly signature: string;
+  /** The quote signature `static_deposit_quote` returned. */
+  readonly quoteSignature: string;
+};
+
+export type SspClaimStaticDepositResult = {
+  /** The SSP → wallet transfer id, once the claim created it. */
   readonly transferId?: string;
 };
 
@@ -614,6 +653,63 @@ fragment CoopExitRequestFragment on CoopExitRequest {
     }
 }`;
 
+const STATIC_DEPOSIT_QUOTE = `
+  query StaticDepositQuote(
+    $transaction_id: String!
+    $output_index: Int!
+    $network: BitcoinNetwork!
+  ) {
+    static_deposit_quote(
+      input: {
+        transaction_id: $transaction_id,
+        output_index: $output_index,
+        network: $network
+      }
+    ) {
+      ...StaticDepositQuoteOutputFragment
+    }
+  }
+
+fragment StaticDepositQuoteOutputFragment on StaticDepositQuoteOutput {
+    __typename
+    static_deposit_quote_output_transaction_id: transaction_id
+    static_deposit_quote_output_output_index: output_index
+    static_deposit_quote_output_network: network
+    static_deposit_quote_output_credit_amount_sats: credit_amount_sats
+    static_deposit_quote_output_signature: signature
+}`;
+
+const CLAIM_STATIC_DEPOSIT = `
+  mutation ClaimStaticDeposit(
+    $transaction_id: String!
+    $output_index: Int!
+    $network: BitcoinNetwork!
+    $request_type: ClaimStaticDepositRequestType!
+    $credit_amount_sats: Long
+    $deposit_secret_key: String!
+    $signature: String!
+    $quote_signature: String!
+  ) {
+    claim_static_deposit(input: {
+      transaction_id: $transaction_id
+      output_index: $output_index
+      network: $network
+      request_type: $request_type
+      credit_amount_sats: $credit_amount_sats
+      max_fee_sats: null
+      deposit_secret_key: $deposit_secret_key
+      signature: $signature
+      quote_signature: $quote_signature
+    }) {
+      ...ClaimStaticDepositOutputFragment
+    }
+  }
+
+fragment ClaimStaticDepositOutputFragment on ClaimStaticDepositOutput {
+    __typename
+    claim_static_deposit_output_transfer_id: transfer_id
+}`;
+
 // Upstream's UserRequest query — the document its `getLightningReceiveRequest`/
 // `getLightningSendRequest` use — copied verbatim including the other request-type fragments.
 const USER_REQUEST = `
@@ -904,6 +1000,14 @@ function optionalPreimage(value: unknown, field: string): Uint8Array | undefined
   return preimage;
 }
 
+/** Optional hex-encoded field → bytes; absent or null becomes undefined. */
+function optionalHexBytes(value: unknown, field: string): Uint8Array | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return asHexBytes(value, field);
+}
+
 /** `transfer_spark_id` inside an optional transfer object. */
 function optionalTransferId(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) {
@@ -1019,10 +1123,15 @@ function parseCoopExitStatus(request: JsonObject, field: string): SspCoopExitSta
     request["coop_exit_request_transfer"],
     `${field}.coop_exit_request_transfer`,
   );
+  const rawCoopExitTransaction = optionalHexBytes(
+    request["coop_exit_request_raw_coop_exit_transaction"],
+    `${field}.coop_exit_request_raw_coop_exit_transaction`,
+  );
   return {
     id: asString(request["coop_exit_request_id"], `${field}.coop_exit_request_id`),
     status: asString(request["coop_exit_request_status"], `${field}.coop_exit_request_status`),
     ...(transferId === undefined ? {} : { transferId }),
+    ...(rawCoopExitTransaction === undefined ? {} : { rawCoopExitTransaction }),
   };
 }
 
@@ -1397,6 +1506,68 @@ export function createSspClient(options: {
         throw unexpectedResponse("user_request.__typename", `is ${String(request["__typename"])}`);
       }
       return parseCoopExitStatus(request, "user_request");
+    },
+
+    async staticDepositQuote(request: {
+      transactionId: string;
+      outputIndex: number;
+      network: SparkNetwork;
+    }): Promise<SspStaticDepositQuote> {
+      const data = await authedPost("StaticDepositQuote", STATIC_DEPOSIT_QUOTE, {
+        transaction_id: request.transactionId,
+        output_index: request.outputIndex,
+        network: request.network === "mainnet" ? "MAINNET" : "REGTEST",
+      });
+      const output = asObject(data["static_deposit_quote"], "static_deposit_quote");
+      const field = "static_deposit_quote";
+      if (
+        asString(
+          output["static_deposit_quote_output_transaction_id"],
+          `${field}.static_deposit_quote_output_transaction_id`,
+        ) !== request.transactionId ||
+        asSats(
+          output["static_deposit_quote_output_output_index"],
+          `${field}.static_deposit_quote_output_output_index`,
+        ) !== request.outputIndex
+      ) {
+        throw unexpectedResponse(field, "quotes a different deposit output than requested");
+      }
+      return {
+        creditAmountSats: asSats(
+          output["static_deposit_quote_output_credit_amount_sats"],
+          `${field}.static_deposit_quote_output_credit_amount_sats`,
+        ),
+        signature: asString(
+          output["static_deposit_quote_output_signature"],
+          `${field}.static_deposit_quote_output_signature`,
+        ),
+      };
+    },
+
+    async claimStaticDeposit(
+      request: SspClaimStaticDepositRequest,
+    ): Promise<SspClaimStaticDepositResult> {
+      const data = await authedPost("ClaimStaticDeposit", CLAIM_STATIC_DEPOSIT, {
+        transaction_id: request.transactionId,
+        output_index: request.outputIndex,
+        network: request.network === "mainnet" ? "MAINNET" : "REGTEST",
+        request_type: "FIXED_AMOUNT",
+        credit_amount_sats: request.creditAmountSats,
+        deposit_secret_key: request.depositSecretKey,
+        signature: request.signature,
+        quote_signature: request.quoteSignature,
+      });
+      const output = asObject(data["claim_static_deposit"], "claim_static_deposit");
+      const transferId = output["claim_static_deposit_output_transfer_id"];
+      if (transferId === undefined || transferId === null) {
+        return {};
+      }
+      return {
+        transferId: asString(
+          transferId,
+          "claim_static_deposit.claim_static_deposit_output_transfer_id",
+        ),
+      };
     },
   };
 }

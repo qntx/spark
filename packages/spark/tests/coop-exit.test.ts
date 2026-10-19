@@ -453,6 +453,10 @@ function fakeSsp(handlers: {
         ...(result.transferId === undefined ? {} : { transferId: result.transferId }),
       });
     },
+    staticDepositQuote: async () =>
+      Promise.reject(new SparkRequestError("ssp: staticDepositQuote not stubbed")),
+    claimStaticDeposit: async () =>
+      Promise.reject(new SparkRequestError("ssp: claimStaticDeposit not stubbed")),
   };
   return { ssp, quotes, exitRequests, completions, statusReads };
 }
