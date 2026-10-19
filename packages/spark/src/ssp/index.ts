@@ -654,7 +654,12 @@ function optionalPreimage(value: unknown, field: string): Uint8Array | undefined
   if (value === undefined || value === null) {
     return undefined;
   }
-  const preimage = hexToBytes(asString(value, field));
+  let preimage: Uint8Array;
+  try {
+    preimage = hexToBytes(asString(value, field));
+  } catch {
+    throw unexpectedResponse(field, "is not a 32-byte hex preimage");
+  }
   if (preimage.length !== 32) {
     throw unexpectedResponse(field, "is not a 32-byte hex preimage");
   }
