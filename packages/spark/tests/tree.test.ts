@@ -1,10 +1,22 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import { Transaction } from "@scure/btc-signer";
 import { expect, test } from "vite-plus/test";
 
+import { p2trScriptFromPublicKey, txId } from "../src/core/bitcoin/index.ts";
 import { Network, TreeNodeSchema, TreeNodeStatus } from "../src/proto/gen/spark_pb.ts";
 import type { TreeNode } from "../src/proto/gen/spark_pb.ts";
-import { mapTreeNode, selectExact, selectLeaves } from "../src/tree/index.ts";
+import {
+  malformedLeafTx,
+  mapTreeNode,
+  operatorsDisagree,
+  ownsLeaf,
+  selectExact,
+  selectLeaves,
+} from "../src/tree/index.ts";
+import type { SparkLeaf } from "../src/tree/index.ts";
 
 function makeNode(overrides: object): TreeNode {
   return create(TreeNodeSchema, {
@@ -113,4 +125,95 @@ test("selectLeaves rejects non-positive amounts", () => {
   expect(() => selectLeaves(leaves, 0)).toThrow(/positive safe integer/);
   expect(() => selectLeaves(leaves, -5)).toThrow(/positive safe integer/);
   expect(() => selectLeaves(leaves, 1.5)).toThrow(/positive safe integer/);
+});
+
+const VERIFY_KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(9), true);
+
+function txSpending(prevTxid: Uint8Array): Uint8Array {
+  const tx = new Transaction({ allowUnknownOutputs: true });
+  tx.addInput({ txid: prevTxid, index: 0, sequence: 0x200 });
+  tx.addOutput({ script: p2trScriptFromPublicKey(VERIFY_KEY, "mainnet"), amount: 1000n });
+  return tx.toBytes(true);
+}
+
+function verifyLeaf(overrides: Partial<SparkLeaf> = {}): SparkLeaf {
+  const nodeTx = txSpending(new Uint8Array(32).fill(1));
+  const refundTx = txSpending(hexToBytes(txId(nodeTx)));
+  const leaf = mapTreeNode(
+    makeNode({
+      nodeTx,
+      refundTx,
+      verifyingPublicKey: VERIFY_KEY,
+      signingKeyshare: {
+        ownerIdentifiers: ["op-0", "op-1"],
+        threshold: 2,
+        publicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(7), true),
+        publicShares: {},
+      },
+    }),
+  );
+  return { ...leaf, ...overrides };
+}
+
+test("malformedLeafTx accepts a well-formed leaf", () => {
+  expect(malformedLeafTx(verifyLeaf())).toBeUndefined();
+});
+
+test("malformedLeafTx names each defect", () => {
+  // A 0-input transaction cannot round-trip scure's parser, so it lands on the parse defect.
+  const noInputs = new Transaction({ allowUnknownOutputs: true });
+  noInputs.addOutput({ script: p2trScriptFromPublicKey(VERIFY_KEY, "mainnet"), amount: 1000n });
+  expect(malformedLeafTx(verifyLeaf({ nodeTx: noInputs.toBytes(true) }))).toBe(
+    "node tx fails to parse",
+  );
+
+  const noOutputs = new Transaction({ allowUnknownOutputs: true });
+  noOutputs.addInput({ txid: new Uint8Array(32).fill(2), index: 0, sequence: 0x200 });
+  expect(malformedLeafTx(verifyLeaf({ refundTx: noOutputs.toBytes(true) }))).toBe(
+    "refund tx has no outputs",
+  );
+
+  expect(malformedLeafTx(verifyLeaf({ nodeTx: new Uint8Array([0xaa]) }))).toBe(
+    "node tx fails to parse",
+  );
+});
+
+test("operatorsDisagree compares the fields a spend commits to", () => {
+  const leaf = verifyLeaf();
+  expect(operatorsDisagree(leaf, verifyLeaf())).toBe(false);
+  expect(operatorsDisagree(leaf, verifyLeaf({ valueSats: 999 }))).toBe(true);
+  expect(operatorsDisagree(leaf, verifyLeaf({ status: "CREATING" }))).toBe(true);
+  expect(
+    operatorsDisagree(leaf, verifyLeaf({ nodeTx: txSpending(new Uint8Array(32).fill(9)) })),
+  ).toBe(true);
+  expect(
+    operatorsDisagree(
+      leaf,
+      verifyLeaf({
+        signingKeyshare: {
+          ...leaf.signingKeyshare,
+          publicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(8), true),
+        },
+      }),
+    ),
+  ).toBe(true);
+});
+
+test("ownsLeaf checks our key plus the share reaches the verifying key", () => {
+  const ourSecret = new Uint8Array(32).fill(3);
+  const shareSecret = new Uint8Array(32).fill(4);
+  const verifying = secp256k1.Point.fromBytes(secp256k1.getPublicKey(ourSecret, true))
+    .add(secp256k1.Point.fromBytes(secp256k1.getPublicKey(shareSecret, true)))
+    .toBytes(true);
+  const leaf = verifyLeaf({
+    verifyingPublicKey: verifying,
+    signingKeyshare: {
+      ownerIdentifiers: ["op-0", "op-1"],
+      threshold: 2,
+      publicKey: secp256k1.getPublicKey(shareSecret, true),
+    },
+  });
+  expect(ownsLeaf(leaf, secp256k1.getPublicKey(ourSecret, true))).toBe(true);
+  expect(ownsLeaf(leaf, secp256k1.getPublicKey(new Uint8Array(32).fill(5), true))).toBe(false);
+  expect(ownsLeaf(leaf, new Uint8Array(33))).toBe(false);
 });

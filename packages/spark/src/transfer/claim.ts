@@ -10,7 +10,7 @@ import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.
 import { SignatureScheme } from "../proto/gen/common_pb.ts";
 import { ClaimPackageSchema, HashVariant } from "../proto/gen/spark_pb.ts";
 import type { ClaimTransferResponse, SparkService, TransferLeaf } from "../proto/gen/spark_pb.ts";
-import { mapTreeNode } from "../tree/index.ts";
+import { mapTreeNode, ownsLeaf } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { CLAIMABLE_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
 import type { SparkTransfer, SparkTransferLeaf, TransferCoordinator } from "./model.ts";
@@ -213,6 +213,30 @@ export async function claimTransfer(
   const newLeafKeys = await signer.publicKeys(
     claimLeaves.map((leaf) => ({ type: "leaf", leafId: leaf.leaf.id })),
   );
+  const newLeafKeyById = new Map<string, Uint8Array>();
+  for (const [i, leaf] of claimLeaves.entries()) {
+    const key = newLeafKeys[i];
+    if (key === undefined) {
+      throw new SparkError("claimTransfer: signer returned fewer public keys than requested");
+    }
+    newLeafKeyById.set(leaf.leaf.id, key);
+  }
+
+  /**
+   * The claim response is coordinator-served data — a returned leaf must be one we signed for (the
+   * intermediate node id is the id we claimed) and be held under our `LEAF{id}` key: our public key
+   * plus the operators' share must reach its verifying key, matching the refresh-time ownership
+   * check in the leaf pool.
+   */
+  const verifyClaimedLeaves = (leaves: SparkLeaf[]): SparkLeaf[] => {
+    for (const leaf of leaves) {
+      const leafPublicKey = newLeafKeyById.get(leaf.id);
+      if (leafPublicKey === undefined || !ownsLeaf(leaf, leafPublicKey)) {
+        throw new SparkError(`claimTransfer: coordinator returned an unowned leaf ${leaf.id}`);
+      }
+    }
+    return leaves;
+  };
 
   const groups = refundJobGroups(
     claimLeaves.map((leaf, i) => {
@@ -270,18 +294,20 @@ export async function claimTransfer(
     if (!(error instanceof SparkRequestError) || error.code !== "already_exists") {
       throw error;
     }
-    return recoverCompletedClaim({
-      spark,
-      network,
-      transferId: transfer.id,
-      self,
-      receiverId,
-      error,
-      ...(options.call === undefined ? {} : { call: options.call }),
-    });
+    return verifyClaimedLeaves(
+      await recoverCompletedClaim({
+        spark,
+        network,
+        transferId: transfer.id,
+        self,
+        receiverId,
+        error,
+        ...(options.call === undefined ? {} : { call: options.call }),
+      }),
+    );
   }
   if (response.transfer === undefined) {
     throw new SparkError("claimTransfer: coordinator returned no transfer");
   }
-  return receiverLeaves(response.transfer.leaves, receiverId);
+  return verifyClaimedLeaves(receiverLeaves(response.transfer.leaves, receiverId));
 }

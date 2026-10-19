@@ -1,4 +1,4 @@
-import { create } from "@bufbuild/protobuf";
+import { create, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient, createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -41,6 +41,7 @@ import {
   QueryTransfersResponseSchema,
   RequestedSigningCommitmentsSchema,
   StartTransferResponseSchema,
+  SigningKeyshareSchema,
   TransferLeafSchema,
   TransferReceiverSchema,
   TransferReceiverStatus,
@@ -59,6 +60,7 @@ import type {
   Transfer,
   TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
+import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
@@ -116,8 +118,9 @@ const SENDER_SECRET = new Uint8Array(32).fill(55);
 
 /** Fabricated SO keyshare; the leaf verifying key is `share + user signing key`. */
 const SHARE_SECRET = 0x5ea5n;
+const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
 function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-  return secp256k1.Point.BASE.multiply(SHARE_SECRET)
+  return secp256k1.Point.fromBytes(SHARE_PUB)
     .add(secp256k1.Point.fromBytes(signingPublicKey))
     .toBytes(true);
 }
@@ -160,7 +163,7 @@ function fabricateLeaf(options: {
       signingKeyshare: {
         ownerIdentifiers: OPERATORS.map((op) => op.identifier),
         threshold: THRESHOLD,
-        publicKey: verifyingKey,
+        publicKey: SHARE_PUB,
       },
       vout: 0,
     },
@@ -254,6 +257,39 @@ function makeClient(
   );
 }
 
+/**
+ * The leaf a real `claim_transfer` response carries: same node id, but finalized under the
+ * receiver's `LEAF{leafId}` signing key with the operators' share keyshare.
+ */
+async function claimedLeaf(signer: SparkSigner, leaf: TransferLeaf): Promise<TransferLeaf> {
+  const inner = required(leaf.leaf, "leaf");
+  const [newKey] = await signer.publicKeys([{ type: "leaf", leafId: inner.id }]);
+  if (newKey === undefined) {
+    throw new Error("signer returned no leaf key");
+  }
+  return create(TransferLeafSchema, {
+    ...leaf,
+    leaf: create(TreeNodeSchema, {
+      ...inner,
+      verifyingPublicKey: verifyingKeyFor(newKey),
+      ownerSigningPublicKey: newKey,
+      signingKeyshare: create(SigningKeyshareSchema, {
+        ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+        threshold: THRESHOLD,
+        publicKey: SHARE_PUB,
+        publicShares: {},
+      }),
+    }),
+  });
+}
+
+async function claimedLeaves(
+  signer: SparkSigner,
+  leaves: ReadonlyArray<TransferLeaf>,
+): Promise<TransferLeaf[]> {
+  return Promise.all(leaves.map(async (leaf) => claimedLeaf(signer, leaf)));
+}
+
 function nodesResponse(nodes: Array<ReturnType<typeof create<typeof TreeNodeSchema>>>) {
   return create(QueryNodesResponseSchema, {
     nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
@@ -284,7 +320,7 @@ describe("transfers.send", () => {
       signingKeyshare: {
         ownerIdentifiers: OPERATORS.map((op) => op.identifier),
         threshold: THRESHOLD,
-        publicKey: leaf.verifyingPublicKey,
+        publicKey: leaf.signingKeyshare.publicKey,
         publicShares: {},
       },
       status: "AVAILABLE",
@@ -413,7 +449,7 @@ describe("transfers.send", () => {
       signingKeyshare: {
         ownerIdentifiers: OPERATORS.map((op) => op.identifier),
         threshold: THRESHOLD,
-        publicKey: leaf.verifyingPublicKey,
+        publicKey: leaf.signingKeyshare.publicKey,
         publicShares: {},
       },
       status: "AVAILABLE",
@@ -458,7 +494,7 @@ describe("transfers.send", () => {
       signingKeyshare: {
         ownerIdentifiers: OPERATORS.map((op) => op.identifier),
         threshold: THRESHOLD,
-        publicKey: leaf.verifyingPublicKey,
+        publicKey: leaf.signingKeyshare.publicKey,
         publicShares: {},
       },
       status: "AVAILABLE",
@@ -565,7 +601,7 @@ describe("transfers.claim", () => {
         signingKeyshare: {
           ownerIdentifiers: OPERATORS.map((op) => op.identifier),
           threshold: THRESHOLD,
-          publicKey: verifyingKey,
+          publicKey: SHARE_PUB,
           publicShares: {},
         },
         status: "AVAILABLE",
@@ -644,7 +680,7 @@ describe("transfers.claim", () => {
           signingCommitments: commitmentGroup(3),
         });
       },
-      claim_transfer: (req) => {
+      claim_transfer: async (req) => {
         claimReq = req;
         return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
@@ -652,7 +688,7 @@ describe("transfers.claim", () => {
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: [required(pending.leaves[0], "pending leaf")],
+            leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
           }),
         });
       },
@@ -740,14 +776,14 @@ describe("transfers.claim", () => {
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         }),
-      claim_transfer: (req) =>
+      claim_transfer: async (req) =>
         create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: [required(pending.leaves[0], "pending leaf")],
+            leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
           }),
         }),
     });
@@ -756,19 +792,19 @@ describe("transfers.claim", () => {
     receiver.dispose();
   });
 
-  const legacyClaimFakes = (pending: Transfer) => ({
+  const legacyClaimFakes = (pending: Transfer, receiver: SparkSigner) => ({
     get_signing_commitments: () =>
       create(GetSigningCommitmentsResponseSchema, {
         signingCommitments: commitmentGroup(3),
       }),
-    claim_transfer: (req: ClaimTransferRequest) =>
+    claim_transfer: async (req: ClaimTransferRequest) =>
       create(ClaimTransferResponseSchema, {
         transfer: create(TransferSchema, {
           id: req.transferId,
           status: TransferStatus.COMPLETED,
           type: TransferType.TRANSFER,
           network: Network.REGTEST,
-          leaves: [required(pending.leaves[0], "pending leaf")],
+          leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
         }),
       }),
   });
@@ -779,7 +815,7 @@ describe("transfers.claim", () => {
       receiverSigner: receiver,
       receivedSecret: new Uint8Array(32).fill(88),
     });
-    const client = makeClient(receiver, legacyClaimFakes(pending));
+    const client = makeClient(receiver, legacyClaimFakes(pending, receiver));
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
@@ -792,7 +828,7 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
       legacySignature: "der",
     });
-    const client = makeClient(receiver, legacyClaimFakes(pending));
+    const client = makeClient(receiver, legacyClaimFakes(pending, receiver));
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
@@ -883,14 +919,14 @@ describe("transfers.claim", () => {
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         }),
-      claim_transfer: (req) =>
+      claim_transfer: async (req) =>
         create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: [required(pending.leaves[0], "pending leaf")],
+            leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
           }),
         }),
     });
@@ -929,7 +965,7 @@ describe("transfers.claim", () => {
           signingCommitments: commitmentGroup(3),
         });
       },
-      claim_transfer: (req) => {
+      claim_transfer: async (req) => {
         claimReq = req;
         // The SO response carries every receiver's leaves; only ours may be claimed.
         return create(ClaimTransferResponseSchema, {
@@ -938,7 +974,10 @@ describe("transfers.claim", () => {
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: [required(pending.leaves[0], "own leaf"), otherLeaf],
+            leaves: [
+              await claimedLeaf(receiver, required(pending.leaves[0], "own leaf")),
+              otherLeaf,
+            ],
           }),
         });
       },
@@ -966,6 +1005,7 @@ describe("transfers.claim", () => {
       const completed = create(TransferSchema, {
         ...pending,
         status: TransferStatus.COMPLETED,
+        leaves: await claimedLeaves(receiver, pending.leaves),
       });
       const client = makeClient(receiver, {
         get_signing_commitments: () =>
@@ -1067,6 +1107,7 @@ describe("transfers.claim", () => {
       const updated = create(TransferSchema, {
         ...pending,
         status: TransferStatus.SENDER_KEY_TWEAKED,
+        leaves: [await claimedLeaf(receiver, ownLeaf), otherLeaf],
         receivers: [
           create(TransferReceiverSchema, {
             id: "r-self",
@@ -1130,14 +1171,14 @@ describe("transfers.claim", () => {
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
           }),
-        claim_transfer: (req) =>
+        claim_transfer: async (req) =>
           create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
               id: req.transferId,
               status: TransferStatus.COMPLETED,
               type: TransferType.TRANSFER,
               network: Network.REGTEST,
-              leaves: [required(pending.leaves[0], "pending leaf")],
+              leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
             }),
           }),
       },
@@ -1184,7 +1225,7 @@ describe("transfer stores exit chains", () => {
       signingKeyshare: {
         ownerIdentifiers: OPERATORS.map((op) => op.identifier),
         threshold: THRESHOLD,
-        publicKey: leaf.verifyingPublicKey,
+        publicKey: leaf.signingKeyshare.publicKey,
         publicShares: {},
       },
       status: "AVAILABLE",
@@ -1272,7 +1313,7 @@ describe("transfers.swap", () => {
         signingKeyshare: {
           ownerIdentifiers: OPERATORS.map((op) => op.identifier),
           threshold: THRESHOLD,
-          publicKey: verifyingKey,
+          publicKey: SHARE_PUB,
           publicShares: {},
         },
         status: "AVAILABLE",
@@ -1351,7 +1392,21 @@ describe("transfers.swap", () => {
   }
 
   /** SSP GraphQL stub: challenge/verify plus a SUCCEEDED RequestSwap pointing at INBOUND_ID. */
-  function sspFetch(operations: string[]): typeof globalThis.fetch {
+  function sspFetch(operations: string[], identity: Uint8Array): typeof globalThis.fetch {
+    const protectedChallenge = base64.encode(
+      toBinary(SspProtectedChallengeSchema, {
+        $typeName: "ssp_authn.ProtectedChallenge",
+        version: 1,
+        challenge: {
+          $typeName: "ssp_authn.Challenge",
+          version: 1,
+          timestamp: 1_786_974_052n,
+          nonce: new Uint8Array(32).fill(9),
+          publicKey: identity,
+        },
+        serverHmac: new Uint8Array(32).fill(7),
+      }),
+    );
     return async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as { operationName: string };
       operations.push(body.operationName);
@@ -1360,7 +1415,7 @@ describe("transfers.swap", () => {
         case "GetChallenge":
           return json({
             get_challenge: {
-              get_challenge_output_protected_challenge: base64.encode(new Uint8Array(32).fill(9)),
+              get_challenge_output_protected_challenge: protectedChallenge,
             },
           });
         case "VerifyChallenge":
@@ -1459,14 +1514,14 @@ describe("transfers.swap", () => {
         return swapResponse(req, leaf);
       },
       query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
-      claim_transfer: (req: ClaimTransferRequest) =>
+      claim_transfer: async (req: ClaimTransferRequest) =>
         create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.COUNTER_SWAP_V3,
             network: Network.REGTEST,
-            leaves: inbound.leaves,
+            leaves: await claimedLeaves(signer, inbound.leaves),
           }),
         }),
     });
@@ -1695,14 +1750,14 @@ describe("transfers.swap", () => {
       initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) =>
         swapResponse(req, leaf),
       query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
-      claim_transfer: (req: ClaimTransferRequest) =>
+      claim_transfer: async (req: ClaimTransferRequest) =>
         create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.COUNTER_SWAP_V3,
             network: Network.REGTEST,
-            leaves: inbound.leaves,
+            leaves: await claimedLeaves(signer, inbound.leaves),
           }),
         }),
     });
@@ -1747,7 +1802,7 @@ describe("transfers.swap", () => {
       signingKeyshare: {
         ownerIdentifiers: OPERATORS.map((op) => op.identifier),
         threshold: THRESHOLD,
-        publicKey: leaf.verifyingPublicKey,
+        publicKey: leaf.signingKeyshare.publicKey,
         publicShares: {},
       },
       status: "AVAILABLE",
@@ -1758,7 +1813,8 @@ describe("transfers.swap", () => {
       { leafId: SWAP_LEAF_ID, valueSats: 60_000n },
       { leafId: CHANGE_LEAF_ID, valueSats: 40_000n },
     ]);
-    const claimedNodes = inbound.leaves.map((entry) => required(entry.leaf, "inbound leaf"));
+    const inboundClaimed = await claimedLeaves(signer, inbound.leaves);
+    const claimedNodes = inboundClaimed.map((entry) => required(entry.leaf, "inbound leaf"));
 
     let swapReq: InitiateSwapPrimaryTransferRequest | undefined;
     let startReq: StartTransferRequest | undefined;
@@ -1778,14 +1834,14 @@ describe("transfers.swap", () => {
           return swapResponse(req, leaf);
         },
         query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
-        claim_transfer: (req) =>
+        claim_transfer: async (req) =>
           create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
               id: req.transferId,
               status: TransferStatus.COMPLETED,
               type: TransferType.COUNTER_SWAP_V3,
               network: Network.REGTEST,
-              leaves: inbound.leaves,
+              leaves: await claimedLeaves(signer, inbound.leaves),
             }),
           }),
         start_transfer_v2: (req) => {
@@ -1804,7 +1860,7 @@ describe("transfers.swap", () => {
         },
       },
       store,
-      sspFetch(operations),
+      sspFetch(operations, await signer.identityPublicKey()),
       SSP_IDENTITY,
     );
 

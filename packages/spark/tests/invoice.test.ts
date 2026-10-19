@@ -114,6 +114,7 @@ async function testSigner(secretFill: number): Promise<SparkSigner> {
 
 /** Fabricated SO keyshare; the leaf verifying key is `share + user signing key`. */
 const SHARE_SECRET = 0x5ea5n;
+const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
 function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
   return secp256k1.Point.BASE.multiply(SHARE_SECRET)
     .add(secp256k1.Point.fromBytes(signingPublicKey))
@@ -151,7 +152,7 @@ function fabricateLeaf(options: {
     signingKeyshare: {
       ownerIdentifiers: OPERATORS.map((op) => op.identifier),
       threshold: THRESHOLD,
-      publicKey: verifyingKey,
+      publicKey: SHARE_PUB,
     },
     vout: 0,
   };
@@ -171,7 +172,7 @@ function leafNode(leaf: SparkLeaf) {
     signingKeyshare: {
       ownerIdentifiers: OPERATORS.map((op) => op.identifier),
       threshold: THRESHOLD,
-      publicKey: leaf.verifyingPublicKey,
+      publicKey: SHARE_PUB,
       publicShares: {},
     },
     status: "AVAILABLE",

@@ -1,6 +1,6 @@
-import { create } from "@bufbuild/protobuf";
+import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import type { HandlerContext } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
@@ -11,6 +11,7 @@ import { expect, test } from "vite-plus/test";
 import { createSparkClientWith } from "../src/client/index.ts";
 import { p2trScriptFromPublicKey, txId } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { SparkRequestError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import {
@@ -30,9 +31,11 @@ import {
   TransferType,
 } from "../src/proto/gen/spark_pb.ts";
 import type { QueryNodesRequest, TreeNode } from "../src/proto/gen/spark_pb.ts";
+import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 const COORDINATOR_ID = "0000000000000000000000000000000000000000000000000000000000000001";
+const OPERATOR1_ID = "0000000000000000000000000000000000000000000000000000000000000002";
 const OPERATORS: ReadonlyArray<SparkOperatorConfig> = [
   {
     id: 0,
@@ -42,11 +45,46 @@ const OPERATORS: ReadonlyArray<SparkOperatorConfig> = [
   },
   {
     id: 1,
-    identifier: "0000000000000000000000000000000000000000000000000000000000000002",
+    identifier: OPERATOR1_ID,
     address: "https://op1.test",
     identityPublicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(8), true),
   },
 ];
+
+const KEYSHARE_PUBLIC = secp256k1.getPublicKey(new Uint8Array(32).fill(11), true);
+
+/** A small valid scalar for leaf key material, keyed on `index`. */
+function leafSecret(index: number): Uint8Array {
+  const secret = new Uint8Array(32);
+  secret[31] = index + 1;
+  return secret;
+}
+
+/** The public-key map createTestSigner's `publicKeys` answers LEAF{id} lookups from. */
+function leafKeyMap(leaves: ReadonlyArray<readonly [string, Uint8Array]>): Map<string, Uint8Array> {
+  return new Map(leaves.map(([id, secret]) => [id, secp256k1.getPublicKey(secret, true)] as const));
+}
+
+/**
+ * A leaf the wallet provably owns under `leafPriv`: real parseable transactions and a verifying key
+ * that is the wallet leaf key plus the operators' keyshare.
+ */
+function ownedLeaf(
+  id: string,
+  valueSats: bigint,
+  leafPriv: Uint8Array,
+  status = "AVAILABLE",
+): TreeNode {
+  const node = makeLeaf(id, valueSats, status);
+  node.nodeTx = txSpending(fakeTxid((id.codePointAt(0) ?? 0) + id.length), 0);
+  node.refundTx = txSpending(hexToBytes(txId(node.nodeTx)), 0x200);
+  const ours = secp256k1.Point.fromBytes(secp256k1.getPublicKey(leafPriv, true));
+  node.verifyingPublicKey = ours.add(secp256k1.Point.fromBytes(KEYSHARE_PUBLIC)).toBytes(true);
+  if (node.signingKeyshare !== undefined) {
+    node.signingKeyshare.publicKey = KEYSHARE_PUBLIC;
+  }
+  return node;
+}
 
 function makeLeaf(id: string, valueSats: bigint, status = "AVAILABLE"): TreeNode {
   return create(TreeNodeSchema, {
@@ -73,13 +111,28 @@ function makeLeaf(id: string, valueSats: bigint, status = "AVAILABLE"): TreeNode
   });
 }
 
+const SSP_IDENTITY_KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
+
 const sspFetch: typeof globalThis.fetch = async (_input, init) => {
   const body = JSON.parse(String(init?.body)) as { operationName: string };
   const json = async (data: unknown) => Promise.resolve(Response.json({ data }));
   if (body.operationName === "GetChallenge") {
     return json({
       get_challenge: {
-        get_challenge_output_protected_challenge: base64.encode(new Uint8Array(32).fill(9)),
+        get_challenge_output_protected_challenge: base64.encode(
+          toBinary(SspProtectedChallengeSchema, {
+            $typeName: "ssp_authn.ProtectedChallenge",
+            version: 1,
+            challenge: {
+              $typeName: "ssp_authn.Challenge",
+              version: 1,
+              timestamp: 1_786_974_052n,
+              nonce: new Uint8Array(32).fill(9),
+              publicKey: SSP_IDENTITY_KEY,
+            },
+            serverHmac: new Uint8Array(32).fill(7),
+          }),
+        ),
       },
     });
   }
@@ -108,6 +161,8 @@ function makeClient(
   signer: ReturnType<typeof createTestSigner>,
   sparkImpl: object,
   store?: SparkStore,
+  /** Per-identifier overrides: an operator listed here gets this impl instead of `sparkImpl`. */
+  operatorImpls: Record<string, object> = {},
 ) {
   return createSparkClientWith(
     {
@@ -120,7 +175,7 @@ function makeClient(
       ...(store === undefined ? {} : { store }),
     },
     {
-      transportFactory: (interceptors) =>
+      transportFactory: (interceptors, operator) =>
         createRouterTransport(
           (router) => {
             router.service(SparkAuthnService, {
@@ -140,7 +195,7 @@ function makeClient(
                 expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
               }),
             });
-            router.service(SparkService, sparkImpl);
+            router.service(SparkService, operatorImpls[operator.identifier] ?? sparkImpl);
           },
           { transport: { interceptors: [...interceptors] } },
         ),
@@ -149,9 +204,15 @@ function makeClient(
 }
 
 test("leaves and balance page through query_nodes until a short page", async () => {
-  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const secrets = Array.from({ length: 51 }, (_, i) => leafSecret(i));
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap(secrets.map((secret, i) => [`leaf-${i}`, secret])),
+  );
   const pageRequests: QueryNodesRequest[] = [];
-  const leaves = Array.from({ length: 51 }, (_, i) => makeLeaf(`leaf-${i}`, BigInt(100 + i)));
+  const leaves = Array.from({ length: 51 }, (_, i) =>
+    ownedLeaf(`leaf-${i}`, BigInt(100 + i), secrets[i]!),
+  );
   const client = makeClient(signer, {
     query_nodes: (req: QueryNodesRequest) => {
       pageRequests.push(req);
@@ -166,9 +227,11 @@ test("leaves and balance page through query_nodes until a short page", async () 
   });
   const result = await client.leaves();
   expect(result).toHaveLength(51);
-  expect(pageRequests).toHaveLength(2);
-  expect(Number(pageRequests[0]?.offset)).toBe(0);
-  expect(Number(pageRequests[1]?.offset)).toBe(50);
+  // Both the coordinator and the other operator page through the same result set.
+  expect(pageRequests).toHaveLength(4);
+  expect(pageRequests.map((req) => Number(req.offset)).toSorted((a, b) => a - b)).toStrictEqual([
+    0, 0, 50, 50,
+  ]);
   expect(result[0]?.valueSats).toBe(100);
   await expect(client.balance()).resolves.toBe(
     leaves.reduce((sum, leaf) => sum + Number(leaf.value), 0),
@@ -309,13 +372,19 @@ function storedChain(leafId: string): SparkExitChain {
 }
 
 test("leaves() reconciles stored exit chains with the current leaf set", async () => {
-  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([["leaf-1", leafSecret(0)]]),
+  );
   const store = createMemorySparkStore();
   await store.putExitChains([storedChain("stale-leaf"), storedChain("leaf-1")]);
   const client = makeClient(
     signer,
     {
-      query_nodes: () => ({ nodes: { "leaf-1": makeLeaf("leaf-1", 100n) }, offset: 1n }),
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)) },
+        offset: 1n,
+      }),
     },
     store,
   );
@@ -324,6 +393,151 @@ test("leaves() reconciles stored exit chains with the current leaf set", async (
   const chains = await store.exitChains();
   expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
   expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["leaf-1"]);
+});
+
+test("leaves() withholds a leaf one operator does not report but keeps its chain", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const both = {
+    nodes: {
+      "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!),
+      "leaf-2": ownedLeaf("leaf-2", 200n, secrets[1]!),
+    },
+    offset: 2n,
+  };
+  const client = makeClient(signer, { query_nodes: () => both }, store, {
+    [OPERATOR1_ID]: {
+      query_nodes: () => ({ nodes: { "leaf-1": both.nodes["leaf-1"] }, offset: 1n }),
+    },
+  });
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
+});
+
+test("leaves() withholds a leaf operators report differently", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const leaf1 = ownedLeaf("leaf-1", 100n, secrets[0]!);
+  const leaf2 = ownedLeaf("leaf-2", 200n, secrets[1]!);
+  const inflated = create(TreeNodeSchema, { ...leaf2, value: 999n });
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": leaf2 }, offset: 2n }),
+    },
+    store,
+    {
+      [OPERATOR1_ID]: {
+        query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": inflated }, offset: 2n }),
+      },
+    },
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
+});
+
+test("leaves() drops a leaf the wallet does not own and deletes its chain", async () => {
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", leafSecret(0)],
+      ["leaf-2", leafSecret(1)],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  // leaf-2's verifying key is not our key + the operators' share.
+  const foreign = ownedLeaf("leaf-2", 200n, leafSecret(1));
+  foreign.verifyingPublicKey = secp256k1.Point.BASE.toBytes(true);
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)), "leaf-2": foreign },
+        offset: 2n,
+      }),
+    },
+    store,
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
+});
+
+test("leaves() drops a leaf carrying a malformed transaction", async () => {
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", leafSecret(0)],
+      ["leaf-2", leafSecret(1)],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const malformed = ownedLeaf("leaf-2", 200n, leafSecret(1));
+  const noInputs = new Transaction({ allowUnknownOutputs: true });
+  noInputs.addOutput({ script: p2trScriptFromPublicKey(KEY, "mainnet"), amount: 200n });
+  malformed.nodeTx = noInputs.toBytes(true);
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)), "leaf-2": malformed },
+        offset: 2n,
+      }),
+    },
+    store,
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
+});
+
+test("leaves() throws when an operator query fails", async () => {
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([["leaf-1", leafSecret(0)]]),
+  );
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)) },
+        offset: 1n,
+      }),
+    },
+    undefined,
+    {
+      [OPERATOR1_ID]: {
+        query_nodes: () => {
+          throw new ConnectError("operator down", Code.Unavailable);
+        },
+      },
+    },
+  );
+  await expect(client.leaves()).rejects.toThrow(SparkRequestError);
 });
 
 test("unilateralExit persists the queried exit chain in the store", async () => {
