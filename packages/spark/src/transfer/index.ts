@@ -8,3 +8,4 @@ export type {
 } from "./model.ts";
 export { queryAllTransfers, queryPendingTransfers } from "./query.ts";
 export { sendTransfer } from "./send.ts";
+export { swapLeaves } from "./swap.ts";

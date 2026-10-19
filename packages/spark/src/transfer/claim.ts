@@ -5,7 +5,6 @@ import { equalBytes } from "@noble/curves/utils.js";
 
 import { createCurrentTimelockRefundTxs } from "../core/bitcoin/index.ts";
 import { sendLeafSigningDigest } from "../core/hashing/statements.ts";
-import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.ts";
 import { SignatureScheme } from "../proto/gen/common_pb.ts";
@@ -15,6 +14,7 @@ import { mapTreeNode } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { CLAIMABLE_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
 import type { SparkTransfer, SparkTransferLeaf, TransferCoordinator } from "./model.ts";
+import { queryTransfersByIds } from "./query.ts";
 import { refundJobGroups, signRefundJobs } from "./refunds.ts";
 
 /**
@@ -108,11 +108,12 @@ async function recoverCompletedClaim(options: {
   readonly call?: CallOptions;
 }): Promise<SparkLeaf[]> {
   const { error } = options;
-  const updated = await options.spark.query_transfers_by_id(
-    { transferIds: [options.transferId], network: sparkNetworkProto(options.network) },
-    options.call,
-  );
-  const [found] = updated.transfers;
+  const [found] = await queryTransfersByIds({
+    spark: options.spark,
+    transferIds: [options.transferId],
+    network: options.network,
+    ...(options.call === undefined ? {} : { call: options.call }),
+  });
   if (found === undefined || !isReceiverLegComplete(mapTransfer(found), options.self)) {
     throw error;
   }

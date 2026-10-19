@@ -18,6 +18,8 @@ export type UserSigningSpec = {
   readonly verifyingKey: Uint8Array;
   readonly target: SigningTarget;
   readonly commitments: RequestedSigningCommitments;
+  /** 33-byte adaptor point, when the job's signature must verify under an adaptor (leaves swap). */
+  readonly adaptorPublicKey?: Uint8Array;
 };
 
 function operatorCommitments(
@@ -53,6 +55,7 @@ export async function signUserJobs(
         verifyingKey: spec.verifyingKey,
         commitment,
         operatorCommitments: operatorCommitments(spec.commitments),
+        ...(spec.adaptorPublicKey === undefined ? {} : { adaptorPublicKey: spec.adaptorPublicKey }),
       };
     }),
   );

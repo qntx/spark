@@ -1,5 +1,5 @@
 import { create } from "@bufbuild/protobuf";
-import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createClient, createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -18,6 +18,7 @@ import {
   transferPackageDigest,
 } from "../src/core/hashing/statements.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { SparkRequestError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import { SignatureScheme, SignatureSchema } from "../src/proto/gen/common_pb.ts";
@@ -30,6 +31,9 @@ import {
   ClaimTransferResponseSchema,
   GetSigningCommitmentsResponseSchema,
   HashVariant,
+  InitiateSwapPrimaryTransferResponseSchema,
+  LeafRefundTxSigningResultSchema,
+  SigningResultSchema,
   SparkService,
   Network,
   QueryNodesResponseSchema,
@@ -48,12 +52,14 @@ import {
 import type {
   ClaimTransferRequest,
   GetSigningCommitmentsRequest,
+  InitiateSwapPrimaryTransferRequest,
   StartTransferRequest,
   TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
-import { mapTransfer } from "../src/transfer/index.ts";
+import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
+import { mapTransfer, swapLeaves } from "../src/transfer/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
 
@@ -188,6 +194,7 @@ type SparkImpl = Partial<{
   start_transfer_v2: (req: StartTransferRequest) => unknown;
   claim_transfer: (req: ClaimTransferRequest) => unknown;
   query_transfers_by_id: (req: unknown) => unknown;
+  initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) => unknown;
 }>;
 
 function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStore) {
@@ -1131,6 +1138,440 @@ describe("transfer stores exit chains", () => {
       amountSats: 100_000,
     });
     await expect(store.exitChains()).resolves.toStrictEqual([]);
+    signer.dispose();
+  });
+});
+
+const SSP_SECRET = new Uint8Array(32).fill(0x53);
+const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
+const INBOUND_ID = "01989abc-def0-7000-8000-00000000000a";
+const SWAP_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000bb";
+
+describe("transfers.swap", () => {
+  /** The SSP's counter transfer to us: SSP sender, leaves sealed to our identity. */
+  async function sspInboundTransfer(
+    receiverIdentity: Uint8Array,
+    options?: { valueSats?: bigint; senderIdentity?: Uint8Array },
+  ) {
+    const receivedSecret = new Uint8Array(32).fill(88);
+    const receivedPublicKey = secp256k1.getPublicKey(receivedSecret, true);
+    const crypto = await loadWasmBackend();
+    const secretCipher = crypto.eciesEncrypt(
+      receiverIdentity,
+      receivedSecret,
+      new Uint8Array(32).fill(6),
+    );
+    const { nodeTx, verifyingKey } = fabricateLeaf({
+      leafId: SWAP_LEAF_ID,
+      signingPublicKey: receivedPublicKey,
+      ownerIdentityPublicKey: receiverIdentity,
+      ...(options?.valueSats === undefined ? {} : { valueSats: options.valueSats }),
+    });
+    const intermediateRefundTx = createCurrentTimelockRefundTxs({
+      nodeTx,
+      sequence: 1900,
+      receivingPublicKey: receivedPublicKey,
+      network: "regtest",
+    }).cpfpRefund.txBytes;
+    const digest = sendLeafSigningDigest(SWAP_LEAF_ID, INBOUND_ID, secretCipher);
+    const signature = secp256k1.sign(digest, SSP_SECRET, { prehash: false, lowS: true });
+    return create(TransferSchema, {
+      id: INBOUND_ID,
+      senderIdentityPublicKey: options?.senderIdentity ?? SSP_IDENTITY,
+      receiverIdentityPublicKey: receiverIdentity,
+      status: TransferStatus.SENDER_KEY_TWEAKED,
+      type: TransferType.COUNTER_SWAP_V3,
+      network: Network.REGTEST,
+      totalValue: options?.valueSats ?? 100_000n,
+      leaves: [
+        create(TransferLeafSchema, {
+          leaf: create(TreeNodeSchema, {
+            id: SWAP_LEAF_ID,
+            treeId: `tree-${SWAP_LEAF_ID}`,
+            value: options?.valueSats ?? 100_000n,
+            nodeTx,
+            refundTx: intermediateRefundTx,
+            vout: 0,
+            verifyingPublicKey: verifyingKey,
+            ownerIdentityPublicKey: receiverIdentity,
+            ownerSigningPublicKey: receivedPublicKey,
+            signingKeyshare: {
+              ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+              threshold: THRESHOLD,
+              publicKey: verifyingKey,
+              publicShares: {},
+            },
+            status: "AVAILABLE",
+            network: Network.REGTEST,
+            treenodeStatus: TreeNodeStatus.AVAILABLE,
+          }),
+          secretCipher,
+          sig: { case: "signature" as const, value: signature },
+          intermediateRefundTx,
+        }),
+      ],
+    });
+  }
+
+  function fakeSsp(response?: { status: string; inboundTransferId: string; feeSats: number }) {
+    const requests: SspSwapRequest[] = [];
+    const ssp: SspClient = {
+      swapFeeEstimate: async () => Promise.resolve(0),
+      requestSwap: async (request) => {
+        requests.push(request);
+        if (response === undefined) {
+          return Promise.reject(
+            new SparkRequestError("ssp leaves swap failed", { code: "swap_failed" }),
+          );
+        }
+        return Promise.resolve(response);
+      },
+    };
+    return { ssp, requests };
+  }
+
+  function swapSpark(impl: SparkImpl) {
+    const transport = createRouterTransport((router) => {
+      router.service(SparkService, impl as never);
+    });
+    return createClient(SparkService, transport);
+  }
+
+  function signingResult(leafId: string, verifyingKey: Uint8Array) {
+    return create(LeafRefundTxSigningResultSchema, {
+      leafId,
+      verifyingKey,
+      refundTxSigningResult: create(SigningResultSchema, {
+        signatureShares: Object.fromEntries(
+          OPERATORS.map((op) => [op.identifier, new Uint8Array(32).fill(1)]),
+        ),
+        signingNonceCommitments: operatorCommitments(),
+        publicKeys: Object.fromEntries(
+          OPERATORS.map((op) => [op.identifier, new Uint8Array(33).fill(2)]),
+        ),
+      }),
+    });
+  }
+
+  /** A fabricated initiate_swap_primary_transfer response for one input leaf. */
+  function swapResponse(
+    req: InitiateSwapPrimaryTransferRequest,
+    leaf: SparkLeaf,
+    overrides?: { verifyingKey?: Uint8Array },
+  ) {
+    const result = signingResult(leaf.id, overrides?.verifyingKey ?? leaf.verifyingPublicKey);
+    const transfer = required(req.transfer, "swap request transfer");
+    return create(InitiateSwapPrimaryTransferResponseSchema, {
+      transfer: create(TransferSchema, {
+        id: transfer.transferId,
+        senderIdentityPublicKey: transfer.ownerIdentityPublicKey,
+        receiverIdentityPublicKey: transfer.receiverIdentityPublicKey,
+        status: TransferStatus.SENDER_INITIATED,
+        type: TransferType.PRIMARY_SWAP_V3,
+        network: Network.REGTEST,
+        totalValue: BigInt(leaf.valueSats),
+      }),
+      signingResults: [result],
+    });
+  }
+
+  test("swaps a leaf: adaptor-signed primary transfer, SSP request, inbound claim", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const inbound = await sspInboundTransfer(identity);
+
+    // The fake SO cannot produce real operator shares; aggregateFrost is wrapped to capture the
+    // jobs and return stand-in signatures. Real FROST adaptor math is covered by frost vectors.
+    let aggregateJobs: Parameters<SparkSigner["aggregateFrost"]>[0] | undefined;
+    const wrapped: SparkSigner = {
+      ...signer,
+      aggregateFrost: async (jobs) => {
+        aggregateJobs = jobs;
+        return Promise.resolve(jobs.map(() => new Uint8Array(64).fill(0x42)));
+      },
+    };
+
+    let swapReq: InitiateSwapPrimaryTransferRequest | undefined;
+    const { ssp, requests: sspRequests } = fakeSsp({
+      status: "SUCCEEDED",
+      inboundTransferId: INBOUND_ID,
+      feeSats: 0,
+    });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) => {
+        swapReq = req;
+        return swapResponse(req, leaf);
+      },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+      claim_transfer: (req: ClaimTransferRequest) =>
+        create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.COUNTER_SWAP_V3,
+            network: Network.REGTEST,
+            leaves: inbound.leaves,
+          }),
+        }),
+    });
+
+    const claimed = await swapLeaves({
+      spark,
+      signer: wrapped,
+      network: "regtest",
+      operators: OPERATORS,
+      threshold: THRESHOLD,
+      ssp,
+      sspIdentityPublicKey: SSP_IDENTITY,
+      transferId: TRANSFER_ID,
+      leaves: [leaf],
+      targetAmountsSats: [100_000],
+      random: fixedRandom(),
+    });
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.id).toBe(SWAP_LEAF_ID);
+
+    const request = required(swapReq, "initiate_swap_primary_transfer request");
+    expect(request.transfer?.transferId).toBe(TRANSFER_ID);
+    expect(request.transfer?.ownerIdentityPublicKey).toStrictEqual(identity);
+    expect(request.transfer?.receiverIdentityPublicKey).toStrictEqual(SSP_IDENTITY);
+    const adaptorKey = request.adaptorPublicKeys?.adaptorPublicKey;
+    expect(adaptorKey).toHaveLength(33);
+    const pkg = required(request.transfer?.transferPackage, "transfer package");
+    expect(pkg.hashVariant).toBe(HashVariant.V2);
+    expect(pkg.leavesToSend.map((job) => job.leafId)).toStrictEqual([LEAF_ID]);
+    expect(pkg.directLeavesToSend).toHaveLength(0);
+    expect(pkg.directFromCpfpLeavesToSend).toHaveLength(0);
+
+    const sspRequest = required(sspRequests[0], "requestSwap input");
+    expect(sspRequest.adaptorPublicKey).toStrictEqual(adaptorKey);
+    expect(sspRequest.totalAmountSats).toBe(100_000);
+    expect(sspRequest.targetAmountsSats).toStrictEqual([100_000]);
+    expect(sspRequest.feeSats).toBe(0);
+    expect(sspRequest.userOutboundTransferId).toBe(TRANSFER_ID);
+    const userLeaf = required(sspRequest.userLeaves[0], "user leaf");
+    expect(userLeaf.leafId).toBe(LEAF_ID);
+    const cpfpJob = required(pkg.leavesToSend[0], "cpfp job");
+    expect(userLeaf.rawUnsignedRefundTransaction).toStrictEqual(cpfpJob.rawTx);
+    expect(userLeaf.adaptorAddedSignature).toHaveLength(64);
+
+    const job = required(aggregateJobs?.[0], "aggregate job");
+    expect(job.adaptorPublicKey).toStrictEqual(adaptorKey);
+    expect(job.verifyingKey).toStrictEqual(leaf.verifyingPublicKey);
+    expect(job.signatureShare).toStrictEqual(cpfpJob.userSignature);
+    expect(job.commitment).toStrictEqual(cpfpJob.signingNonceCommitment);
+    expect(job.operators.map((op) => op.identifier).toSorted()).toStrictEqual(
+      OPERATORS.map((op) => op.identifier).toSorted(),
+    );
+    signer.dispose();
+  });
+
+  test("rejects a missing refund signing result", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) => {
+        const res = swapResponse(req, leaf);
+        res.signingResults = [];
+        return res;
+      },
+    });
+    const { ssp } = fakeSsp();
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toThrow("expected 1 signing results");
+    signer.dispose();
+  });
+
+  test("rejects a verifying-key mismatch in the signing result", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) =>
+        swapResponse(req, leaf, { verifyingKey: new Uint8Array(33).fill(9) }),
+    });
+    const { ssp } = fakeSsp();
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toThrow("verifying key mismatch");
+    signer.dispose();
+  });
+
+  test("propagates an SSP swap failure", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) =>
+        swapResponse(req, leaf),
+    });
+    const { ssp } = fakeSsp();
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toMatchObject({ code: "swap_failed" });
+    signer.dispose();
+  });
+
+  test("rejects an inbound transfer not sent by the SSP", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const inbound = await sspInboundTransfer(identity, {
+      senderIdentity: secp256k1.getPublicKey(new Uint8Array(32).fill(0x77), true),
+    });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) =>
+        swapResponse(req, leaf),
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+    });
+    const { ssp } = fakeSsp({ status: "SUCCEEDED", inboundTransferId: INBOUND_ID, feeSats: 0 });
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toThrow("sender is not the SSP");
+    signer.dispose();
+  });
+
+  test("rejects a claimed total that does not match inputs minus fee", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const inbound = await sspInboundTransfer(identity, { valueSats: 50_000n });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) =>
+        swapResponse(req, leaf),
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+      claim_transfer: (req: ClaimTransferRequest) =>
+        create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.COUNTER_SWAP_V3,
+            network: Network.REGTEST,
+            leaves: inbound.leaves,
+          }),
+        }),
+    });
+    const { ssp } = fakeSsp({ status: "SUCCEEDED", inboundTransferId: INBOUND_ID, feeSats: 0 });
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toThrow("already ours");
     signer.dispose();
   });
 });
