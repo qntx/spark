@@ -44,6 +44,7 @@ import {
   TransferPackageSchema,
 } from "../src/proto/gen/spark_pb.ts";
 import { PartialTokenTransactionSchema } from "../src/proto/gen/spark_token_pb.ts";
+import { ProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkOperator, SparkSigner } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
@@ -238,13 +239,139 @@ describe("signIdentity", () => {
   test("ssp-challenge signs sha256(decoded challenge) with DER", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
     const identity = await signer.identityPublicKey();
-    const protectedChallenge = base64.encode(new Uint8Array(40).fill(0xab));
+    const protectedChallenge = base64.encode(
+      toBinary(ProtectedChallengeSchema, {
+        $typeName: "ssp_authn.ProtectedChallenge",
+        version: 1,
+        challenge: {
+          $typeName: "ssp_authn.Challenge",
+          version: 1,
+          timestamp: 1_786_974_052n,
+          nonce: new Uint8Array(32).fill(9),
+          publicKey: identity,
+        },
+        serverHmac: new Uint8Array(32).fill(7),
+      }),
+    );
     const signature = await signer.signIdentity({
       kind: "ssp-challenge",
       protectedChallenge,
     });
-    expectDerSignature(signature, sspChallengeDigest(protectedChallenge), identity);
+    expectDerSignature(signature, sspChallengeDigest(protectedChallenge, identity), identity);
     signer.dispose();
+  });
+
+  // protected_challenge responses served by api.lightspark.com, captured by
+  // breez-spark-sdk crates/spark/src/ssp/challenge.rs tests @956ff90: the first
+  // for the secp256k1 generator point, the second for another key.
+  const LIVE_CHALLENGES: ReadonlyArray<readonly [string, string]> = [
+    [
+      "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "0801524f080150e49e8cd406a201203cc9ed127c551fb4ea5fb97233115307c4fa9233ece3e6087aad7" +
+        "d95e01f9d7ef201210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798a2" +
+        "0120543f1936b8b6422fa7fdd92b8bb5aa8b0a31f0c7989675a2fec3a8c6487f42b7",
+    ],
+    [
+      "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "0801524f080150bec28cd406a20120562fb45d2f8388acae10b882c86a08c6f4e4a93742f7f8568f83d" +
+        "d18a8024a32f2012103fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556a2" +
+        "012014b947efeab6d6a3d34c2e19ee3bc94fbfd8893cf0b09c4d16df9d6d4549ebed",
+    ],
+  ];
+
+  test("ssp-challenge accepts the live captured challenges", () => {
+    for (const [publicKeyHex, challengeHex] of LIVE_CHALLENGES) {
+      const bytes = hexToBytes(challengeHex);
+      const digest = sspChallengeDigest(base64.encode(bytes), hexToBytes(publicKeyHex));
+      expect(bytesToHex(digest)).toBe(bytesToHex(sha256(bytes)));
+    }
+  });
+
+  test("ssp-challenge rejects a challenge issued to another key", () => {
+    const bytes = hexToBytes(LIVE_CHALLENGES[0]![1]);
+    expect(() =>
+      sspChallengeDigest(base64.encode(bytes), hexToBytes(LIVE_CHALLENGES[1]![0])),
+    ).toThrow(SparkInputError);
+  });
+
+  test("ssp-challenge accepts either public key encoding", () => {
+    const uncompressed = secp256k1.Point.BASE.toBytes(false);
+    const bytes = toBinary(ProtectedChallengeSchema, {
+      $typeName: "ssp_authn.ProtectedChallenge",
+      version: 1,
+      challenge: {
+        $typeName: "ssp_authn.Challenge",
+        version: 1,
+        timestamp: 1n,
+        nonce: new Uint8Array(32).fill(7),
+        publicKey: uncompressed,
+      },
+      serverHmac: new Uint8Array(32).fill(9),
+    });
+    expect(() =>
+      sspChallengeDigest(base64.encode(bytes), secp256k1.Point.BASE.toBytes(true)),
+    ).not.toThrow();
+  });
+
+  test("ssp-challenge rejects arbitrary text", () => {
+    for (const text of ["sign this please", "v2\naction\nexample.com\nalice\n1786974052"]) {
+      expect(() =>
+        sspChallengeDigest(base64.encode(utf8ToBytes(text)), secp256k1.Point.BASE.toBytes(true)),
+      ).toThrow(SparkInputError);
+    }
+  });
+
+  test("ssp-challenge tolerates unknown leading and trailing fields", () => {
+    const live = hexToBytes(LIVE_CHALLENGES[0]![1]);
+    const identity = hexToBytes(LIVE_CHALLENGES[0]![0]);
+    // field 40, wire type 2: "added later" (0xA2 0x02 = tag(40)<<3|2, len 11 → wait: 11 bytes)
+    const trailing = concatBytes(
+      live,
+      new Uint8Array([0xc2, 0x02, 0x0b]),
+      utf8ToBytes("added later"),
+    );
+    expect(() => sspChallengeDigest(base64.encode(trailing), identity)).not.toThrow();
+    const leading = concatBytes(new Uint8Array([0x62, 0x0b]), utf8ToBytes("added later"), live);
+    expect(() => sspChallengeDigest(base64.encode(leading), identity)).not.toThrow();
+  });
+
+  test("ssp-challenge rejects missing challenge, empty key and malformed key", () => {
+    const identity = secp256k1.Point.BASE.toBytes(true);
+    const noChallenge = toBinary(ProtectedChallengeSchema, {
+      $typeName: "ssp_authn.ProtectedChallenge",
+      version: 1,
+      serverHmac: new Uint8Array(32).fill(9),
+    });
+    expect(() => sspChallengeDigest(base64.encode(noChallenge), identity)).toThrow(SparkInputError);
+    for (const badKey of [new Uint8Array(0), new Uint8Array(33)]) {
+      const bytes = toBinary(ProtectedChallengeSchema, {
+        $typeName: "ssp_authn.ProtectedChallenge",
+        version: 1,
+        challenge: {
+          $typeName: "ssp_authn.Challenge",
+          version: 1,
+          timestamp: 1n,
+          nonce: new Uint8Array(32).fill(7),
+          publicKey: badKey,
+        },
+        serverHmac: new Uint8Array(32).fill(9),
+      });
+      expect(() => sspChallengeDigest(base64.encode(bytes), identity)).toThrow(SparkInputError);
+    }
+  });
+
+  test("ssp-challenge rejects an SO challenge serialized for the same key", () => {
+    // Regression: a spark_authn.Challenge (SO authn) must never be accepted as
+    // an ssp_authn.ProtectedChallenge — cross-protocol challenge confusion.
+    const identity = secp256k1.Point.BASE.toBytes(true);
+    const soChallenge = toBinary(ChallengeSchema, {
+      $typeName: "spark_authn.Challenge",
+      version: 1,
+      timestamp: 1_700_000_000n,
+      nonce: new Uint8Array(32).fill(7),
+      publicKey: identity,
+    });
+    expect(() => sspChallengeDigest(base64.encode(soChallenge), identity)).toThrow(SparkInputError);
   });
 
   test("transfer-package signs the V2 package digest; other variants rejected", async () => {

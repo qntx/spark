@@ -1,4 +1,5 @@
-import { toBinary } from "@bufbuild/protobuf";
+import { toBinary, fromBinary } from "@bufbuild/protobuf";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { base64urlnopad } from "@scure/base";
@@ -8,6 +9,7 @@ import { ChallengeSchema } from "../../proto/gen/spark_authn_pb.ts";
 import type { Challenge } from "../../proto/gen/spark_authn_pb.ts";
 import { HashVariant } from "../../proto/gen/spark_pb.ts";
 import type { TransferPackage } from "../../proto/gen/spark_pb.ts";
+import { ProtectedChallengeSchema } from "../../proto/gen/ssp_authn_pb.ts";
 import type { SparkNetwork } from "../network.ts";
 import { uuidFromBytes, uuidToBytes } from "../uuid.ts";
 import { newHasher } from "./hashstructure.ts";
@@ -192,8 +194,17 @@ export function watchtowerRecoveryStatementDigest(
  * covers (upstream graphql/client.ts `authenticate`). The SSP emits unpadded base64url; like Node's
  * base64 decoder the standard-alphabet characters and padding are normalized away before decoding
  * with the URL-safe, unpadded variant.
+ *
+ * The decoded bytes are server-chosen input to the identity key — a signature over this digest
+ * verifies anywhere a raw sha256 digest is signed — so they are accepted only as an
+ * `ssp_authn.ProtectedChallenge` whose `challenge.public_key` is `identityPublicKey` (either key
+ * encoding). Unknown fields are tolerated; the bytes are signed verbatim. Ported from
+ * breez-spark-sdk `crates/spark/src/ssp/challenge.rs` @956ff90.
  */
-export function sspChallengeDigest(protectedChallenge: string): Uint8Array {
+export function sspChallengeDigest(
+  protectedChallenge: string,
+  identityPublicKey: Uint8Array,
+): Uint8Array {
   let decoded: Uint8Array;
   try {
     const normalized = protectedChallenge
@@ -203,6 +214,30 @@ export function sspChallengeDigest(protectedChallenge: string): Uint8Array {
     decoded = base64urlnopad.decode(normalized);
   } catch {
     throw new SparkInputError("ssp challenge: protected challenge is not valid base64");
+  }
+  let protectedMsg;
+  try {
+    protectedMsg = fromBinary(ProtectedChallengeSchema, decoded);
+  } catch {
+    throw new SparkInputError("ssp challenge: not a ssp_authn.ProtectedChallenge");
+  }
+  const { challenge } = protectedMsg;
+  if (challenge === undefined) {
+    throw new SparkInputError("ssp challenge: missing challenge");
+  }
+  if (challenge.publicKey.length === 0) {
+    throw new SparkInputError("ssp challenge: missing public key");
+  }
+  let issuedTo: ReturnType<typeof secp256k1.Point.fromBytes>;
+  let identity: ReturnType<typeof secp256k1.Point.fromBytes>;
+  try {
+    issuedTo = secp256k1.Point.fromBytes(challenge.publicKey);
+    identity = secp256k1.Point.fromBytes(identityPublicKey);
+  } catch {
+    throw new SparkInputError("ssp challenge: malformed public key");
+  }
+  if (!issuedTo.equals(identity)) {
+    throw new SparkInputError("ssp challenge: challenge is issued to a different public key");
   }
   return sha256(decoded);
 }

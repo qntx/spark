@@ -69,7 +69,10 @@ export function statementDigest(
     return { digest: authnChallengeDigest(challenge), format: "der" };
   }
   if (statement.kind === "ssp-challenge") {
-    return { digest: sspChallengeDigest(statement.protectedChallenge), format: "der" };
+    return {
+      digest: sspChallengeDigest(statement.protectedChallenge, context.identityPublicKey),
+      format: "der",
+    };
   }
   if (statement.kind === "transfer-package") {
     const pkg = decode(TransferPackageSchema, statement.package, "transfer package");

@@ -2,3 +2,4 @@ version: v2
 modules:
   - path: proto/spark
   - path: proto/ffi
+  - path: proto/ssp
