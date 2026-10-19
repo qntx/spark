@@ -50,6 +50,10 @@ export type {
   StaticDepositClaimRequest,
 } from "../src/signer/index.ts";
 export type {
+  CooperativeExitQuote,
+  CooperativeExitResult,
+  CooperativeExitSpeed,
+  CooperativeExitStatus,
   ExitTransaction,
   FundingInput,
   LightningInvoice,
