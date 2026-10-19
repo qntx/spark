@@ -8,6 +8,30 @@ import type { SparkSigner } from "../signer/types.ts";
 export type SspClient = {
   /** `leaves_swap_fee_estimate` — the sats fee the SSP quotes for swapping `amountSats`. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
+  /** `request_swap` — submits the adaptor-signed leaves swap; resolves to the inbound transfer. */
+  readonly requestSwap: (request: SspSwapRequest) => Promise<SspSwapResult>;
+};
+
+/** One swapped-out leaf: the unsigned CPFP refund tx and its adaptor-completed signature. */
+export type SspSwapLeaf = {
+  readonly leafId: string;
+  readonly rawUnsignedRefundTransaction: Uint8Array;
+  readonly adaptorAddedSignature: Uint8Array;
+};
+
+export type SspSwapRequest = {
+  readonly adaptorPublicKey: Uint8Array;
+  readonly totalAmountSats: number;
+  readonly targetAmountsSats: ReadonlyArray<number>;
+  readonly feeSats: number;
+  readonly userLeaves: ReadonlyArray<SspSwapLeaf>;
+  readonly userOutboundTransferId: string;
+};
+
+export type SspSwapResult = {
+  readonly status: string;
+  readonly inboundTransferId: string;
+  readonly feeSats: number;
 };
 
 export type SspDeps = {
@@ -71,6 +95,88 @@ fragment LeavesSwapFeeEstimateOutputFragment on LeavesSwapFeeEstimateOutput {
   }
 }`;
 
+const REQUEST_SWAP = `
+mutation RequestSwap(
+  $adaptor_pubkey: PublicKey!
+  $total_amount_sats: Long!
+  $target_amount_sats: [Long!]!
+  $fee_sats: Long!
+  $user_leaves: [UserLeafInput!]!
+  $user_outbound_transfer_external_id: UUID!
+) {
+  request_swap(input: {
+    adaptor_pubkey: $adaptor_pubkey
+    total_amount_sats: $total_amount_sats
+    target_amount_sats: $target_amount_sats
+    fee_sats: $fee_sats
+    user_leaves: $user_leaves
+    user_outbound_transfer_external_id: $user_outbound_transfer_external_id
+  }) {
+    request {
+      ...LeavesSwapRequestFragment
+    }
+  }
+}
+
+fragment LeavesSwapRequestFragment on LeavesSwapRequest {
+    __typename
+    leaves_swap_request_id: id
+    leaves_swap_request_created_at: created_at
+    leaves_swap_request_updated_at: updated_at
+    leaves_swap_request_network: network
+    leaves_swap_request_status: status
+    leaves_swap_request_total_amount: total_amount {
+        __typename
+        currency_amount_original_value: original_value
+        currency_amount_original_unit: original_unit
+    }
+    leaves_swap_request_target_amount: target_amount {
+        __typename
+        currency_amount_original_value: original_value
+        currency_amount_original_unit: original_unit
+    }
+    leaves_swap_request_fee: fee {
+        __typename
+        currency_amount_original_value: original_value
+        currency_amount_original_unit: original_unit
+    }
+    leaves_swap_request_inbound_transfer: inbound_transfer {
+        __typename
+        transfer_total_amount: total_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        transfer_spark_id: spark_id
+        transfer_user_request: user_request {
+            id
+        }
+    }
+    leaves_swap_request_outbound_transfer: outbound_transfer {
+        __typename
+        transfer_total_amount: total_amount {
+            __typename
+            currency_amount_original_value: original_value
+            currency_amount_original_unit: original_unit
+        }
+        transfer_spark_id: spark_id
+        transfer_user_request: user_request {
+            id
+        }
+    }
+    leaves_swap_request_expires_at: expires_at
+    leaves_swap_request_swap_leaves: swap_leaves {
+        __typename
+        swap_leaf_leaf_id: leaf_id
+        swap_leaf_raw_unsigned_refund_transaction: raw_unsigned_refund_transaction
+        swap_leaf_adaptor_signed_signature: adaptor_signed_signature
+        swap_leaf_direct_raw_unsigned_refund_transaction: direct_raw_unsigned_refund_transaction
+        swap_leaf_direct_adaptor_signed_signature: direct_adaptor_signed_signature
+        swap_leaf_direct_from_cpfp_raw_unsigned_refund_transaction: direct_from_cpfp_raw_unsigned_refund_transaction
+        swap_leaf_direct_from_cpfp_adaptor_signed_signature: direct_from_cpfp_adaptor_signed_signature
+    }
+}`;
+
 type JsonObject = Record<string, unknown>;
 
 /** A malformed SSP response is a server fault, not caller input. */
@@ -104,6 +210,22 @@ function asSats(value: unknown, field: string): number {
     throw unexpectedResponse(field, "is not a non-negative integer");
   }
   return n;
+}
+
+/** CurrencyAmount in SATOSHI → sats; any other unit is an unexpected response. */
+function currencyAmountSats(value: unknown, field: string): number {
+  const amount = asObject(value, field);
+  const unit = asString(
+    amount["currency_amount_original_unit"],
+    `${field}.currency_amount_original_unit`,
+  );
+  if (unit !== "SATOSHI") {
+    throw unexpectedResponse(`${field}.currency_amount_original_unit`, "is not SATOSHI");
+  }
+  return asSats(
+    amount["currency_amount_original_value"],
+    `${field}.currency_amount_original_value`,
+  );
 }
 
 /**
@@ -266,15 +388,44 @@ export function createSspClient(options: {
         total_amount_sats: amountSats,
       });
       const output = asObject(data["leaves_swap_fee_estimate"], "leaves_swap_fee_estimate");
-      const fee = asObject(
+      return currencyAmountSats(
         output["leaves_swap_fee_estimate_output_fee_estimate"],
         "leaves_swap_fee_estimate_output_fee_estimate",
       );
-      const unit = asString(fee["currency_amount_original_unit"], "currency_amount_original_unit");
-      if (unit !== "SATOSHI") {
-        throw unexpectedResponse("currency_amount_original_unit", `is not SATOSHI`);
+    },
+
+    async requestSwap(request: SspSwapRequest): Promise<SspSwapResult> {
+      const data = await authedPost("RequestSwap", REQUEST_SWAP, {
+        adaptor_pubkey: bytesToHex(request.adaptorPublicKey),
+        total_amount_sats: request.totalAmountSats,
+        target_amount_sats: [...request.targetAmountsSats],
+        fee_sats: request.feeSats,
+        user_leaves: request.userLeaves.map((leaf) => ({
+          leaf_id: leaf.leafId,
+          raw_unsigned_refund_transaction: bytesToHex(leaf.rawUnsignedRefundTransaction),
+          adaptor_added_signature: bytesToHex(leaf.adaptorAddedSignature),
+        })),
+        user_outbound_transfer_external_id: request.userOutboundTransferId,
+      });
+      const output = asObject(data["request_swap"], "request_swap");
+      const swapRequest = asObject(output["request"], "request_swap.request");
+      const status = asString(
+        swapRequest["leaves_swap_request_status"],
+        "leaves_swap_request_status",
+      );
+      if (status === "FAILED") {
+        throw new SparkRequestError("ssp leaves swap failed", { code: "swap_failed" });
       }
-      return asSats(fee["currency_amount_original_value"], "currency_amount_original_value");
+      const inbound = asObject(
+        swapRequest["leaves_swap_request_inbound_transfer"],
+        "leaves_swap_request_inbound_transfer",
+      );
+      const inboundTransferId = asString(inbound["transfer_spark_id"], "transfer_spark_id");
+      const feeSats = currencyAmountSats(
+        swapRequest["leaves_swap_request_fee"],
+        "leaves_swap_request_fee",
+      );
+      return { status, inboundTransferId, feeSats };
     },
   };
 }
