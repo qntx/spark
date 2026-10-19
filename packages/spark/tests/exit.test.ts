@@ -1,7 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { createClient, createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
@@ -46,16 +46,16 @@ function txSpending(prevTxid: Uint8Array, sequence: number): Uint8Array {
 function leafNode(options: {
   readonly id: string;
   readonly parent?: string;
+  /** The parent node's tx; the child spends its output 0 (the node's `vout`). */
+  readonly parentTx?: Uint8Array;
   readonly nodeSequence?: number;
   readonly refundSequence?: number;
   readonly hasRefund?: boolean;
-  /** Skip real tx construction when content is irrelevant (bulk tests). */
-  readonly fakeTxs?: boolean;
 }): SparkLeaf {
-  const nodeTx =
-    options.fakeTxs === true
-      ? new Uint8Array(4)
-      : txSpending(fakeTxid(0x11), options.nodeSequence ?? 0);
+  const nodeTx = txSpending(
+    options.parentTx === undefined ? fakeTxid(0x11) : hexToBytes(txId(options.parentTx)),
+    options.nodeSequence ?? 0,
+  );
   return {
     id: options.id,
     treeId: `tree-${options.id}`,
@@ -66,9 +66,7 @@ function leafNode(options: {
     refundTx:
       options.hasRefund === false
         ? new Uint8Array(0)
-        : options.fakeTxs === true
-          ? new Uint8Array(4)
-          : txSpending(hexToBytes(txId(nodeTx)), options.refundSequence ?? 500),
+        : txSpending(hexToBytes(txId(nodeTx)), options.refundSequence ?? 500),
     verifyingPublicKey: KEY,
     ownerIdentityPublicKey: new Uint8Array(33).fill(6),
     ownerSigningPublicKey: new Uint8Array(33).fill(6),
@@ -174,16 +172,18 @@ describe("exitChain", () => {
 });
 
 const ROOT = leafNode({ id: "root" });
-const MID = leafNode({ id: "mid", parent: "root", nodeSequence: 2000 });
+const MID = leafNode({ id: "mid", parent: "root", parentTx: ROOT.nodeTx, nodeSequence: 2000 });
 const LEAF_A = leafNode({
   id: "leaf-a",
   parent: "mid",
+  parentTx: MID.nodeTx,
   nodeSequence: 1900,
   refundSequence: 2000,
 });
 const LEAF_B = leafNode({
   id: "leaf-b",
   parent: "mid",
+  parentTx: MID.nodeTx,
   nodeSequence: 1800,
   refundSequence: 1900,
 });
@@ -214,11 +214,73 @@ describe("exitTransactions", () => {
     expect(root.relativeTimelock).toBe(0);
     expect(mid.relativeTimelock).toBe(2000);
     expect(leaf.txid).toBe(txId(LEAF_B.nodeTx));
-    expect(leaf.parentTxid).toBe(bytesToHex(fakeTxid(0x11)));
+    expect(leaf.parentTxid).toBe(txId(MID.nodeTx));
     expect(leaf.relativeTimelock).toBe(1800);
     expect(refund.txid).toBe(txId(LEAF_B.refundTx));
     expect(refund.parentTxid).toBe(txId(LEAF_B.nodeTx));
     expect(refund.relativeTimelock).toBe(1900);
+  });
+});
+
+describe("buildExitChains linkage", () => {
+  test("rejects a child that does not spend its parent's node tx", () => {
+    const parent = leafNode({ id: "p" });
+    const child = leafNode({ id: "c", parent: "p" });
+    const nodes = new Map([
+      ["p", parent],
+      ["c", child],
+    ]);
+    expect(() => buildExitChains(["c"], nodes)).toThrow(/does not spend its parent output/);
+  });
+
+  test("rejects a child spending the parent at the wrong vout", () => {
+    const parent = leafNode({ id: "p" });
+    // The leaf claims vout 3 but its node tx actually spends output 0.
+    const child = {
+      ...leafNode({ id: "c", parent: "p", parentTx: parent.nodeTx }),
+      vout: 3,
+    };
+    const nodes = new Map([
+      ["p", parent],
+      ["c", child],
+    ]);
+    expect(() => buildExitChains(["c"], nodes)).toThrow(/vout 3/);
+  });
+
+  test("rejects a leaf refund that does not spend the leaf node tx", () => {
+    const leaf = {
+      ...LEAF_A,
+      refundTx: txSpending(fakeTxid(0x22), 500),
+    };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(
+      /refund tx of leaf leaf-a does not spend/,
+    );
+  });
+
+  test("rejects a direct-from-CPFP refund that does not spend the leaf node tx", () => {
+    const directFromCpfpRefundTx = txSpending(fakeTxid(0x22), 300);
+    const leaf = { ...LEAF_A, directFromCpfpRefundTx };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(
+      /direct-from-CPFP refund tx of leaf leaf-a does not spend/,
+    );
+  });
+
+  test("rejects a direct refund that does not spend the leaf direct tx", () => {
+    const directTx = txSpending(fakeTxid(0x33), 100);
+    const directRefundTx = txSpending(fakeTxid(0x44), 100);
+    const leaf = { ...LEAF_A, directTx, directRefundTx };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(
+      /direct refund tx of leaf leaf-a does not spend/,
+    );
+  });
+
+  test("rejects a leaf with a direct refund but no direct tx", () => {
+    const leaf = { ...LEAF_A, directRefundTx: txSpending(fakeTxid(0x44), 100) };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(/direct refund but no direct tx/);
   });
 });
 
@@ -319,12 +381,16 @@ describe("queryExitChains", () => {
     for (let i = 0; i < 1001; i++) {
       parentIds.push(`p${i}`);
     }
+    const parents = new Map(parentIds.map((id) => [id, leafNode({ id })]));
     const leaves = parentIds.map((parent) =>
-      leafNode({ id: `leaf-${parent}`, parent, fakeTxs: true }),
+      leafNode({
+        id: `leaf-${parent}`,
+        parent,
+        parentTx: required(parents.get(parent)).nodeTx,
+      }),
     );
     // Respond with the parents only for the requested chunk.
     const calls: Array<ReadonlyArray<string>> = [];
-    const parents = new Map(parentIds.map((id) => [id, leafNode({ id, fakeTxs: true })]));
     const transport = createRouterTransport((router) => {
       router.service(SparkService, {
         query_nodes: (req: QueryNodesRequest) => {
@@ -345,10 +411,10 @@ describe("queryExitChains", () => {
   });
 
   test("the given leaf wins over a node returned for its id", async () => {
-    const parent = leafNode({ id: "p", parent: "gp" });
     const grandparent = leafNode({ id: "gp" });
-    const leaf = leafNode({ id: "leaf", parent: "p" });
-    const staleLeaf = leafNode({ id: "leaf", parent: "p", refundSequence: 7 });
+    const parent = leafNode({ id: "p", parent: "gp", parentTx: grandparent.nodeTx });
+    const leaf = leafNode({ id: "leaf", parent: "p", parentTx: parent.nodeTx });
+    const staleLeaf = { ...leaf, refundTx: leafNode({ id: "x", parentTx: leaf.nodeTx }).refundTx };
     const transport = createRouterTransport((router) => {
       router.service(SparkService, {
         query_nodes: () =>
