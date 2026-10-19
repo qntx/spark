@@ -32,7 +32,7 @@ export function createLightning(context: ClientContext): SparkClient["lightning"
         },
         options,
       ),
-    sendStatus: async (requestId) => lightningSendStatus(context.sspClient, requestId),
+    sendStatus: async (request) => lightningSendStatus(context.sspClient, request),
     receiveStatus: async (requestId) => lightningReceiveStatus(context.sspClient, requestId),
   };
 }

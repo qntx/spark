@@ -56,6 +56,7 @@ export type {
   LightningPayment,
   LightningReceiveStatus,
   LightningSendStatus,
+  LightningSendStatusRequest,
   ParsedSparkInvoice,
   SparkExitChain,
   SparkStore,

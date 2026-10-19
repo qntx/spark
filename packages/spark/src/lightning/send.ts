@@ -69,12 +69,32 @@ export function lightningInvoiceAmount(
   return amount;
 }
 
+/**
+ * The committed transfer must be exactly the preimage swap we signed for — us → the SSP. On a
+ * recovered response in particular, continuing with a transfer to another receiver would commit our
+ * leaves to terms we never agreed to.
+ */
+function assertPreimageSwapTransfer(
+  transfer: SparkTransfer,
+  identityPublicKey: Uint8Array,
+  sspIdentityPublicKey: Uint8Array,
+): void {
+  if (
+    transfer.type !== "PREIMAGE_SWAP" ||
+    !equalBytes(transfer.senderIdentityPublicKey, identityPublicKey) ||
+    !equalBytes(transfer.receiverIdentityPublicKey, sspIdentityPublicKey)
+  ) {
+    throw new SparkError("lightning pay: committed transfer is not our preimage swap to the SSP");
+  }
+}
+
 /** The transfer the preimage swap committed, looked up after a lost `initiate` response. */
 async function recoverCommittedTransfer(
   spark: Client<typeof SparkService>,
   network: LightningDeps["network"],
   transferId: string,
   identityPublicKey: Uint8Array,
+  sspIdentityPublicKey: Uint8Array,
 ): Promise<SparkTransfer | undefined> {
   let transfers: Transfer[];
   try {
@@ -86,7 +106,8 @@ async function recoverCommittedTransfer(
   const transfer = transfers.find(
     (candidate) =>
       candidate.type === TransferType.PREIMAGE_SWAP &&
-      equalBytes(candidate.senderIdentityPublicKey, identityPublicKey),
+      equalBytes(candidate.senderIdentityPublicKey, identityPublicKey) &&
+      equalBytes(candidate.receiverIdentityPublicKey, sspIdentityPublicKey),
   );
   return transfer === undefined ? undefined : mapTransfer(transfer);
 }
@@ -205,12 +226,24 @@ export async function payLightningInvoice(
   } catch (error) {
     // The swap can commit server-side and still lose its response. The committed transfer is the
     // only sound test — a retry must continue with it rather than fail or double-pay.
-    const recovered = await recoverCommittedTransfer(spark, network, transferId, identityPublicKey);
+    const recovered = await recoverCommittedTransfer(
+      spark,
+      network,
+      transferId,
+      identityPublicKey,
+      sspIdentityPublicKey,
+    );
     if (recovered === undefined) {
       throw error;
     }
     transfer = recovered;
   }
+  assertPreimageSwapTransfer(transfer, identityPublicKey, sspIdentityPublicKey);
+
+  // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
+  // failure on the SSP call below. The returned transfer — not the locally selected list —
+  // decides which leaves left the wallet: on a retry the SO may report the first-attempt leaves.
+  await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
 
   // The SSP refuses `idempotency_key` alongside the external id; the transfer id keys the request.
   const sendRequest = await ssp.requestLightningSend({
@@ -218,10 +251,9 @@ export async function payLightningInvoice(
     ...(isZeroAmount ? { amountSats } : {}),
     userOutboundTransferExternalId: transfer.id,
   });
-
-  // The returned transfer — not the locally selected list — decides which leaves left the wallet:
-  // on a retry the SO may report the transfer's first-attempt leaves.
-  await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
+  if (sendRequest.encodedInvoice.toLowerCase() !== invoice) {
+    throw new SparkError("lightning pay: ssp send request is for a different invoice");
+  }
 
   return {
     transferId: transfer.id,

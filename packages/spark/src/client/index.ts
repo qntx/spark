@@ -12,6 +12,7 @@ import type {
   LightningPayment,
   LightningReceiveStatus,
   LightningSendStatus,
+  LightningSendStatusRequest,
 } from "../lightning/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
@@ -136,8 +137,12 @@ export type SparkClient = {
       readonly amountSats?: number;
       readonly transferId?: string;
     }) => Promise<LightningPayment>;
-    /** `user_request` status of a send; `preimage` appears once the SSP settled it. */
-    readonly sendStatus: (requestId: string) => Promise<LightningSendStatus>;
+    /**
+     * `user_request` status of a send; `preimage` appears once the SSP settled it. Pass the
+     * `LightningPayment` from `pay` — the request's invoice and preimage are verified against its
+     * payment hash, not the hash the SSP reports.
+     */
+    readonly sendStatus: (request: LightningSendStatusRequest) => Promise<LightningSendStatus>;
     /** `user_request` status of a receive, with the inbound transfer id once present. */
     readonly receiveStatus: (requestId: string) => Promise<LightningReceiveStatus>;
   };
