@@ -28,7 +28,7 @@ JavaScript build and the native binary produce byte-identical output on the
 same input — so only the rustc step needs pinning. Measured equivalence: the
 container build of this revision reproduces CI's artifact bit-for-bit:
 
-```
+```text
 sha256 = 1287f5c192d9b1d122f74988cf766f2507bbf2eca4da4d722b1a47e48fa6ae32
 ```
 
