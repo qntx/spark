@@ -392,6 +392,10 @@ function fakeSsp(handlers: {
       Promise.reject(new SparkRequestError("ssp: completeCoopExit not stubbed")),
     coopExitRequest: async () =>
       Promise.reject(new SparkRequestError("ssp: coopExitRequest not stubbed")),
+    staticDepositQuote: async () =>
+      Promise.reject(new SparkRequestError("ssp: staticDepositQuote not stubbed")),
+    claimStaticDeposit: async () =>
+      Promise.reject(new SparkRequestError("ssp: claimStaticDeposit not stubbed")),
   };
   return { ssp, receiveRequests, sendRequests, feeEstimates };
 }

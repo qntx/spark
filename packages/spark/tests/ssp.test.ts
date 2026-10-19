@@ -81,6 +81,13 @@ function fakeSsp(handlers: {
     transferId?: string | null;
   };
   completeCoopExit?: { id?: string; status?: string; transferId?: string | null };
+  staticQuote?: {
+    transactionId?: string;
+    outputIndex?: number;
+    creditAmountSats?: number;
+    signature?: string;
+  } | null;
+  claimDeposit?: { transferId?: string | null };
   userRequest?: unknown;
 }) {
   const requests: CapturedRequest[] = [];
@@ -265,6 +272,33 @@ function fakeSsp(handlers: {
       case "CompleteCoopExit": {
         const req = handlers.completeCoopExit ?? {};
         return json({ complete_coop_exit: { request: coopExitRequestJson(req) } });
+      }
+      case "StaticDepositQuote": {
+        const quote = handlers.staticQuote;
+        return json({
+          static_deposit_quote:
+            quote === null
+              ? null
+              : {
+                  __typename: "StaticDepositQuoteOutput",
+                  static_deposit_quote_output_transaction_id:
+                    quote?.transactionId ?? "ab".repeat(32),
+                  static_deposit_quote_output_output_index: quote?.outputIndex ?? 0,
+                  static_deposit_quote_output_network: "REGTEST",
+                  static_deposit_quote_output_credit_amount_sats: quote?.creditAmountSats ?? 950,
+                  static_deposit_quote_output_signature: quote?.signature ?? "cd".repeat(64),
+                },
+        });
+      }
+      case "ClaimStaticDeposit": {
+        const claim = handlers.claimDeposit ?? {};
+        return json({
+          claim_static_deposit: {
+            __typename: "ClaimStaticDepositOutput",
+            claim_static_deposit_output_transfer_id:
+              claim.transferId === undefined ? "transfer-1" : claim.transferId,
+          },
+        });
       }
       case "UserRequest":
         return json({ user_request: handlers.userRequest ?? null });
@@ -855,7 +889,12 @@ test("completeCoopExit sends both ids and parses the request status", async () =
     coopExitRequestId: "0199aaaa-bbbb-7ccc-8ddd-000000000009",
     userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
   });
-  expect(result).toStrictEqual({ id: "exit-9", status: "TX_BROADCASTED", transferId: "tr-1" });
+  expect(result).toStrictEqual({
+    id: "exit-9",
+    status: "TX_BROADCASTED",
+    transferId: "tr-1",
+    rawCoopExitTransaction: hexToBytes("ccdd".repeat(10)),
+  });
   const call = requests.find((r) => r.operationName === "CompleteCoopExit");
   expect(call?.variables).toStrictEqual({
     coop_exit_request_id: "0199aaaa-bbbb-7ccc-8ddd-000000000009",
@@ -869,7 +908,12 @@ test("coopExitRequest parses a CoopExitRequest and rejects other request types",
   });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
   const result = await client.coopExitRequest("exit-7");
-  expect(result).toStrictEqual({ id: "exit-7", status: "SUCCEEDED", transferId: "tr-3" });
+  expect(result).toStrictEqual({
+    id: "exit-7",
+    status: "SUCCEEDED",
+    transferId: "tr-3",
+    rawCoopExitTransaction: hexToBytes("ccdd".repeat(10)),
+  });
   const call = requests.find((r) => r.operationName === "UserRequest");
   expect(call?.variables).toStrictEqual({ request_id: "exit-7" });
 
@@ -881,4 +925,95 @@ test("coopExitRequest parses a CoopExitRequest and rejects other request types",
   await expect(wrong.coopExitRequest("x")).rejects.toMatchObject({
     code: "unexpected_response",
   });
+});
+
+test("staticDepositQuote sends the utxo coordinates and parses the quote", async () => {
+  const transactionId = "ab".repeat(32);
+  const { fetchImpl, requests } = fakeSsp({
+    staticQuote: {
+      transactionId,
+      outputIndex: 1,
+      creditAmountSats: 987,
+      signature: "cd".repeat(70),
+    },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.staticDepositQuote({
+    transactionId,
+    outputIndex: 1,
+    network: "regtest",
+  });
+  expect(result).toStrictEqual({ creditAmountSats: 987, signature: "cd".repeat(70) });
+  const call = requests.find((r) => r.operationName === "StaticDepositQuote");
+  expect(call?.variables).toStrictEqual({
+    transaction_id: transactionId,
+    output_index: 1,
+    network: "REGTEST",
+  });
+});
+
+test("staticDepositQuote rejects a quote for a different deposit output", async () => {
+  const { fetchImpl } = fakeSsp({ staticQuote: { transactionId: "cd".repeat(32) } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(
+    client.staticDepositQuote({
+      transactionId: "ab".repeat(32),
+      outputIndex: 0,
+      network: "regtest",
+    }),
+  ).rejects.toMatchObject({ code: "unexpected_response" });
+});
+
+test("staticDepositQuote rejects a null quote", async () => {
+  const { fetchImpl } = fakeSsp({ staticQuote: null });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(
+    client.staticDepositQuote({
+      transactionId: "ab".repeat(32),
+      outputIndex: 0,
+      network: "regtest",
+    }),
+  ).rejects.toMatchObject({ code: "unexpected_response" });
+});
+
+test("claimStaticDeposit sends the FIXED_AMOUNT claim and parses the transfer id", async () => {
+  const { fetchImpl, requests } = fakeSsp({ claimDeposit: { transferId: "tr-static-1" } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.claimStaticDeposit({
+    transactionId: "ab".repeat(32),
+    outputIndex: 2,
+    network: "regtest",
+    creditAmountSats: 950,
+    depositSecretKey: "01".repeat(32),
+    signature: "3045".concat("02".repeat(66)),
+    quoteSignature: "cd".repeat(70),
+  });
+  expect(result).toStrictEqual({ transferId: "tr-static-1" });
+  const call = requests.find((r) => r.operationName === "ClaimStaticDeposit");
+  expect(call?.variables).toStrictEqual({
+    transaction_id: "ab".repeat(32),
+    output_index: 2,
+    network: "REGTEST",
+    request_type: "FIXED_AMOUNT",
+    credit_amount_sats: 950,
+    deposit_secret_key: "01".repeat(32),
+    signature: "3045".concat("02".repeat(66)),
+    quote_signature: "cd".repeat(70),
+  });
+});
+
+test("claimStaticDeposit tolerates a null transfer id", async () => {
+  const { fetchImpl } = fakeSsp({ claimDeposit: { transferId: null } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(
+    client.claimStaticDeposit({
+      transactionId: "ab".repeat(32),
+      outputIndex: 0,
+      network: "regtest",
+      creditAmountSats: 950,
+      depositSecretKey: "01".repeat(32),
+      signature: "3045".concat("02".repeat(66)),
+      quoteSignature: "cd".repeat(70),
+    }),
+  ).resolves.toStrictEqual({});
 });
