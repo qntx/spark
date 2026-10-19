@@ -6,6 +6,8 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
+import type { ClientContext } from "../src/client/context.ts";
+import { createWithdrawals } from "../src/client/withdrawals.ts";
 import {
   btcNetwork,
   createCurrentTimelockRefundTxs,
@@ -17,6 +19,7 @@ import {
   txIdBytes,
   parseTransaction,
 } from "../src/core/bitcoin/index.ts";
+import { sparkNetworkConfig } from "../src/core/network.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import {
@@ -26,11 +29,13 @@ import {
   quoteCooperativeExit,
 } from "../src/exit/coop.ts";
 import type { CoopExitDeps } from "../src/exit/coop.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
 import {
   CooperativeExitResponseSchema,
   GetSigningCommitmentsResponseSchema,
   Network,
   QueryTransfersResponseSchema,
+  RenewLeafResponseSchema,
   RequestedSigningCommitmentsSchema,
   SparkService,
   TransferLeafSchema,
@@ -39,7 +44,7 @@ import {
   TransferType,
   TreeNodeSchema,
 } from "../src/proto/gen/spark_pb.ts";
-import type { Transfer } from "../src/proto/gen/spark_pb.ts";
+import type { RenewLeafRequest, Transfer } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner, FrostSignJob } from "../src/signer/index.ts";
 import type { SspClient, SspCoopExitRequest, SspCoopExitResult } from "../src/ssp/index.ts";
@@ -107,6 +112,8 @@ async function fabricateLeaf(
     directNodeTx?: boolean;
     /** A non-zero node timelock is what makes a direct refund exist for the leaf. */
     nodeSequence?: number;
+    /** Refund timelock; below 200 the leaf is stale and renews before leaving the wallet. */
+    refundSequence?: number;
   },
 ): Promise<SparkLeaf> {
   const signingPublicKeys = await signer.publicKeys([{ type: "leaf", leafId: options.leafId }]);
@@ -126,7 +133,7 @@ async function fabricateLeaf(
   const nodeTxBytes = nodeTx.toBytes(true);
   const refundTx = createCurrentTimelockRefundTxs({
     nodeTx: nodeTxBytes,
-    sequence: 2000,
+    sequence: options.refundSequence ?? 2000,
     receivingPublicKey: signingPublicKey,
     network: "regtest",
   }).cpfpRefund.txBytes;
@@ -210,6 +217,43 @@ function commitments(count: number) {
   );
 }
 
+/** A zero-timelock renew_leaf response whose node echoes the txs the client just signed. */
+function renewZeroTimelockResult(
+  leaf: SparkLeaf,
+  input: Record<string, unknown>,
+): { response: unknown; nodeTx: Uint8Array } {
+  const jobs = (input as unknown as RenewLeafRequest).signingJobs;
+  if (jobs.case !== "renewNodeZeroTimelockSigningJob") {
+    throw new Error(`expected zero-timelock renewal, got ${jobs.case}`);
+  }
+  const nodeTx = required(jobs.value.nodeTxSigningJob?.rawTx, "renewed node tx");
+  const node = create(TreeNodeSchema, {
+    id: leaf.id,
+    treeId: leaf.treeId,
+    value: BigInt(leaf.valueSats),
+    nodeTx,
+    refundTx: required(jobs.value.refundTxSigningJob?.rawTx, "renewed refund tx"),
+    vout: leaf.vout,
+    verifyingPublicKey: leaf.verifyingPublicKey,
+    ownerIdentityPublicKey: leaf.ownerIdentityPublicKey,
+    ownerSigningPublicKey: leaf.ownerSigningPublicKey,
+    signingKeyshare: {
+      ownerIdentifiers: [...leaf.signingKeyshare.ownerIdentifiers],
+      threshold: leaf.signingKeyshare.threshold,
+      publicKey: leaf.signingKeyshare.publicKey,
+      publicShares: {},
+    },
+    status: "AVAILABLE",
+    network: Network.REGTEST,
+  });
+  return {
+    response: create(RenewLeafResponseSchema, {
+      renewResult: { case: "renewNodeZeroTimelockResult", value: { node } },
+    }),
+    nodeTx,
+  };
+}
+
 function transferProto(options: {
   id: string;
   sender: Uint8Array;
@@ -266,6 +310,7 @@ function fakeSpark(handlers: {
     input: Record<string, unknown>,
   ) => Promise<{ transfer?: Transfer }> | { transfer?: Transfer };
   query_transfers_by_id?: (input: Record<string, unknown>) => { transfers?: Transfer[] };
+  renew_leaf?: (input: Record<string, unknown>) => unknown;
 }): { spark: ReturnType<typeof createClient<typeof SparkService>>; calls: CapturedCall[] } {
   const calls: CapturedCall[] = [];
   const respond = async (method: { name: string }, message: unknown) =>
@@ -292,13 +337,20 @@ function fakeSpark(handlers: {
       });
       switch (method.name) {
         case "get_signing_commitments": {
-          const req = input as { nodeIds?: string[] };
+          const req = input as { nodeIds?: string[]; count?: number };
           return respond(
             method,
             create(GetSigningCommitmentsResponseSchema, {
-              signingCommitments: commitments(3 * (req.nodeIds?.length ?? 1)),
+              signingCommitments: commitments((req.count ?? 3) * (req.nodeIds?.length ?? 1)),
             }),
           );
+        }
+        case "renew_leaf": {
+          const handler = handlers.renew_leaf;
+          if (handler === undefined) {
+            throw new Error("renew_leaf not stubbed");
+          }
+          return respond(method, handler(input as Record<string, unknown>));
         }
         case "cooperative_exit_v2": {
           const handler = handlers.cooperative_exit_v2;
@@ -985,6 +1037,120 @@ describe("cooperativeExit", () => {
     await expect(cooperativeExit(pending.deps, options)).rejects.toThrow("complete failed");
     expect(pending.completions).toHaveLength(3);
     expect(pending.sleeps).toStrictEqual([2000, 2000]);
+  });
+
+  test("an all-leaves exit renews a stale leaf before building connector refunds", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const identityPublicKey = await signer0.identityPublicKey();
+    // Refund timelock 100 is below the renewal threshold; the node timelock is already zero,
+    // so the leaf takes the zero-timelock renewal path.
+    const staleLeaf = await fabricateLeaf(signer0, {
+      leafId: "leaf-stale",
+      valueSats: 60_000n,
+      refundSequence: 100,
+    });
+    let renewedNodeTx: Uint8Array | undefined;
+    const { spark, calls } = fakeSpark({
+      renew_leaf: (input) => {
+        const result = renewZeroTimelockResult(staleLeaf, input);
+        renewedNodeTx = result.nodeTx;
+        return result.response;
+      },
+      cooperative_exit_v2: (input) => ({
+        transfer: transferProto({
+          id: String((input["transfer"] as Record<string, unknown>)["transferId"]),
+          sender: identityPublicKey,
+          receiver: SSP_IDENTITY,
+          leaves: [staleLeaf],
+        }),
+      }),
+    });
+    const payoutTx = payoutTxFor(WITHDRAW_ADDRESS, 60_000 - 10);
+    const coopExitTxid = txId(payoutTx);
+    const { ssp, exitRequests } = fakeSsp({
+      coopExitFeeQuote: () => ({ fees: { fast: 100, medium: 50, slow: 10 } }),
+      requestCoopExit: () => ({
+        rawCoopExitTransaction: payoutTx,
+        coopExitTxid,
+        rawConnectorTransaction: connectorTxFor(coopExitTxid, 2),
+      }),
+      completeCoopExit: () => ({ status: "TX_BROADCASTED" }),
+    });
+    const regtest = sparkNetworkConfig("regtest");
+    const context: ClientContext = {
+      coordinatorConnection: {
+        operator: required(OPERATORS[0], "coordinator operator"),
+        spark,
+        token: undefined as never,
+        invalidateSession: () => {},
+      },
+      otherConnections: [],
+      signer: signer0,
+      network: "regtest",
+      config: {
+        ...regtest,
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp: { ...regtest.ssp, identityPublicKey: SSP_IDENTITY },
+      },
+      operators: OPERATORS,
+      store: createMemorySparkStore(),
+      random: fixedRandom(),
+      now: () => NOW_MS,
+      sleep: async () => Promise.resolve(),
+      transferCoordinator: {
+        spark,
+        signer: signer0,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+      },
+      depositCoordinator: {
+        spark,
+        signer: signer0,
+        network: "regtest",
+        operators: OPERATORS,
+        coordinatorIdentifier: required(OPERATORS[0], "coordinator").identifier,
+      },
+      sspClient: ssp,
+      storeChainsFor: async () => Promise.resolve(),
+      leaves: async () => Promise.resolve([staleLeaf]),
+      receiverIdentityKey: () => {
+        throw new Error("receiverIdentityKey not stubbed");
+      },
+      tokenIdentifierForNetwork: () => {
+        throw new Error("tokenIdentifierForNetwork not stubbed");
+      },
+    };
+    const result = await createWithdrawals(context).cooperativeExit({
+      address: WITHDRAW_ADDRESS,
+      speed: "SLOW",
+      maxFeeSats: 10_000,
+    });
+    expect(result.status).toBe("TX_BROADCASTED");
+    expect(exitRequests[0]?.leafIds).toStrictEqual(["leaf-stale"]);
+
+    const methods = calls.map((call) => call.method);
+    const renewed = required(renewedNodeTx, "renewed node tx");
+    // The renewal RPC ran before the commit, and the connector refunds were signed over the
+    // renewed node tx — proof the stale leaf was renewed before refund construction.
+    expect(methods.indexOf("renew_leaf")).toBeGreaterThanOrEqual(0);
+    expect(methods.indexOf("renew_leaf")).toBeLessThan(methods.indexOf("cooperative_exit_v2"));
+    const commit = required(
+      calls.find((call) => call.method === "cooperative_exit_v2"),
+      "cooperative_exit_v2 call",
+    );
+    const transfer = commit.input["transfer"] as {
+      transferPackage?: { leavesToSend?: Array<{ rawTx?: Uint8Array }> };
+    };
+    const firstJob = required(transfer.transferPackage?.leavesToSend?.[0], "refund job");
+    const refundInput = parseTransaction(required(firstJob.rawTx, "refund rawTx")).getInput(0);
+    expect(bytesToHex(required(refundInput.txid, "refund input txid"))).toBe(txId(renewed));
   });
 });
 
