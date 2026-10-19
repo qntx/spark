@@ -2,7 +2,7 @@ import { equalBytes, hexToBytes } from "@noble/curves/utils.js";
 
 import { decodeBolt11 } from "../core/bolt11.ts";
 import type { Bolt11Invoice } from "../core/bolt11.ts";
-import { SparkRequestError } from "../errors/index.ts";
+import { SparkInputError, SparkRequestError } from "../errors/index.ts";
 import type { LightningDeps } from "./types.ts";
 
 // Lightning receive via the SSP: upstream services/lightning.ts createLightningInvoice
@@ -65,36 +65,31 @@ function validateReceivedInvoice(
 /**
  * The Spark address embedded in an SSP-returned receive invoice's route hints must be ours, and
  * present only if we asked for one — a payer that finds an address transfers to it directly, so an
- * injected address is paid instead of us (Breez `validate_received_spark_address`).
+ * injected address is paid instead of us (Breez `validate_received_spark_address`). EVERY hop under
+ * the Spark short channel id is checked: one foreign hop among several would pass a first-match
+ * scan just the same.
  */
 function validateReceivedSparkAddress(
   invoice: Bolt11Invoice,
   includeSparkAddress: boolean,
   identityPublicKey: Uint8Array,
 ): void {
-  let sparkPublicKey: Uint8Array | undefined;
-  for (const hint of invoice.routeHints) {
-    for (const hop of hint) {
-      if (equalBytes(hop.shortChannelId, SPARK_ROUTE_SHORT_CHANNEL_ID)) {
-        sparkPublicKey = hop.publicKey;
-        break;
-      }
-    }
-    if (sparkPublicKey !== undefined) {
-      break;
-    }
-  }
-  if (sparkPublicKey === undefined) {
-    if (includeSparkAddress) {
-      throw new SparkRequestError("ssp invoice is missing the requested spark address");
+  const sparkHops = invoice.routeHints
+    .flat()
+    .filter((hop) => equalBytes(hop.shortChannelId, SPARK_ROUTE_SHORT_CHANNEL_ID));
+  if (!includeSparkAddress) {
+    if (sparkHops.length > 0) {
+      throw new SparkRequestError("ssp invoice carries a spark address that was not requested");
     }
     return;
   }
-  if (!includeSparkAddress) {
-    throw new SparkRequestError("ssp invoice carries a spark address that was not requested");
+  if (sparkHops.length === 0) {
+    throw new SparkRequestError("ssp invoice is missing the requested spark address");
   }
-  if (!equalBytes(sparkPublicKey, identityPublicKey)) {
-    throw new SparkRequestError("ssp invoice spark address does not match our identity");
+  for (const hop of sparkHops) {
+    if (!equalBytes(hop.publicKey, identityPublicKey)) {
+      throw new SparkRequestError("ssp invoice spark address does not match our identity");
+    }
   }
 }
 
@@ -114,13 +109,24 @@ export async function createLightningInvoice(
     readonly includeSparkAddress?: boolean;
   },
 ): Promise<LightningInvoice> {
+  // Reject malformed options before any signer work — an invalid request must not sign.
+  const expirySecs = options.expirySecs ?? LIGHTNING_INVOICE_EXPIRY_SECS;
+  if (!Number.isSafeInteger(options.amountSats) || options.amountSats < 0) {
+    throw new SparkInputError("lightning receive: amountSats must be a non-negative integer");
+  }
+  if (!Number.isSafeInteger(expirySecs) || expirySecs <= 0) {
+    throw new SparkInputError("lightning receive: expirySecs must be a positive integer");
+  }
+  if (options.descriptionHash !== undefined && options.descriptionHash.length !== 32) {
+    throw new SparkInputError("lightning receive: descriptionHash must be 32 bytes");
+  }
+
   const identityPublicKey = await deps.signer.identityPublicKey();
   const prepared = await deps.signer.prepareLightningReceive({
     operators: deps.operators,
     threshold: deps.threshold,
   });
 
-  const expirySecs = options.expirySecs ?? LIGHTNING_INVOICE_EXPIRY_SECS;
   const request = await deps.ssp.requestLightningReceive({
     network: deps.network,
     amountSats: options.amountSats,
