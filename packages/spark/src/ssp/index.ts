@@ -205,8 +205,14 @@ function asString(value: unknown, field: string): string {
 }
 
 function asSats(value: unknown, field: string): number {
-  const n = typeof value === "string" ? Number(value) : value;
-  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) {
+  // Only plain decimal strings and numbers: Number() would also accept "0x10", " 5 ", "1e3".
+  const n =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^[0-9]+$/.test(value)
+        ? Number(value)
+        : undefined;
+  if (n === undefined || !Number.isSafeInteger(n) || n < 0) {
     throw unexpectedResponse(field, "is not a non-negative integer");
   }
   return n;
@@ -413,8 +419,15 @@ export function createSspClient(options: {
         swapRequest["leaves_swap_request_status"],
         "leaves_swap_request_status",
       );
-      if (status === "FAILED") {
-        throw new SparkRequestError("ssp leaves swap failed", { code: "swap_failed" });
+      const swapLeaves = swapRequest["leaves_swap_request_swap_leaves"];
+      if (!Array.isArray(swapLeaves) || swapLeaves.length === 0) {
+        throw unexpectedResponse("leaves_swap_request_swap_leaves", "is missing or empty");
+      }
+      // Terminal failure states of upstream SparkLeavesSwapRequestStatus.
+      if (status === "FAILED" || status === "EXPIRED") {
+        throw new SparkRequestError(`ssp leaves swap ${status.toLowerCase()}`, {
+          code: "swap_failed",
+        });
       }
       const inbound = asObject(
         swapRequest["leaves_swap_request_inbound_transfer"],
