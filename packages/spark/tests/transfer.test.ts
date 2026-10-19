@@ -1364,6 +1364,16 @@ describe("transfers.swap", () => {
         }
         return Promise.resolve(response);
       },
+      requestLightningReceive: async () =>
+        Promise.reject(new SparkRequestError("ssp: requestLightningReceive not stubbed")),
+      requestLightningSend: async () =>
+        Promise.reject(new SparkRequestError("ssp: requestLightningSend not stubbed")),
+      lightningSendFeeEstimate: async () =>
+        Promise.reject(new SparkRequestError("ssp: lightningSendFeeEstimate not stubbed")),
+      lightningSendRequest: async () =>
+        Promise.reject(new SparkRequestError("ssp: lightningSendRequest not stubbed")),
+      lightningReceiveRequest: async () =>
+        Promise.reject(new SparkRequestError("ssp: lightningReceiveRequest not stubbed")),
     };
     return { ssp, requests };
   }
