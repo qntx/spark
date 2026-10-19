@@ -30,6 +30,13 @@ export { createSatsInvoice, createTokensInvoice, parseSparkInvoice } from "./inv
 export type { ParsedSparkInvoice } from "./invoice/index.ts";
 export type { SparkEvent } from "./connection/index.ts";
 export type { UnusedDepositAddress } from "./deposit/index.ts";
+export { MIN_STATIC_REFUND_FEE_SATS } from "./deposit/static.ts";
+export type {
+  StaticDepositClaim,
+  StaticDepositRefund,
+  StaticDepositUtxo,
+} from "./deposit/static.ts";
+export type { StaticDepositClaimResult } from "./client/deposits.ts";
 export { buildCpfpChild } from "./core/bitcoin/cpfp.ts";
 export type { FundingInput } from "./core/bitcoin/cpfp.ts";
 export { exitTransactions } from "./exit/unilateral.ts";

@@ -3,6 +3,7 @@ import type { ConnectionDeps, OperatorConnection, SparkEvent } from "../connecti
 import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
 import type { UnusedDepositAddress } from "../deposit/index.ts";
+import type { StaticDepositRefund, StaticDepositUtxo } from "../deposit/static.ts";
 import { SparkInputError } from "../errors/index.ts";
 import type {
   CooperativeExitQuote,
@@ -28,6 +29,7 @@ import { leavesBalance } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { createClientContext } from "./context.ts";
 import { createDeposits } from "./deposits.ts";
+import type { StaticDepositClaimResult } from "./deposits.ts";
 import { createInvoices } from "./invoices.ts";
 import { createLightning } from "./lightning.ts";
 import { createTokens } from "./tokens.ts";
@@ -165,6 +167,33 @@ export type SparkClient = {
       readonly transaction: Uint8Array;
       readonly vout?: number;
     }) => Promise<SparkLeaf>;
+    /** The identity's reusable static deposit address — the same address on every call. */
+    readonly staticAddress: () => Promise<string>;
+    /** Confirmed, unclaimed UTXOs paying the static deposit address. */
+    readonly staticUtxos: () => Promise<ReadonlyArray<StaticDepositUtxo>>;
+    /**
+     * Claims a static-deposit UTXO through the SSP: quotes the credit, rejects fees over
+     * `maxFeeSats`, then claims the SSP's inbound transfer. `rawTx` supplies the deposit
+     * transaction when the SO's utxo listing does not return it.
+     */
+    readonly claimStatic: (options: {
+      readonly txid: string;
+      readonly vout: number;
+      readonly maxFeeSats: number;
+      readonly rawTx?: Uint8Array;
+    }) => Promise<StaticDepositClaimResult>;
+    /**
+     * Signs a version-3 refund spending a static-deposit UTXO to `destinationAddress` at
+     * `feeRateSatPerVbyte` (fee floored at 194 sats; output must clear dust). The signed
+     * transaction is returned unbroadcast.
+     */
+    readonly refundStatic: (options: {
+      readonly txid: string;
+      readonly vout: number;
+      readonly destinationAddress: string;
+      readonly feeRateSatPerVbyte: number;
+      readonly rawTx?: Uint8Array;
+    }) => Promise<StaticDepositRefund>;
   };
   readonly withdrawals: {
     /** Pre-signed exit transactions for the given leaves, root first (see ExitTransaction). */
