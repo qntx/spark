@@ -14,8 +14,8 @@ const FUNDED_ADDRESS = "sparkrt1pgssy2j63j3kmdzg54wavqs2z7yljfmk7j5adt5p4046lk5d
 /**
  * Terminal send-request statuses per upstream SparkLightningSendRequestStatus. A same-SSP
  * ("internal") lightning payment converges to TRANSFER_COMPLETED rather than
- * LIGHTNING_PAYMENT_SUCCEEDED — upstream's integration test asserts exactly that, and the internal
- * state machine does not write a payment_preimage back to the send request row.
+ * LIGHTNING_PAYMENT_SUCCEEDED — upstream's integration test asserts exactly that. The hosted SSP
+ * still surfaces payment_preimage on the send request, which sendStatus verifies.
  */
 const SEND_DONE = new Set([
   "TRANSFER_COMPLETED",
