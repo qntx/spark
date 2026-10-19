@@ -4,6 +4,7 @@ import { describe, expect, test } from "vite-plus/test";
 import { decodeSparkAddress } from "../src/core/address.ts";
 import { selectLeaves } from "../src/tree/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
+import type { HostedWallet } from "./support/hosted.ts";
 import { hostedSeed, hostedWallet } from "./support/hosted.ts";
 import { claimPendingUntil } from "./support/local.ts";
 
@@ -21,11 +22,22 @@ function totalSats(leaves: ReadonlyArray<SparkLeaf>): number {
 }
 
 /**
- * The largest amount at or under `capSats` that no exact combination covers and that a single
- * covering leaf supplies as swap input (searched downward from `capSats`).
+ * The smallest unselectable amount a single covering leaf supplies as swap input. Amounts at or
+ * under `preferredCapSats` are preferred so small denominations are exercised first; the search
+ * continues upward because a contiguous small-leaf set leaves no gap below it.
  */
-function pickSingleLeafSwap(leaves: ReadonlyArray<SparkLeaf>, capSats: number): number | undefined {
-  for (let candidate = Math.min(capSats, totalSats(leaves)); candidate >= 1; candidate--) {
+function pickSingleLeafSwap(
+  leaves: ReadonlyArray<SparkLeaf>,
+  preferredCapSats: number,
+): number | undefined {
+  const total = totalSats(leaves);
+  for (let candidate = 1; candidate <= Math.min(preferredCapSats, total); candidate++) {
+    const selection = selectLeaves(leaves, candidate);
+    if (selection.kind === "swap" && selection.leaves.length === 1) {
+      return candidate;
+    }
+  }
+  for (let candidate = preferredCapSats + 1; candidate < total; candidate++) {
     const selection = selectLeaves(leaves, candidate);
     if (selection.kind === "swap" && selection.leaves.length === 1) {
       return candidate;
@@ -57,6 +69,49 @@ function required<T>(value: T | undefined, name: string): T {
     throw new Error(`${name} was not produced`);
   }
   return value;
+}
+
+type MultiSwapSender = {
+  readonly sender: HostedWallet["client"];
+  readonly senderLabel: string;
+  readonly receiver: HostedWallet["client"];
+  readonly receiverLabel: string;
+  readonly receiverIdentity: Uint8Array;
+  readonly sats: number;
+};
+
+/** The first wallet holding an unselectable amount above its largest leaf — A preferred, then B. */
+function pickMultiSwapSender(options: {
+  clientA: HostedWallet["client"];
+  clientB: HostedWallet["client"];
+  identityB: Uint8Array;
+  identityA: Uint8Array;
+  leavesA: ReadonlyArray<SparkLeaf>;
+  leavesB: ReadonlyArray<SparkLeaf>;
+}): MultiSwapSender | undefined {
+  const fromA = pickMultiLeafSwap(options.leavesA);
+  if (fromA !== undefined) {
+    return {
+      sender: options.clientA,
+      senderLabel: "A",
+      receiver: options.clientB,
+      receiverLabel: "B",
+      receiverIdentity: options.identityB,
+      sats: fromA,
+    };
+  }
+  const fromB = pickMultiLeafSwap(options.leavesB);
+  if (fromB === undefined) {
+    return undefined;
+  }
+  return {
+    sender: options.clientB,
+    senderLabel: "B",
+    receiver: options.clientA,
+    receiverLabel: "A",
+    receiverIdentity: options.identityA,
+    sats: fromB,
+  };
 }
 
 describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest leaves swap", () => {
@@ -104,32 +159,50 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest leaves 
     await expect(clientB.balance()).resolves.toBe(balanceB0 + satsSingle);
 
     leavesA = await clientA.leaves();
-    const balanceA1 = await clientA.balance();
     console.log("A denominations now:", denominations(leavesA));
-    const amountMulti = pickMultiLeafSwap(leavesA);
+    // Multi-leaf swap inputs need an unselectable amount above the sender's largest leaf; whether
+    // either wallet holds one depends on its denominations. Try A first, then B.
+    const multi = pickMultiSwapSender({
+      clientA,
+      clientB,
+      identityA,
+      identityB,
+      leavesA,
+      leavesB: await clientB.leaves(),
+    });
     ctx.skip(
-      amountMulti === undefined,
-      "every amount above the largest leaf has an exact combination",
+      multi === undefined,
+      "neither wallet has an unselectable amount above its largest leaf",
     );
-    const satsMulti = required(amountMulti, "multi-leaf swap amount");
-    console.log("sending", satsMulti, "sats (above the largest leaf — inputs accumulate)");
-
-    const sentMulti = await clientA.transfers.send({
-      receiver: identityB,
+    const {
+      sender,
+      senderLabel,
+      receiver,
+      receiverLabel,
+      receiverIdentity,
+      sats: satsMulti,
+    } = required(multi, "multi-leaf swap sender");
+    const senderBefore = await sender.balance();
+    const receiverBefore = await receiver.balance();
+    console.log(
+      `${senderLabel} sending`,
+      satsMulti,
+      "sats (above its largest leaf — inputs accumulate)",
+    );
+    const sentMulti = await sender.transfers.send({
+      receiver: receiverIdentity,
       amountSats: satsMulti,
     });
     console.log("swap+send transfer:", sentMulti.id, sentMulti.status);
-
-    claimed = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    claimed = await claimPendingUntil(receiver, Date.now() + CLAIM_DEADLINE_MS);
     expect(claimed.length).toBeGreaterThan(0);
-    console.log("B claimed denominations:", denominations(claimed));
-    const balanceB = await clientB.balance();
-    await expect(clientA.balance()).resolves.toBe(balanceA1 - satsMulti);
-    expect(balanceB).toBe(balanceB0 + satsSingle + satsMulti);
+    console.log(`${receiverLabel} claimed denominations:`, denominations(claimed));
+    await expect(sender.balance()).resolves.toBe(senderBefore - satsMulti);
+    await expect(receiver.balance()).resolves.toBe(receiverBefore + satsMulti);
 
     const sentBack = await clientB.transfers.send({
       receiver: identityA,
-      amountSats: balanceB,
+      amountSats: await clientB.balance(),
     });
     console.log("B sent back:", sentBack.id, sentBack.status);
     const reclaimed = await claimPendingUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
