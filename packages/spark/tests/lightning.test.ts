@@ -348,7 +348,7 @@ function fakeSsp(handlers: {
       return Promise.resolve({
         id: result.id ?? "send-1",
         status: result.status ?? "LIGHTNING_PAYMENT_INITIATED",
-        encodedInvoice: req.encodedInvoice,
+        encodedInvoice: result.encodedInvoice ?? req.encodedInvoice,
         feeSats: result.feeSats ?? 0,
         ...(result.transferId === undefined ? {} : { transferId: result.transferId }),
         ...(result.paymentPreimage === undefined
@@ -605,6 +605,8 @@ async function sendDeps(overrides: {
   ) => Promise<{ transfer?: Transfer }> | { transfer?: Transfer };
   /** Recovered transfer for the `query_transfers_by_id` probe (default: none found). */
   recoveredTransfer?: Transfer;
+  /** Override the SSP send-request response (defaults to echoing the invoice back). */
+  requestLightningSend?: (req: SspLightningSendRequest) => Partial<SspLightningSendResult>;
   deleted?: string[][];
 }): Promise<{
   deps: Parameters<typeof payLightningInvoice>[0];
@@ -637,7 +639,9 @@ async function sendDeps(overrides: {
   });
   const { ssp, sendRequests, feeEstimates } = fakeSsp({
     lightningSendFeeEstimate: () => overrides.feeSats ?? 7,
-    requestLightningSend: () => ({ id: "send-req-1", status: "LIGHTNING_PAYMENT_INITIATED" }),
+    requestLightningSend:
+      overrides.requestLightningSend ??
+      (() => ({ id: "send-req-1", status: "LIGHTNING_PAYMENT_INITIATED" })),
   });
   const deps = await lightningDeps({ ssp, spark });
   return {
@@ -971,23 +975,153 @@ describe("payLightningInvoice", () => {
     await payLightningInvoice(deps, { invoice, maxFeeSats: 200 });
     expect(deleted).toStrictEqual([["returned-9"]]);
   });
-});
 
-describe("lightningSendStatus", () => {
-  test("returns the verified preimage once settled", async () => {
+  test("exit chains are deleted before the ssp send request runs", async () => {
+    const signer = await testSigner();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
       amountMsat: 1_000_000n,
     });
+    const deleted: string[][] = [];
+    let deletedAtSend = -1;
+    const { deps } = await sendDeps({
+      leaves: [leaf],
+      deleted,
+      requestLightningSend: () => {
+        deletedAtSend = deleted.length;
+        return {};
+      },
+    });
+    await payLightningInvoice(deps, { invoice, maxFeeSats: 200 });
+    expect(deletedAtSend).toBe(1);
+  });
+
+  test("a committed transfer to another receiver is rejected", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const foreign = secp256k1.getPublicKey(new Uint8Array(32).fill(88), true);
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      initiate: (input) => ({
+        transfer: transferProto({
+          id: String((input["transferRequest"] as Record<string, unknown>)["transferId"]),
+          sender: identityPublicKey,
+          receiver: foreign,
+          leaves: [leaf],
+        }),
+      }),
+    });
+    await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
+      "not our preimage swap",
+    );
+    expect(sendRequests).toHaveLength(0);
+  });
+
+  test("a committed transfer from another sender is rejected", async () => {
+    const signer = await testSigner();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const foreign = secp256k1.getPublicKey(new Uint8Array(32).fill(88), true);
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      initiate: (input) => ({
+        transfer: transferProto({
+          id: String((input["transferRequest"] as Record<string, unknown>)["transferId"]),
+          sender: foreign,
+          receiver: SSP_IDENTITY,
+          leaves: [leaf],
+        }),
+      }),
+    });
+    await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
+      "not our preimage swap",
+    );
+    expect(sendRequests).toHaveLength(0);
+  });
+
+  test("a recovered transfer to another receiver does not count", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const foreignReceiver = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: secp256k1.getPublicKey(new Uint8Array(32).fill(88), true),
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+    });
+    const { deps } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: foreignReceiver,
+      initiate: () => {
+        throw new SparkRequestError("initiate response lost", { code: "unavailable" });
+      },
+    });
+    await expect(
+      payLightningInvoice(deps, {
+        invoice,
+        maxFeeSats: 200,
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ).rejects.toThrow("initiate response lost");
+  });
+
+  test("an ssp send request echoing a different invoice is rejected", async () => {
+    const signer = await testSigner();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const { deps, deleted } = await sendDeps({
+      leaves: [leaf],
+      requestLightningSend: () => ({
+        encodedInvoice: "lnbcrt20n1pother",
+      }),
+    });
+    await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
+      "different invoice",
+    );
+    // The leaves are already committed under HTLC refunds — the chains stay deleted.
+    expect(deleted).toStrictEqual([["leaf-1"]]);
+  });
+});
+
+describe("lightningSendStatus", () => {
+  const PAID_INVOICE = encodeTestBolt11({
+    secretKey: INVOICE_SECRET,
+    paymentHash: PAYMENT_HASH,
+    amountMsat: 1_000_000n,
+  });
+  const request = { requestId: "req-1", paymentHash: PAYMENT_HASH };
+
+  test("returns the verified preimage once settled", async () => {
     const { ssp } = fakeSsp({
       lightningSendRequest: () => ({
         status: "LIGHTNING_PAYMENT_SUCCEEDED",
-        encodedInvoice: invoice,
+        encodedInvoice: PAID_INVOICE,
         paymentPreimage: PREIMAGE,
       }),
     });
-    const status = await lightningSendStatus(ssp, "req-1");
+    const status = await lightningSendStatus(ssp, request);
     expect(status.status).toBe("LIGHTNING_PAYMENT_SUCCEEDED");
     expect(bytesToHex(required(status.preimage, "preimage"))).toBe(bytesToHex(PREIMAGE));
   });
@@ -996,30 +1130,44 @@ describe("lightningSendStatus", () => {
     const { ssp } = fakeSsp({
       lightningSendRequest: () => ({
         status: "LIGHTNING_PAYMENT_INITIATED",
-        encodedInvoice: "unused",
+        encodedInvoice: PAID_INVOICE,
       }),
     });
-    const status = await lightningSendStatus(ssp, "req-1");
+    const status = await lightningSendStatus(ssp, request);
     expect(status.preimage).toBeUndefined();
   });
 
-  test("rejects a preimage that does not hash to the invoice payment hash", async () => {
-    const invoice = encodeTestBolt11({
+  test("rejects a preimage that does not hash to the paid payment hash", async () => {
+    const { ssp } = fakeSsp({
+      lightningSendRequest: () => ({
+        status: "LIGHTNING_PAYMENT_SUCCEEDED",
+        encodedInvoice: PAID_INVOICE,
+        paymentPreimage: new Uint8Array(32).fill(0x99),
+      }),
+    });
+    await expect(lightningSendStatus(ssp, request)).rejects.toThrow(SparkError);
+    await expect(lightningSendStatus(ssp, request)).rejects.toThrow(
+      "does not match the paid payment hash",
+    );
+  });
+
+  test("rejects a status row for a different payment, preimage and all", async () => {
+    // The SSP's answer is self-consistent — invoice hash H2, preimage → H2 — but it is not the
+    // payment we made (H1): a self-consistent answer must still not pass as proof of ours.
+    const otherPreimage = new Uint8Array(32).fill(0x77);
+    const otherInvoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
-      paymentHash: PAYMENT_HASH,
+      paymentHash: sha256(otherPreimage),
       amountMsat: 1_000_000n,
     });
     const { ssp } = fakeSsp({
       lightningSendRequest: () => ({
         status: "LIGHTNING_PAYMENT_SUCCEEDED",
-        encodedInvoice: invoice,
-        paymentPreimage: new Uint8Array(32).fill(0x99),
+        encodedInvoice: otherInvoice,
+        paymentPreimage: otherPreimage,
       }),
     });
-    await expect(lightningSendStatus(ssp, "req-1")).rejects.toThrow(SparkError);
-    await expect(lightningSendStatus(ssp, "req-1")).rejects.toThrow(
-      "does not match the invoice payment hash",
-    );
+    await expect(lightningSendStatus(ssp, request)).rejects.toThrow("not the invoice we paid");
   });
 });
 

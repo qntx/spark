@@ -43,6 +43,7 @@ export type {
   LightningPayment,
   LightningReceiveStatus,
   LightningSendStatus,
+  LightningSendStatusRequest,
 } from "./lightning/index.ts";
 export type {
   SparkTokenBalance,

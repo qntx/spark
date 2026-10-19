@@ -30,15 +30,15 @@ const SEND_OK = new Set(["TRANSFER_COMPLETED", "LIGHTNING_PAYMENT_SUCCEEDED"]);
 
 async function sendStatusUntil(
   client: HostedWallet["client"],
-  requestId: string,
+  payment: { requestId: string; paymentHash: Uint8Array },
   deadline: number,
 ): Promise<{ status: string; preimage?: Uint8Array }> {
-  const status = await client.lightning.sendStatus(requestId);
+  const status = await client.lightning.sendStatus(payment);
   if (SEND_DONE.has(status.status) || Date.now() > deadline) {
     return status;
   }
   await new Promise((resolve) => setTimeout(resolve, 5000));
-  return sendStatusUntil(client, requestId, deadline);
+  return sendStatusUntil(client, payment, deadline);
 }
 
 describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightning", () => {
@@ -85,7 +85,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     );
     expect(paid1.feeSats).toBeLessThanOrEqual(200);
 
-    const settled1 = await sendStatusUntil(clientA, paid1.requestId, Date.now() + SEND_DEADLINE_MS);
+    const settled1 = await sendStatusUntil(clientA, paid1, Date.now() + SEND_DEADLINE_MS);
     console.log("send status:", settled1.status);
     // Internal (same-SSP) payments terminate at TRANSFER_COMPLETED; a real outbound
     // lightning payment would end at LIGHTNING_PAYMENT_SUCCEEDED. When the SSP surfaces a
@@ -118,7 +118,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
       "fee:",
       paid2.feeSats,
     );
-    const settled2 = await sendStatusUntil(clientA, paid2.requestId, Date.now() + SEND_DEADLINE_MS);
+    const settled2 = await sendStatusUntil(clientA, paid2, Date.now() + SEND_DEADLINE_MS);
     console.log("send status:", settled2.status);
     expect(SEND_OK.has(settled2.status)).toBe(true);
     console.log("preimage surfaced:", settled2.preimage !== undefined);

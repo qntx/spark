@@ -17,24 +17,37 @@ export type LightningReceiveStatus = {
   readonly transferId?: string;
 };
 
+/** A `LightningPayment` satisfies this shape — pass the pay() result straight in. */
+export type LightningSendStatusRequest = {
+  readonly requestId: string;
+  /** The payment hash of the invoice we paid — the proof target, not SSP-supplied data. */
+  readonly paymentHash: Uint8Array;
+};
+
 /**
- * `user_request` status of a lightning send. A returned preimage is checked against the request's
- * invoice payment hash before it is handed back — a wrong preimage must never look like proof of
- * payment.
+ * `user_request` status of a lightning send. Both the request's invoice and a returned preimage are
+ * checked against the payment hash of the invoice we actually paid — an SSP answering with a
+ * self-consistent status for a different payment must not look like proof of ours.
  */
 export async function lightningSendStatus(
   ssp: SspClient,
-  requestId: string,
+  request: LightningSendStatusRequest,
 ): Promise<LightningSendStatus> {
-  const request = await ssp.lightningSendRequest(requestId);
-  if (request.paymentPreimage === undefined) {
-    return { status: request.status };
+  const status = await ssp.lightningSendRequest(request.requestId);
+  const invoice = decodeBolt11(status.encodedInvoice);
+  if (!equalBytes(invoice.paymentHash, request.paymentHash)) {
+    throw new SparkError("lightning send status: request invoice is not the invoice we paid");
   }
-  const invoice = decodeBolt11(request.encodedInvoice);
-  if (!equalBytes(sha256(request.paymentPreimage), invoice.paymentHash)) {
-    throw new SparkError("lightning send status: preimage does not match the invoice payment hash");
+  if (
+    status.paymentPreimage !== undefined &&
+    !equalBytes(sha256(status.paymentPreimage), request.paymentHash)
+  ) {
+    throw new SparkError("lightning send status: preimage does not match the paid payment hash");
   }
-  return { status: request.status, preimage: request.paymentPreimage };
+  return {
+    status: status.status,
+    ...(status.paymentPreimage === undefined ? {} : { preimage: status.paymentPreimage }),
+  };
 }
 
 /** `user_request` status of a lightning receive, with the inbound transfer id once present. */
