@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test } from "vite-plus/test";
 
 import { decodeBolt11, isExpired } from "../src/core/bolt11.ts";
 import { SparkInputError } from "../src/errors/index.ts";
+import { encodeTestBolt11 } from "./support/bolt11.ts";
 
 const vectors = JSON.parse(
   readFileSync(resolve(import.meta.dirname, "../../../vectors/bolt11.json"), "utf8"),
@@ -80,6 +82,29 @@ test("route hint invoice", () => {
   const hop = inv.routeHints[0]![0]!;
   expect(hop.publicKey).toHaveLength(33);
   expect(hop.shortChannelId).toHaveLength(8);
+});
+
+test("a multi-hop route hint decodes every 51-byte entry", () => {
+  const first = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
+  const second = secp256k1.getPublicKey(new Uint8Array(32).fill(8), true);
+  const inv = decodeBolt11(
+    encodeTestBolt11({
+      secretKey: new Uint8Array(32).fill(66),
+      paymentHash: new Uint8Array(32).fill(1),
+      routeHints: [
+        [
+          { publicKey: first, shortChannelId: hexToBytes("f42400f424000001") },
+          { publicKey: second, shortChannelId: hexToBytes("0102030405060708") },
+        ],
+      ],
+    }),
+  );
+  const hint = inv.routeHints[0]!;
+  expect(hint).toHaveLength(2);
+  expect(hint[0]!.publicKey).toStrictEqual(first);
+  expect(bytesToHex(hint[0]!.shortChannelId)).toBe("f42400f424000001");
+  expect(hint[1]!.publicKey).toStrictEqual(second);
+  expect(bytesToHex(hint[1]!.shortChannelId)).toBe("0102030405060708");
 });
 
 test("pico amount: 9678785340p = 967878534 msat", () => {
