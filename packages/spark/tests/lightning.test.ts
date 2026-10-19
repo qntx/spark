@@ -384,6 +384,14 @@ function fakeSsp(handlers: {
         ...(result.transferId === undefined ? {} : { transferId: result.transferId }),
       });
     },
+    coopExitFeeQuote: async () =>
+      Promise.reject(new SparkRequestError("ssp: coopExitFeeQuote not stubbed")),
+    requestCoopExit: async () =>
+      Promise.reject(new SparkRequestError("ssp: requestCoopExit not stubbed")),
+    completeCoopExit: async () =>
+      Promise.reject(new SparkRequestError("ssp: completeCoopExit not stubbed")),
+    coopExitRequest: async () =>
+      Promise.reject(new SparkRequestError("ssp: coopExitRequest not stubbed")),
   };
   return { ssp, receiveRequests, sendRequests, feeEstimates };
 }

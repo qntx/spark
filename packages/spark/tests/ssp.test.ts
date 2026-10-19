@@ -65,6 +65,22 @@ function fakeSsp(handlers: {
     preimage?: string | null;
   };
   feeEstimate?: { value?: number | string; unit?: string } | null;
+  coopExitQuote?: {
+    id?: string;
+    userFees?: { fast: number; medium: number; slow: number };
+    l1Fees?: { fast: number; medium: number; slow: number };
+    unit?: string;
+    expiresAt?: string;
+  } | null;
+  coopExit?: {
+    id?: string;
+    status?: string;
+    rawCoopExitTransaction?: string;
+    coopExitTxid?: string;
+    rawConnectorTransaction?: string;
+    transferId?: string | null;
+  };
+  completeCoopExit?: { id?: string; status?: string; transferId?: string | null };
   userRequest?: unknown;
 }) {
   const requests: CapturedRequest[] = [];
@@ -231,6 +247,25 @@ function fakeSsp(handlers: {
                   },
                 },
         });
+      case "CoopExitFeeQuote": {
+        const quote = handlers.coopExitQuote;
+        return json({
+          coop_exit_fee_quote:
+            quote === null
+              ? null
+              : {
+                  coop_exit_fee_quote_quote: coopExitQuoteJson(quote ?? {}),
+                },
+        });
+      }
+      case "RequestCoopExit": {
+        const req = handlers.coopExit ?? {};
+        return json({ request_coop_exit: { request: coopExitRequestJson(req) } });
+      }
+      case "CompleteCoopExit": {
+        const req = handlers.completeCoopExit ?? {};
+        return json({ complete_coop_exit: { request: coopExitRequestJson(req) } });
+      }
       case "UserRequest":
         return json({ user_request: handlers.userRequest ?? null });
       default:
@@ -268,6 +303,62 @@ function lightningSendRequestJson(req: {
         ? null
         : { __typename: "Transfer", transfer_spark_id: req.transferId },
     lightning_send_request_payment_preimage: req.preimage ?? null,
+  };
+}
+
+function coopExitQuoteJson(req: {
+  id?: string;
+  userFees?: { fast: number; medium: number; slow: number };
+  l1Fees?: { fast: number; medium: number; slow: number };
+  unit?: string;
+  expiresAt?: string;
+}): Record<string, unknown> {
+  const unit = req.unit ?? "SATOSHI";
+  const amount = (value: number) => ({
+    __typename: "CurrencyAmount",
+    currency_amount_original_value: value,
+    currency_amount_original_unit: unit,
+  });
+  const userFees = req.userFees ?? { fast: 30, medium: 20, slow: 10 };
+  const l1Fees = req.l1Fees ?? { fast: 300, medium: 200, slow: 100 };
+  return {
+    __typename: "CoopExitFeeQuote",
+    coop_exit_fee_quote_id: req.id ?? "quote-1",
+    coop_exit_fee_quote_created_at: "2025-01-01T00:00:00Z",
+    coop_exit_fee_quote_updated_at: "2025-01-01T00:00:00Z",
+    coop_exit_fee_quote_network: "REGTEST",
+    coop_exit_fee_quote_user_fee_fast: amount(userFees.fast),
+    coop_exit_fee_quote_user_fee_medium: amount(userFees.medium),
+    coop_exit_fee_quote_user_fee_slow: amount(userFees.slow),
+    coop_exit_fee_quote_l1_broadcast_fee_fast: amount(l1Fees.fast),
+    coop_exit_fee_quote_l1_broadcast_fee_medium: amount(l1Fees.medium),
+    coop_exit_fee_quote_l1_broadcast_fee_slow: amount(l1Fees.slow),
+    coop_exit_fee_quote_expires_at: req.expiresAt ?? "2025-06-01T00:00:00Z",
+  };
+}
+
+function coopExitRequestJson(req: {
+  id?: string;
+  status?: string;
+  rawCoopExitTransaction?: string;
+  coopExitTxid?: string;
+  rawConnectorTransaction?: string;
+  transferId?: string | null;
+}): Record<string, unknown> {
+  return {
+    __typename: "CoopExitRequest",
+    coop_exit_request_id: req.id ?? "exit-1",
+    coop_exit_request_created_at: "2025-01-01T00:00:00Z",
+    coop_exit_request_updated_at: "2025-01-01T00:00:00Z",
+    coop_exit_request_network: "REGTEST",
+    coop_exit_request_status: req.status ?? "TX_SIGNED",
+    coop_exit_request_raw_connector_transaction: req.rawConnectorTransaction ?? "aabb".repeat(10),
+    coop_exit_request_raw_coop_exit_transaction: req.rawCoopExitTransaction ?? "ccdd".repeat(10),
+    coop_exit_request_coop_exit_txid: req.coopExitTxid ?? "ee".repeat(32),
+    coop_exit_request_transfer:
+      req.transferId === null || req.transferId === undefined
+        ? null
+        : { __typename: "Transfer", transfer_spark_id: req.transferId },
   };
 }
 
@@ -602,6 +693,171 @@ test("lightningReceiveRequest parses status and transfer id; missing request fai
     fetch: fakeSsp({ userRequest: null }).fetchImpl,
   });
   await expect(missing.lightningReceiveRequest("recv-x")).rejects.toMatchObject({
+    code: "unexpected_response",
+  });
+});
+
+const COOP_EXIT_LEAVES = ["0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee"];
+const COOP_EXIT_ADDRESS = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+
+test("coopExitFeeQuote sums user fee + l1 broadcast fee per speed", async () => {
+  const { fetchImpl, requests } = fakeSsp({
+    coopExitQuote: {
+      userFees: { fast: 11, medium: 7, slow: 3 },
+      l1Fees: { fast: 90, medium: 60, slow: 30 },
+      expiresAt: "2025-06-01T12:00:00Z",
+    },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const quote = await client.coopExitFeeQuote(COOP_EXIT_LEAVES, COOP_EXIT_ADDRESS);
+  expect(quote.id).toBe("quote-1");
+  expect(quote.fees).toStrictEqual({ fast: 101, medium: 67, slow: 33 });
+  expect(quote.expiresAtMs).toBe(Date.parse("2025-06-01T12:00:00Z"));
+  const call = requests.find((r) => r.operationName === "CoopExitFeeQuote");
+  expect(call?.authorization).toBe("Bearer ssp-token-1");
+  expect(call?.variables).toStrictEqual({
+    leaf_external_ids: COOP_EXIT_LEAVES,
+    withdrawal_address: COOP_EXIT_ADDRESS,
+  });
+});
+
+test("coopExitFeeQuote rejects non-SATOSHI fees and an unparseable expiry", async () => {
+  const badUnit = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ coopExitQuote: { unit: "MILLISATOSHI" } }).fetchImpl,
+  });
+  await expect(badUnit.coopExitFeeQuote(COOP_EXIT_LEAVES, COOP_EXIT_ADDRESS)).rejects.toMatchObject(
+    { code: "unexpected_response" },
+  );
+  const badDate = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ coopExitQuote: { expiresAt: "not a date" } }).fetchImpl,
+  });
+  await expect(badDate.coopExitFeeQuote(COOP_EXIT_LEAVES, COOP_EXIT_ADDRESS)).rejects.toMatchObject(
+    { code: "unexpected_response" },
+  );
+});
+
+test("requestCoopExit sends withdraw_all variables and parses the transactions", async () => {
+  const { fetchImpl, requests } = fakeSsp({
+    coopExit: {
+      status: "INITIATED",
+      rawCoopExitTransaction: "aa11".repeat(4),
+      coopExitTxid: "bb22".repeat(16),
+      rawConnectorTransaction: "cc33".repeat(4),
+    },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.requestCoopExit({
+    leafIds: COOP_EXIT_LEAVES,
+    withdrawalAddress: COOP_EXIT_ADDRESS,
+    exitSpeed: "MEDIUM",
+    withdrawAll: true,
+    userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+  });
+  expect(result).toStrictEqual({
+    id: "exit-1",
+    status: "INITIATED",
+    rawCoopExitTransaction: hexToBytes("aa11".repeat(4)),
+    coopExitTxid: "bb22".repeat(16),
+    rawConnectorTransaction: hexToBytes("cc33".repeat(4)),
+  });
+  const call = requests.find((r) => r.operationName === "RequestCoopExit");
+  expect(call?.variables).toStrictEqual({
+    leaf_external_ids: COOP_EXIT_LEAVES,
+    withdrawal_address: COOP_EXIT_ADDRESS,
+    exit_speed: "MEDIUM",
+    withdraw_all: true,
+    user_outbound_transfer_external_id: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+  });
+  // Fee-deduction mode sends none of the fee-leaf or idempotency variables.
+  expect(call?.variables).not.toHaveProperty("idempotency_key");
+  expect(call?.variables).not.toHaveProperty("fee_leaf_external_ids");
+  expect(call?.variables).not.toHaveProperty("fee_quote_id");
+});
+
+test("requestCoopExit rejects empty leaves and malformed transaction fields", async () => {
+  const client = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({}).fetchImpl,
+  });
+  await expect(
+    client.requestCoopExit({
+      leafIds: [],
+      withdrawalAddress: COOP_EXIT_ADDRESS,
+      exitSpeed: "FAST",
+      withdrawAll: true,
+      userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+    }),
+  ).rejects.toMatchObject({ name: "SparkInputError" });
+
+  const cases = await Promise.all(
+    [
+      { rawCoopExitTransaction: "zz" },
+      { rawConnectorTransaction: "0x1234" },
+      { coopExitTxid: "abcd" },
+      { coopExitTxid: "not-hex".repeat(4) },
+    ].map(async (mutation) => {
+      const { fetchImpl } = fakeSsp({ coopExit: mutation });
+      const failing = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+      return failing
+        .requestCoopExit({
+          leafIds: COOP_EXIT_LEAVES,
+          withdrawalAddress: COOP_EXIT_ADDRESS,
+          exitSpeed: "SLOW",
+          withdrawAll: true,
+          userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+        })
+        .then(
+          () => "resolved",
+          (error: unknown) => (error as { code?: string }).code,
+        );
+    }),
+  );
+  expect(cases).toStrictEqual([
+    "unexpected_response",
+    "unexpected_response",
+    "unexpected_response",
+    "unexpected_response",
+  ]);
+});
+
+test("completeCoopExit sends both ids and parses the request status", async () => {
+  const { fetchImpl, requests } = fakeSsp({
+    completeCoopExit: { status: "TX_BROADCASTED", id: "exit-9", transferId: "tr-1" },
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.completeCoopExit({
+    coopExitRequestId: "0199aaaa-bbbb-7ccc-8ddd-000000000009",
+    userOutboundTransferExternalId: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+  });
+  expect(result).toStrictEqual({ id: "exit-9", status: "TX_BROADCASTED", transferId: "tr-1" });
+  const call = requests.find((r) => r.operationName === "CompleteCoopExit");
+  expect(call?.variables).toStrictEqual({
+    coop_exit_request_id: "0199aaaa-bbbb-7ccc-8ddd-000000000009",
+    user_outbound_transfer_external_id: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff",
+  });
+});
+
+test("coopExitRequest parses a CoopExitRequest and rejects other request types", async () => {
+  const { fetchImpl, requests } = fakeSsp({
+    userRequest: coopExitRequestJson({ id: "exit-7", status: "SUCCEEDED", transferId: "tr-3" }),
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.coopExitRequest("exit-7");
+  expect(result).toStrictEqual({ id: "exit-7", status: "SUCCEEDED", transferId: "tr-3" });
+  const call = requests.find((r) => r.operationName === "UserRequest");
+  expect(call?.variables).toStrictEqual({ request_id: "exit-7" });
+
+  const wrong = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: fakeSsp({ userRequest: { __typename: "LightningSendRequest" } }).fetchImpl,
+  });
+  await expect(wrong.coopExitRequest("x")).rejects.toMatchObject({
     code: "unexpected_response",
   });
 });
