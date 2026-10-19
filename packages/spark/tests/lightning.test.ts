@@ -560,11 +560,44 @@ describe("createLightningInvoice", () => {
       },
       error: "does not match our identity",
     },
+    {
+      name: "a second spark hop belongs to another identity",
+      create: { amountSats: 1000, includeSparkAddress: true },
+      mutate: (o) => {
+        // Our hop comes first — a first-match scan would accept this; every hop must be ours.
+        o.routeHints = [
+          [
+            ...required(o.routeHints?.[0], "spark hint"),
+            {
+              publicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(45), true),
+              shortChannelId: SPARK_SCID,
+            },
+          ],
+        ];
+      },
+      error: "does not match our identity",
+    },
   ];
 
   test.each(failures)("rejects an invoice with $name and stores nothing", async (failure) => {
     const { deps, stored } = await setup(failure.mutate);
     await expect(createLightningInvoice(deps, failure.create)).rejects.toThrow(failure.error);
+    expect(stored.count).toBe(0);
+  });
+
+  test("rejects malformed options before the signer and the ssp are touched", async () => {
+    const { deps, receiveRequests, stored } = await setup();
+    await expect(
+      createLightningInvoice(deps, { amountSats: 1000, descriptionHash: new Uint8Array(31) }),
+    ).rejects.toThrow("descriptionHash must be 32 bytes");
+    await expect(createLightningInvoice(deps, { amountSats: -1 })).rejects.toThrow(SparkInputError);
+    await expect(createLightningInvoice(deps, { amountSats: 1.5 })).rejects.toThrow(
+      SparkInputError,
+    );
+    await expect(createLightningInvoice(deps, { amountSats: 1000, expirySecs: 0 })).rejects.toThrow(
+      SparkInputError,
+    );
+    expect(receiveRequests).toHaveLength(0);
     expect(stored.count).toBe(0);
   });
 });
