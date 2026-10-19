@@ -43,7 +43,13 @@ function fakeSsp(handlers: {
   feeValue?: number;
   failFirstAuthed?: boolean;
   graphqlError?: { message: string; code?: string };
-  swap?: { status?: string; sparkId?: string | null; feeValue?: number; feeUnit?: string };
+  swap?: {
+    status?: string;
+    sparkId?: string | null;
+    feeValue?: number | string;
+    feeUnit?: string;
+    swapLeaves?: unknown[];
+  };
 }) {
   const requests: CapturedRequest[] = [];
   const challenge = handlers.challenge ?? protectedChallengeFor(SIGNER_PUBLIC_KEY);
@@ -150,7 +156,12 @@ function fakeSsp(handlers: {
               leaves_swap_request_inbound_transfer: inbound,
               leaves_swap_request_outbound_transfer: null,
               leaves_swap_request_expires_at: null,
-              leaves_swap_request_swap_leaves: [],
+              leaves_swap_request_swap_leaves: swap.swapLeaves ?? [
+                {
+                  __typename: "SwapLeaf",
+                  swap_leaf_leaf_id: "swap-leaf-1",
+                },
+              ],
             },
           },
         });
@@ -251,12 +262,48 @@ test("requestSwap sends hex variables and parses the inbound transfer + fee", as
   });
 });
 
-test("requestSwap maps a FAILED swap to swap_failed", async () => {
-  const { fetchImpl } = fakeSsp({ swap: { status: "FAILED" } });
+test("requestSwap maps terminal failure statuses to swap_failed", async () => {
+  const results = await Promise.all(
+    ["FAILED", "EXPIRED"].map(async (status) => {
+      const { fetchImpl } = fakeSsp({ swap: { status } });
+      const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+      return client.requestSwap(SWAP_INPUT).then(
+        () => "resolved",
+        (error: unknown) => (error as { code?: string }).code,
+      );
+    }),
+  );
+  expect(results).toStrictEqual(["swap_failed", "swap_failed"]);
+});
+
+test("requestSwap rejects a missing or empty swap_leaves list", async () => {
+  const { fetchImpl } = fakeSsp({ swap: { swapLeaves: [] } });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
   await expect(client.requestSwap(SWAP_INPUT)).rejects.toMatchObject({
-    code: "swap_failed",
+    code: "unexpected_response",
+    message: expect.stringContaining("swap_leaves"),
   });
+});
+
+test("requestSwap accepts a decimal-string fee but rejects non-decimal forms", async () => {
+  const decimal = fakeSsp({ swap: { sparkId: "in-1", feeValue: "42" } });
+  const ok = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: decimal.fetchImpl });
+  await expect(ok.requestSwap(SWAP_INPUT)).resolves.toMatchObject({ feeSats: 42 });
+  const results = await Promise.all(
+    ["0x10", " 5 ", "1e3"].map(async (feeValue) => {
+      const { fetchImpl } = fakeSsp({ swap: { feeValue } });
+      const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+      return client.requestSwap(SWAP_INPUT).then(
+        () => "resolved",
+        (error: unknown) => (error as { code?: string }).code,
+      );
+    }),
+  );
+  expect(results).toStrictEqual([
+    "unexpected_response",
+    "unexpected_response",
+    "unexpected_response",
+  ]);
 });
 
 test("requestSwap rejects a missing inbound transfer spark id", async () => {

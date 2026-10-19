@@ -1430,6 +1430,7 @@ describe("transfers.swap", () => {
             request_swap: {
               request: {
                 leaves_swap_request_status: "SUCCEEDED",
+                leaves_swap_request_swap_leaves: [{ swap_leaf_leaf_id: "swap-leaf-1" }],
                 leaves_swap_request_inbound_transfer: { transfer_spark_id: INBOUND_ID },
                 leaves_swap_request_fee: {
                   currency_amount_original_value: 0,
@@ -1777,6 +1778,56 @@ describe("transfers.swap", () => {
         random: fixedRandom(),
       }),
     ).rejects.toThrow("already ours");
+    signer.dispose();
+  });
+
+  test("rejects when the SSP declares a fee different from the requested one", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const inbound = await sspInboundTransfer(identity, [
+      { leafId: SWAP_LEAF_ID, valueSats: 100_000n },
+    ]);
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) =>
+        swapResponse(req, leaf),
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+      claim_transfer: async (req: ClaimTransferRequest) =>
+        create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.COUNTER_SWAP_V3,
+            network: Network.REGTEST,
+            leaves: await claimedLeaves(signer, inbound.leaves),
+          }),
+        }),
+    });
+    const { ssp } = fakeSsp({ status: "SUCCEEDED", inboundTransferId: INBOUND_ID, feeSats: 5 });
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toThrow("declared a fee of 5");
     signer.dispose();
   });
 

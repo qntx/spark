@@ -218,11 +218,12 @@ export async function swapLeaves(
       adaptorAddedSignature,
     };
   });
+  const requestedFeeSats = 0;
   const swapResult = await options.ssp.requestSwap({
     adaptorPublicKey,
     totalAmountSats: totalSats,
     targetAmountsSats: options.targetAmountsSats,
-    feeSats: 0,
+    feeSats: requestedFeeSats,
     userLeaves,
     userOutboundTransferId: options.transferId,
   });
@@ -250,14 +251,22 @@ export async function swapLeaves(
     ...(options.call === undefined ? {} : { call: options.call }),
   });
 
+  // Validate against the fee WE requested — an SSP-declared fee that differs means the swap did
+  // not execute on the terms we offered, even though the inbound leaves are already ours.
+  if (swapResult.feeSats !== requestedFeeSats) {
+    throw new SparkError(
+      `swapLeaves: SSP declared a fee of ${swapResult.feeSats} sats but we requested ` +
+        `${requestedFeeSats}; the swap leaves are already ours`,
+    );
+  }
   let claimedTotal = 0;
   for (const leaf of claimed) {
     claimedTotal += leaf.valueSats;
   }
-  if (claimedTotal !== totalSats - swapResult.feeSats) {
+  if (claimedTotal !== totalSats - requestedFeeSats) {
     throw new SparkError(
-      `swapLeaves: claimed ${claimedTotal} sats but expected ${totalSats - swapResult.feeSats} ` +
-        `(inputs ${totalSats} minus fee ${swapResult.feeSats}); the swap leaves are already ours`,
+      `swapLeaves: claimed ${claimedTotal} sats but expected ${totalSats - requestedFeeSats} ` +
+        `(inputs ${totalSats} minus fee ${requestedFeeSats}); the swap leaves are already ours`,
     );
   }
   let remaining = claimed;
