@@ -376,7 +376,7 @@ describe("transfers.send", () => {
     signer.dispose();
   });
 
-  test("rejects amounts without an exact leaf combination", async () => {
+  test("rejects amounts above the available balance", async () => {
     const signer = await testSigner();
     const client = makeClient(signer, {
       query_nodes: () => nodesResponse([]),
@@ -386,7 +386,7 @@ describe("transfers.send", () => {
         receiver: secp256k1.getPublicKey(RECEIVER_SECRET, true),
         amountSats: 50_000,
       }),
-    ).rejects.toThrow("no leaf combination sums exactly");
+    ).rejects.toThrow("insufficient");
     signer.dispose();
   });
 
