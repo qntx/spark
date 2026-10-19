@@ -109,6 +109,8 @@ function fabricateDepositAddress(options: {
   identityPublicKey: Uint8Array;
   corruptProof?: boolean;
   skipOperator?: string;
+  /** When set, the returned address pays to this key instead of `verifyingKey`. */
+  addressOfKey?: Uint8Array;
 }): {
   address: string;
   verifyingKey: Uint8Array;
@@ -120,7 +122,7 @@ function fabricateDepositAddress(options: {
   const verifyingKey = sharePoint
     .add(secp256k1.Point.fromBytes(options.signingPublicKey))
     .toBytes(true);
-  const address = p2trAddressFromPublicKey(verifyingKey, "regtest");
+  const address = p2trAddressFromPublicKey(options.addressOfKey ?? verifyingKey, "regtest");
   const digest = proofOfPossessionDigest(options.identityPublicKey, sharePublicKey, address);
   const { tweak } = taprootTweakedKey(sharePublicKey);
   const evenSecret =
@@ -202,15 +204,22 @@ function depositTxTo(address: string, sats: bigint, extraOutputs: string[] = [])
   return tx.toBytes(true);
 }
 
-function fakeLeaf(id: string) {
+function fakeLeaf(
+  id: string,
+  overrides: {
+    nodeTx?: Uint8Array;
+    refundTx?: Uint8Array;
+    verifyingPublicKey?: Uint8Array;
+  } = {},
+) {
   return create(TreeNodeSchema, {
     id,
     treeId: `tree-${id}`,
     value: 100_000n,
-    nodeTx: new Uint8Array([1, 2]),
-    refundTx: new Uint8Array([3, 4]),
+    nodeTx: overrides.nodeTx ?? new Uint8Array([1, 2]),
+    refundTx: overrides.refundTx ?? new Uint8Array([3, 4]),
     vout: 0,
-    verifyingPublicKey: new Uint8Array(33).fill(5),
+    verifyingPublicKey: overrides.verifyingPublicKey ?? new Uint8Array(33).fill(5),
     ownerIdentityPublicKey: new Uint8Array(33).fill(6),
     ownerSigningPublicKey: new Uint8Array(33).fill(6),
     signingKeyshare: {
@@ -318,12 +327,39 @@ describe("deposits.newAddress", () => {
     );
     signer.dispose();
   });
+
+  test("rejects an address that does not pay to its verifying key", async () => {
+    const signer = await testSigner();
+    const client = makeClient(signer, {
+      generate_deposit_address: (req) => {
+        const fabricated = fabricateDepositAddress({
+          signingPublicKey: req.signingPublicKey,
+          identityPublicKey: req.identityPublicKey,
+          addressOfKey: secp256k1.Point.BASE.toBytes(true),
+        });
+        return create(GenerateDepositAddressResponseSchema, {
+          depositAddress: create(AddressSchema, {
+            address: fabricated.address,
+            verifyingKey: fabricated.verifyingKey,
+            depositAddressProof: create(DepositAddressProofSchema, {
+              addressSignatures: fabricated.addressSignatures,
+              proofOfPossessionSignature: fabricated.proofOfPossessionSignature,
+            }),
+          }),
+        });
+      },
+    });
+    await expect(client.deposits.newAddress()).rejects.toThrow("does not pay to its verifying key");
+    signer.dispose();
+  });
 });
 
 describe("deposits.unused", () => {
   test("pages query_unused_deposit_addresses until a short page", async () => {
     const signer = await testSigner();
     let pages = 0;
+    const entryKey = secp256k1.getPublicKey(new Uint8Array(32).fill(2), true);
+    const entryAddress = p2trAddressFromPublicKey(entryKey, "regtest");
     const client = makeClient(signer, {
       query_unused_deposit_addresses: (req) => {
         pages += 1;
@@ -332,9 +368,9 @@ describe("deposits.unused", () => {
         return create(QueryUnusedDepositAddressesResponseSchema, {
           depositAddresses: batch.map((i) =>
             create(DepositAddressQueryResultSchema, {
-              depositAddress: `bcrt1paddr${i}`,
+              depositAddress: entryAddress,
               userSigningPublicKey: new Uint8Array(33).fill(1),
-              verifyingPublicKey: new Uint8Array(33).fill(2),
+              verifyingPublicKey: entryKey,
               leafId: `leaf-${i}`,
             }),
           ),
@@ -346,10 +382,34 @@ describe("deposits.unused", () => {
     expect(pages).toBe(2);
     expect(unused).toHaveLength(101);
     expect(unused[0]).toStrictEqual({
-      address: "bcrt1paddr0",
+      address: entryAddress,
       leafId: "leaf-0",
-      verifyingPublicKey: new Uint8Array(33).fill(2),
+      verifyingPublicKey: entryKey,
     });
+    signer.dispose();
+  });
+
+  test("rejects an entry whose address does not pay to its verifying key", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(
+      secp256k1.getPublicKey(new Uint8Array(32).fill(2), true),
+      "regtest",
+    );
+    const client = makeClient(signer, {
+      query_unused_deposit_addresses: () =>
+        create(QueryUnusedDepositAddressesResponseSchema, {
+          depositAddresses: [
+            create(DepositAddressQueryResultSchema, {
+              depositAddress: address,
+              userSigningPublicKey: new Uint8Array(33).fill(1),
+              verifyingPublicKey: secp256k1.Point.BASE.toBytes(true),
+              leafId: "leaf-0",
+            }),
+          ],
+          offset: 1n,
+        }),
+    });
+    await expect(client.deposits.unused()).rejects.toThrow("does not pay to its verifying key");
     signer.dispose();
   });
 });
@@ -357,20 +417,65 @@ describe("deposits.unused", () => {
 describe("deposits.claim", () => {
   const LEAF_ID = "01989abc-def0-7abc-89ab-cdef01234567";
 
-  function buildClaimFixture() {
-    const sharePub = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
-    const verifyingKeyFor = (signingPub: Uint8Array): Uint8Array =>
-      secp256k1.Point.BASE.multiply(SHARE_SECRET)
-        .add(secp256k1.Point.fromBytes(signingPub))
-        .toBytes(true);
-    return { sharePub, verifyingKeyFor };
+  // The fake SO holds the full aggregate secret of the deposit verifying key, like the real
+  // operators' keyshares add up to it — that is what lets it produce the aggregated BIP-340
+  // signature a finalized root/refund tx carries.
+  const VERIFYING_SECRET = 0xdeadn;
+  const OTHER_SECRET = 0x99n;
+  const VERIFYING_KEY = secp256k1.Point.BASE.multiply(VERIFYING_SECRET).toBytes(true);
+  const OTHER_KEY = secp256k1.Point.BASE.multiply(OTHER_SECRET).toBytes(true);
+
+  /** Attaches the BIP-340 key-path signature the aggregate would carry for `constructed`. */
+  function signedFinalizedTx(
+    constructed: { txBytes: Uint8Array; sighash: Uint8Array },
+    secret: bigint,
+    verifyingKey: Uint8Array,
+    corrupt?: boolean,
+  ): Uint8Array {
+    const point = secp256k1.Point.fromBytes(verifyingKey);
+    const evenSecret =
+      (point.toAffine().y & 1n) === 0n ? secret : secp256k1.Point.Fn.ORDER - secret;
+    const { tweak } = taprootTweakedKey(verifyingKey);
+    const tweakedSecret =
+      corrupt === true ? secret : mod(evenSecret + tweak, secp256k1.Point.Fn.ORDER);
+    const tx = Transaction.fromRaw(constructed.txBytes, { allowUnknownOutputs: true });
+    tx.updateInput(0, {
+      finalScriptWitness: [
+        schnorr.sign(constructed.sighash, be32(tweakedSecret), new Uint8Array(32).fill(4)),
+      ],
+    });
+    return tx.toBytes(true, true);
+  }
+
+  /** Emulates the coordinator: rebuilds the pair from the request and returns it signed. */
+  function finalizedRootNode(
+    req: FinalizeDepositTreeCreationRequest,
+    options: { secret: bigint; verifyingKey: Uint8Array; wrongTx?: boolean; badSig?: boolean },
+    id = "claimed-1",
+  ) {
+    const utxo = required(req.onChainUtxo, "onChainUtxo");
+    const root = createRootNodeTx(utxo.rawTx, utxo.vout, "regtest");
+    const refunds = createInitialTimelockRefundTxs({
+      nodeTx: root.cpfp.txBytes,
+      receivingPublicKey: required(req.rootTxSigningJob, "root signing job").signingPublicKey,
+      network: "regtest",
+    });
+    return fakeLeaf(id, {
+      nodeTx: signedFinalizedTx(
+        options.wrongTx === true ? root.direct : root.cpfp,
+        options.secret,
+        options.verifyingKey,
+        options.badSig,
+      ),
+      refundTx: signedFinalizedTx(refunds.cpfpRefund, options.secret, options.verifyingKey),
+      verifyingPublicKey: options.verifyingKey,
+    });
   }
 
   test("signs the three jobs and finalizes tree creation", async () => {
     const signer = await testSigner();
     const [signingPublicKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
-    const { verifyingKeyFor } = buildClaimFixture();
-    const verifyingKey = verifyingKeyFor(signingPublicKey!);
+    const verifyingKey = VERIFYING_KEY;
     const address = p2trAddressFromPublicKey(verifyingKey, "regtest");
     const transaction = depositTxTo(address, 100_000n);
 
@@ -411,7 +516,7 @@ describe("deposits.claim", () => {
       finalize_deposit_tree_creation: (req) => {
         finalizeReq = req;
         return create(FinalizeDepositTreeCreationResponseSchema, {
-          rootNode: fakeLeaf("claimed-1"),
+          rootNode: finalizedRootNode(req, { secret: VERIFYING_SECRET, verifyingKey }),
         });
       },
     });
@@ -461,8 +566,7 @@ describe("deposits.claim", () => {
   test("stores the claimed exit chain in the client store", async () => {
     const signer = await testSigner();
     const [signingPublicKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
-    const { verifyingKeyFor } = buildClaimFixture();
-    const verifyingKey = verifyingKeyFor(signingPublicKey!);
+    const verifyingKey = VERIFYING_KEY;
     const address = p2trAddressFromPublicKey(verifyingKey, "regtest");
     const transaction = depositTxTo(address, 100_000n);
 
@@ -490,9 +594,9 @@ describe("deposits.claim", () => {
               }),
             ),
           }),
-        finalize_deposit_tree_creation: () =>
+        finalize_deposit_tree_creation: (req) =>
           create(FinalizeDepositTreeCreationResponseSchema, {
-            rootNode: fakeLeaf("claimed-1"),
+            rootNode: finalizedRootNode(req, { secret: VERIFYING_SECRET, verifyingKey }),
           }),
       },
       store,
@@ -508,8 +612,7 @@ describe("deposits.claim", () => {
   test("rejects when the coordinator returns fewer than three commitments", async () => {
     const signer = await testSigner();
     const [signingPublicKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
-    const { verifyingKeyFor } = buildClaimFixture();
-    const verifyingKey = verifyingKeyFor(signingPublicKey!);
+    const verifyingKey = VERIFYING_KEY;
     const address = p2trAddressFromPublicKey(verifyingKey, "regtest");
     const transaction = depositTxTo(address, 100_000n);
     const client = makeClient(signer, {
@@ -547,9 +650,9 @@ describe("deposits.claim", () => {
         create(QueryUnusedDepositAddressesResponseSchema, {
           depositAddresses: [
             create(DepositAddressQueryResultSchema, {
-              depositAddress: "bcrt1pqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq3z6qj",
+              depositAddress: p2trAddressFromPublicKey(VERIFYING_KEY, "regtest"),
               userSigningPublicKey: new Uint8Array(33).fill(1),
-              verifyingPublicKey: new Uint8Array(33).fill(2),
+              verifyingPublicKey: VERIFYING_KEY,
               leafId: LEAF_ID,
             }),
           ],
@@ -565,22 +668,20 @@ describe("deposits.claim", () => {
 
   test("requires vout when several outputs pay to unused addresses", async () => {
     const signer = await testSigner();
-    const [signingPublicKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
-    const { verifyingKeyFor } = buildClaimFixture();
-    const addrA = p2trAddressFromPublicKey(verifyingKeyFor(signingPublicKey!), "regtest");
-    const addrB = p2trAddressFromPublicKey(
-      secp256k1.Point.BASE.multiply(0x99n).toBytes(true),
-      "regtest",
-    );
+    const addrA = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const addrB = p2trAddressFromPublicKey(OTHER_KEY, "regtest");
     let finalizedVout = -1;
     const client = makeClient(signer, {
       query_unused_deposit_addresses: () =>
         create(QueryUnusedDepositAddressesResponseSchema, {
-          depositAddresses: [addrA, addrB].map((depositAddress, i) =>
+          depositAddresses: [
+            { depositAddress: addrA, verifyingPublicKey: VERIFYING_KEY },
+            { depositAddress: addrB, verifyingPublicKey: OTHER_KEY },
+          ].map((entry, i) =>
             create(DepositAddressQueryResultSchema, {
-              depositAddress,
+              depositAddress: entry.depositAddress,
               userSigningPublicKey: new Uint8Array(33).fill(1),
-              verifyingPublicKey: new Uint8Array(33).fill(2),
+              verifyingPublicKey: entry.verifyingPublicKey,
               leafId: `leaf-${i}`,
             }),
           ),
@@ -605,7 +706,11 @@ describe("deposits.claim", () => {
       finalize_deposit_tree_creation: (req) => {
         finalizedVout = required(req.onChainUtxo, "onChainUtxo").vout;
         return create(FinalizeDepositTreeCreationResponseSchema, {
-          rootNode: fakeLeaf("claimed-vout"),
+          rootNode: finalizedRootNode(
+            req,
+            { secret: OTHER_SECRET, verifyingKey: OTHER_KEY },
+            "claimed-vout",
+          ),
         });
       },
     });
@@ -615,6 +720,81 @@ describe("deposits.claim", () => {
     );
     await expect(client.deposits.claim({ transaction, vout: 1 })).resolves.toBeDefined();
     expect(finalizedVout).toBe(1);
+    signer.dispose();
+  });
+
+  /** A claim whose fake coordinator behaves until `finalize_deposit_tree_creation`. */
+  async function claimWith(finalize: (req: FinalizeDepositTreeCreationRequest) => unknown) {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const transaction = depositTxTo(address, 100_000n);
+    const client = makeClient(signer, {
+      query_unused_deposit_addresses: () =>
+        create(QueryUnusedDepositAddressesResponseSchema, {
+          depositAddresses: [
+            create(DepositAddressQueryResultSchema, {
+              depositAddress: address,
+              userSigningPublicKey: new Uint8Array(33).fill(1),
+              verifyingPublicKey: VERIFYING_KEY,
+              leafId: LEAF_ID,
+            }),
+          ],
+          offset: 1n,
+        }),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: [0, 1, 2].map(() =>
+            create(RequestedSigningCommitmentsSchema, {
+              signingNonceCommitments: {},
+            }),
+          ),
+        }),
+      finalize_deposit_tree_creation: finalize,
+    });
+    return { signer, client, transaction };
+  }
+
+  test("rejects a finalized root node carrying another verifying key", async () => {
+    const { signer, client, transaction } = await claimWith((req) =>
+      create(FinalizeDepositTreeCreationResponseSchema, {
+        rootNode: finalizedRootNode(req, { secret: OTHER_SECRET, verifyingKey: OTHER_KEY }),
+      }),
+    );
+    await expect(client.deposits.claim({ transaction })).rejects.toThrow(
+      "unexpected verifying key",
+    );
+    signer.dispose();
+  });
+
+  test("rejects a finalized root node that is not the transaction we built", async () => {
+    const { signer, client, transaction } = await claimWith((req) =>
+      create(FinalizeDepositTreeCreationResponseSchema, {
+        rootNode: finalizedRootNode(req, {
+          secret: VERIFYING_SECRET,
+          verifyingKey: VERIFYING_KEY,
+          wrongTx: true,
+        }),
+      }),
+    );
+    await expect(client.deposits.claim({ transaction })).rejects.toThrow(
+      "not the transaction we built",
+    );
+    signer.dispose();
+  });
+
+  test("rejects a finalized root node with an invalid taproot signature", async () => {
+    const { signer, client, transaction } = await claimWith((req) =>
+      create(FinalizeDepositTreeCreationResponseSchema, {
+        rootNode: finalizedRootNode(req, {
+          secret: VERIFYING_SECRET,
+          verifyingKey: VERIFYING_KEY,
+          badSig: true,
+        }),
+      }),
+    );
+    await expect(client.deposits.claim({ transaction })).rejects.toThrow(
+      "invalid taproot signature",
+    );
     signer.dispose();
   });
 });

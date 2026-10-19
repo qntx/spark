@@ -1,5 +1,6 @@
 import type { CallOptions, Client } from "@connectrpc/connect";
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
+import { equalBytes } from "@noble/curves/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 import { Address as BitcoinAddress, OutScript } from "@scure/btc-signer";
@@ -10,7 +11,11 @@ import {
   computeTaprootKeyNoScript,
   createInitialTimelockRefundTxs,
   createRootNodeTx,
+  p2trScriptFromPublicKey,
   parseTransaction,
+  taprootKeySpendSighash,
+  txId,
+  verifyFinalizedTaprootSignature,
   xOnlyPublicKey,
 } from "../core/bitcoin/index.ts";
 import { proofOfPossessionDigest } from "../core/hashing/statements.ts";
@@ -44,6 +49,30 @@ export type UnusedDepositAddress = {
 
 const PUBLIC_KEY_LENGTH = 33;
 const UNUSED_PAGE_SIZE = 100;
+
+/**
+ * The BIP-341 key-path P2TR script over a coordinator-supplied verifying key — the only output
+ * script funds at a deposit address may pay to (breez-spark-sdk
+ * `validate_address_pays_to_verifying_key`, services/deposit.rs @956ff90).
+ */
+function depositScript(verifyingKey: Uint8Array, network: SparkNetwork): Uint8Array {
+  try {
+    return p2trScriptFromPublicKey(verifyingKey, network);
+  } catch (error) {
+    throw new SparkError("deposit: verifyingPublicKey is not a valid public key", {
+      cause: error,
+    });
+  }
+}
+
+/** Output script of a coordinator-supplied address, decoded under our network only. */
+function depositAddressScript(address: string, network: SparkNetwork): Uint8Array {
+  try {
+    return OutScript.encode(BitcoinAddress(btcNetwork(network)).decode(address));
+  } catch (error) {
+    throw new SparkError("deposit: address does not decode under our network", { cause: error });
+  }
+}
 
 /**
  * Validates a deposit address exactly like the upstream SDK: the coordinator's proof-of-possession
@@ -123,7 +152,12 @@ export async function generateDepositAddress(
     throw new SparkError("generateDepositAddress: coordinator returned no address");
   }
   validateDepositAddress(response.depositAddress, signingPublicKey, identityPublicKey, options);
-  return response.depositAddress.address;
+  const deposit = response.depositAddress;
+  const expectedScript = depositScript(deposit.verifyingKey, options.network);
+  if (!equalBytes(depositAddressScript(deposit.address, options.network), expectedScript)) {
+    throw new SparkError("deposit address does not pay to its verifying key");
+  }
+  return deposit.address;
 }
 
 /**
@@ -144,11 +178,20 @@ export async function queryUnusedDepositAddresses(
       },
       options.call,
     );
-    const page = response.depositAddresses.map((entry) => ({
-      address: entry.depositAddress,
-      leafId: entry.leafId ?? "",
-      verifyingPublicKey: entry.verifyingPublicKey,
-    }));
+    const page = response.depositAddresses.map((entry) => {
+      const expectedScript = depositScript(entry.verifyingPublicKey, options.network);
+      const actualScript = depositAddressScript(entry.depositAddress, options.network);
+      if (!equalBytes(actualScript, expectedScript)) {
+        throw new SparkError(
+          `deposit: unused address ${entry.depositAddress} does not pay to its verifying key`,
+        );
+      }
+      return {
+        address: entry.depositAddress,
+        leafId: entry.leafId ?? "",
+        verifyingPublicKey: entry.verifyingPublicKey,
+      };
+    });
     if (response.depositAddresses.length < UNUSED_PAGE_SIZE) {
       return page;
     }
@@ -212,6 +255,9 @@ export async function claimDeposit(
   const depositOutput = transaction.getOutput(vout);
   if (depositOutput.script === undefined || depositOutput.amount === undefined) {
     throw new SparkInputError("claimDeposit: deposit output is missing script or amount");
+  }
+  if (!equalBytes(depositOutput.script, depositScript(verifyingPublicKey, network))) {
+    throw new SparkError("claimDeposit: deposit output does not pay to the verifying key");
   }
 
   if (match.result.leafId === "") {
@@ -285,8 +331,49 @@ export async function claimDeposit(
     refundTxSigningJob: signingJobs[1],
     directFromCpfpRefundTxSigningJob: signingJobs[2],
   });
-  if (response.rootNode === undefined) {
+  const { rootNode } = response;
+  if (rootNode === undefined) {
     throw new SparkError("claimDeposit: coordinator returned no root node");
   }
-  return mapTreeNode(response.rootNode);
+  // The coordinator aggregates server-side, so the returned transactions must be the ones we
+  // signed for and carry valid key-path signatures under the tweaked verifying key —
+  // breez-spark-sdk services/deposit.rs @956ff90. direct_from_cpfp carries no signature.
+  if (!equalBytes(rootNode.verifyingPublicKey, verifyingPublicKey)) {
+    throw new SparkError("claimDeposit: root node carries an unexpected verifying key");
+  }
+  const [rootTarget, refundTarget] = targets;
+  if (rootTarget === undefined || refundTarget === undefined) {
+    throw new SparkError("claimDeposit: missing signing targets");
+  }
+  const finalized: ReadonlyArray<{
+    name: string;
+    returned: Uint8Array;
+    built: Uint8Array;
+    target: SigningTarget;
+  }> = [
+    { name: "nodeTx", returned: rootNode.nodeTx, built: root.cpfp.txBytes, target: rootTarget },
+    {
+      name: "refundTx",
+      returned: rootNode.refundTx,
+      built: refunds.cpfpRefund.txBytes,
+      target: refundTarget,
+    },
+  ];
+  for (const entry of finalized) {
+    if (txId(entry.returned) !== txId(entry.built)) {
+      throw new SparkError(`claimDeposit: root node ${entry.name} is not the transaction we built`);
+    }
+    if (
+      !verifyFinalizedTaprootSignature(
+        entry.returned,
+        taprootKeySpendSighash(entry.target),
+        verifyingPublicKey,
+      )
+    ) {
+      throw new SparkError(
+        `claimDeposit: root node ${entry.name} has an invalid taproot signature`,
+      );
+    }
+  }
+  return mapTreeNode(rootNode);
 }
