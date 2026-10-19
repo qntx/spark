@@ -52,6 +52,8 @@ const COOP_EXIT_ACCEPTED = new Set([
   "COMPLETE_REQUEST_RECEIVED",
   "INBOUND_TRANSFER_CHECKED",
   "TX_SIGNED",
+  // Observed live on the hosted SSP right after complete_coop_exit; Breez's enum predates it.
+  "TX_BROADCASTING_SCHEDULED",
   "TX_BROADCASTED",
   "WAITING_ON_TX_CONFIRMATIONS",
   "ON_CHAIN_TX_CONFIRMED",
