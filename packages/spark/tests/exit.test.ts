@@ -1,5 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { createClient, createRouterTransport } from "@connectrpc/connect";
+import type { Transport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { Transaction } from "@scure/btc-signer";
@@ -51,11 +52,16 @@ function leafNode(options: {
   readonly nodeSequence?: number;
   readonly refundSequence?: number;
   readonly hasRefund?: boolean;
+  /** Prebuilt txs (e.g. shared across many fake nodes) — skips construction. */
+  readonly nodeTx?: Uint8Array;
+  readonly refundTx?: Uint8Array;
 }): SparkLeaf {
-  const nodeTx = txSpending(
-    options.parentTx === undefined ? fakeTxid(0x11) : hexToBytes(txId(options.parentTx)),
-    options.nodeSequence ?? 0,
-  );
+  const nodeTx =
+    options.nodeTx ??
+    txSpending(
+      options.parentTx === undefined ? fakeTxid(0x11) : hexToBytes(txId(options.parentTx)),
+      options.nodeSequence ?? 0,
+    );
   return {
     id: options.id,
     treeId: `tree-${options.id}`,
@@ -64,9 +70,10 @@ function leafNode(options: {
     nodeTx,
     // btc-signer keeps input txids in display order.
     refundTx:
-      options.hasRefund === false
+      options.refundTx ??
+      (options.hasRefund === false
         ? new Uint8Array(0)
-        : txSpending(hexToBytes(txId(nodeTx)), options.refundSequence ?? 500),
+        : txSpending(hexToBytes(txId(nodeTx)), options.refundSequence ?? 500)),
     verifyingPublicKey: KEY,
     ownerIdentityPublicKey: new Uint8Array(33).fill(6),
     ownerSigningPublicKey: new Uint8Array(33).fill(6),
@@ -284,6 +291,36 @@ describe("buildExitChains linkage", () => {
   });
 });
 
+describe("buildExitChains memoization", () => {
+  test("verifies a shared ancestor's link once per call", () => {
+    const root = leafNode({ id: "root" });
+    const mid = leafNode({ id: "mid", parent: "root", parentTx: root.nodeTx });
+    // 2000 leaves share mid and reuse identical linked tx bytes: without the
+    // per-call caches this re-parses and re-hashes mid's tx once per leaf.
+    const sharedNodeTx = txSpending(hexToBytes(txId(mid.nodeTx)), 100);
+    const sharedRefundTx = txSpending(hexToBytes(txId(sharedNodeTx)), 500);
+    const nodes = new Map<string, SparkLeaf>([
+      ["root", root],
+      ["mid", mid],
+    ]);
+    const leafIds: string[] = [];
+    for (let i = 0; i < 2000; i++) {
+      const id = `leaf-${i}`;
+      leafIds.push(id);
+      nodes.set(
+        id,
+        leafNode({ id, parent: "mid", nodeTx: sharedNodeTx, refundTx: sharedRefundTx }),
+      );
+    }
+    const started = performance.now();
+    const chains = buildExitChains(leafIds, nodes);
+    const elapsed = performance.now() - started;
+    expect(chains).toHaveLength(2000);
+    expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["root", "mid", "leaf-0"]);
+    expect(elapsed).toBeLessThan(2000);
+  });
+});
+
 describe("unilateralExitTransactions", () => {
   test("queries with nodeIds, includeParents and empty statuses", async () => {
     let captured: unknown;
@@ -381,29 +418,53 @@ describe("queryExitChains", () => {
     for (let i = 0; i < 1001; i++) {
       parentIds.push(`p${i}`);
     }
-    const parents = new Map(parentIds.map((id) => [id, leafNode({ id })]));
+    // One linked parent/leaf/refund tx set shared by every node — this test covers
+    // ancestor-id chunking, so per-node tx construction is wasted work.
+    const parentTx = txSpending(fakeTxid(0x11), 0);
+    const leafTx = txSpending(hexToBytes(txId(parentTx)), 0);
+    const leafRefundTx = txSpending(hexToBytes(txId(leafTx)), 500);
+    const parentProtos = new Map(
+      parentIds.map((id) => [
+        id,
+        treeNodeProto(leafNode({ id, nodeTx: parentTx, refundTx: leafRefundTx })),
+      ]),
+    );
     const leaves = parentIds.map((parent) =>
       leafNode({
         id: `leaf-${parent}`,
         parent,
-        parentTx: required(parents.get(parent)).nodeTx,
+        nodeTx: leafTx,
+        refundTx: leafRefundTx,
       }),
     );
-    // Respond with the parents only for the requested chunk.
+    // Respond with the parents only for the requested chunk, through a direct
+    // transport that skips the serialization round-trip.
     const calls: Array<ReadonlyArray<string>> = [];
-    const transport = createRouterTransport((router) => {
-      router.service(SparkService, {
-        query_nodes: (req: QueryNodesRequest) => {
-          const chunk = nodeIdsFrom(req);
-          calls.push(chunk);
-          const nodes: Record<string, ReturnType<typeof treeNodeProto>> = {};
-          for (const id of chunk) {
-            nodes[id] = treeNodeProto(required(parents.get(id)));
-          }
-          return create(QueryNodesResponseSchema, { nodes, offset: 0n });
-        },
-      });
-    });
+    const transport = {
+      unary: async (
+        _method: unknown,
+        _signal: unknown,
+        _timeoutMs: unknown,
+        _header: unknown,
+        input: unknown,
+      ) => {
+        const chunk = nodeIdsFrom(input as QueryNodesRequest);
+        calls.push(chunk);
+        const nodes: Record<string, ReturnType<typeof treeNodeProto>> = {};
+        for (const id of chunk) {
+          nodes[id] = required(parentProtos.get(id));
+        }
+        return Promise.resolve({
+          stream: false,
+          service: SparkService,
+          method: SparkService.method.query_nodes,
+          header: new Headers(),
+          trailer: new Headers(),
+          message: create(QueryNodesResponseSchema, { nodes, offset: 0n }),
+        });
+      },
+      stream: async () => Promise.reject(new Error("unimplemented")),
+    } as unknown as Transport;
     const spark = createClient(SparkService, transport);
     const chains = await queryExitChains({ spark, network: "regtest", leaves });
     expect(calls.map((chunk) => chunk.length)).toStrictEqual([1000, 1]);

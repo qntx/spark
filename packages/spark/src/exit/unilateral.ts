@@ -70,14 +70,38 @@ function optionalBytes(value: Uint8Array | undefined): Uint8Array | undefined {
   return value === undefined || value.length === 0 ? undefined : value;
 }
 
+type Outpoint = { txid: string; vout: number };
+
+/** Per-`buildExitChains` memoization keyed by transaction bytes identity. */
+type LinkageCache = {
+  readonly txids: Map<Uint8Array, string>;
+  readonly input0: Map<Uint8Array, Outpoint>;
+  readonly verifiedLinks: Set<string>;
+};
+
+function cachedTxId(txBytes: Uint8Array, cache: LinkageCache): string {
+  let cached = cache.txids.get(txBytes);
+  if (cached === undefined) {
+    cached = txId(txBytes);
+    cache.txids.set(txBytes, cached);
+  }
+  return cached;
+}
+
 /** The outpoint input 0 spends: display-order parent txid and output index. */
-function input0Spends(txBytes: Uint8Array, what: string): { txid: string; vout: number } {
+function input0Spends(txBytes: Uint8Array, what: string, cache: LinkageCache): Outpoint {
+  const cached = cache.input0.get(txBytes);
+  if (cached !== undefined) {
+    return cached;
+  }
   const input = parseTransaction(txBytes).getInput(0);
   if (input.txid === undefined || input.index === undefined) {
     throw new SparkError(`unilateral exit: ${what} has no input 0 outpoint`);
   }
   // btc-signer keeps input txids in display order.
-  return { txid: bytesToHex(input.txid), vout: input.index };
+  const outpoint = { txid: bytesToHex(input.txid), vout: input.index };
+  cache.input0.set(txBytes, outpoint);
+  return outpoint;
 }
 
 /**
@@ -86,12 +110,12 @@ function input0Spends(txBytes: Uint8Array, what: string): { txid: string; vout: 
  */
 function requireSpends(
   txBytes: Uint8Array,
-  parentTxBytes: Uint8Array,
-  vout: number,
+  expected: Outpoint,
   what: string,
+  cache: LinkageCache,
 ): void {
-  const spent = input0Spends(txBytes, what);
-  if (spent.txid !== txId(parentTxBytes) || spent.vout !== vout) {
+  const spent = input0Spends(txBytes, what, cache);
+  if (spent.txid !== expected.txid || spent.vout !== expected.vout) {
     throw new SparkError(`unilateral exit: ${what} does not spend its parent output`);
   }
 }
@@ -105,6 +129,9 @@ export function buildExitChains(
   nodes: ReadonlyMap<string, SparkLeaf>,
 ): SparkExitChain[] {
   const chains: SparkExitChain[] = [];
+  // Leaves share ancestors; each node→parent link is verified once and each
+  // transaction is parsed and hashed once per call.
+  const cache: LinkageCache = { txids: new Map(), input0: new Map(), verifiedLinks: new Set() };
   for (const leafId of leafIds) {
     const requested = nodes.get(leafId);
     if (requested === undefined) {
@@ -121,23 +148,30 @@ export function buildExitChains(
     const chain = exitChain(leafId, nodes);
     for (const [i, node] of chain.entries()) {
       const parent = chain[i - 1];
-      if (parent === undefined) {
+      if (parent === undefined || cache.verifiedLinks.has(node.id)) {
         continue;
       }
       requireSpends(
         node.nodeTx,
-        parent.nodeTx,
-        node.vout,
+        { txid: cachedTxId(parent.nodeTx, cache), vout: node.vout },
         `node tx of ${node.id} (parent ${parent.id}, vout ${node.vout})`,
+        cache,
       );
+      cache.verifiedLinks.add(node.id);
     }
-    requireSpends(requested.refundTx, requested.nodeTx, 0, `refund tx of leaf ${leafId}`);
+    const leafNodeTxid = cachedTxId(requested.nodeTx, cache);
+    requireSpends(
+      requested.refundTx,
+      { txid: leafNodeTxid, vout: 0 },
+      `refund tx of leaf ${leafId}`,
+      cache,
+    );
     if (directFromCpfpRefundTx !== undefined) {
       requireSpends(
         directFromCpfpRefundTx,
-        requested.nodeTx,
-        0,
+        { txid: leafNodeTxid, vout: 0 },
         `direct-from-CPFP refund tx of leaf ${leafId}`,
+        cache,
       );
     }
     if (directRefundTx !== undefined) {
@@ -147,7 +181,12 @@ export function buildExitChains(
           `unilateral exit: leaf ${leafId} has a direct refund but no direct tx`,
         );
       }
-      requireSpends(directRefundTx, directTx, 0, `direct refund tx of leaf ${leafId}`);
+      requireSpends(
+        directRefundTx,
+        { txid: cachedTxId(directTx, cache), vout: 0 },
+        `direct refund tx of leaf ${leafId}`,
+        cache,
+      );
     }
     const chainNodes: Array<{
       nodeId: string;
