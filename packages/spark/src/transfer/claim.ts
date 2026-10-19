@@ -255,14 +255,15 @@ export async function claimTransfer(
         signingPublicKey,
       };
     }),
-    (entry, sequence) =>
-      createCurrentTimelockRefundTxs({
+    (entry, sequence) => ({
+      refunds: createCurrentTimelockRefundTxs({
         nodeTx: entry.leaf.nodeTx,
         directNodeTx: entry.leaf.directTx,
         sequence,
         receivingPublicKey: entry.signingPublicKey,
         network,
       }),
+    }),
     signingCommitments.signingCommitments,
     "claimTransfer",
   );

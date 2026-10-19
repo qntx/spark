@@ -46,11 +46,19 @@ function refundTxSequence(refundTxBytes: Uint8Array, context: string): number {
  * per group (CPFP first, then direct, then direct-from-CPFP).
  *
  * `buildRefunds` constructs the leaf's refund trio from its current refund sequence — plain
- * timelock refunds for sends, swaps and claims, HTLC refunds for Lightning sends.
+ * timelock refunds for sends, swaps and claims, HTLC refunds for Lightning sends — plus, when a
+ * refund spends more than one input, the extra prevout that input commits to (the coop-exit
+ * connector output appended as input 1 of every refund).
  */
 export function refundJobGroups(
   leaves: ReadonlyArray<RefundJobLeaf>,
-  buildRefunds: (entry: RefundJobLeaf, sequence: number) => RefundTxTrio,
+  buildRefunds: (
+    entry: RefundJobLeaf,
+    sequence: number,
+  ) => {
+    refunds: RefundTxTrio;
+    extraPrevout?: { readonly script: Uint8Array; readonly amount: number };
+  },
   signingCommitments: ReadonlyArray<RequestedSigningCommitments>,
   context: string,
 ): {
@@ -69,7 +77,10 @@ export function refundJobGroups(
   const directFromCpfp: RefundJobSpec[] = [];
   for (const [i, entry] of leaves.entries()) {
     const nodeOutput = prevout(entry.leaf.nodeTx, 0, `${context} leaf ${entry.leaf.id} node tx`);
-    const refunds = buildRefunds(entry, refundTxSequence(entry.refundTx, context));
+    const { refunds, extraPrevout } = buildRefunds(
+      entry,
+      refundTxSequence(entry.refundTx, context),
+    );
     const commitments = signingCommitments[i];
     const directCommitment = signingCommitments[count + i];
     const directFromCpfpCommitment = signingCommitments[2 * count + i];
@@ -88,7 +99,7 @@ export function refundJobGroups(
       target: {
         transaction: refunds.cpfpRefund.txBytes,
         inputIndex: 0,
-        prevouts: [nodeOutput],
+        prevouts: extraPrevout === undefined ? [nodeOutput] : [nodeOutput, extraPrevout],
       },
       commitments,
     });
@@ -106,7 +117,7 @@ export function refundJobGroups(
         target: {
           transaction: refunds.directRefund.txBytes,
           inputIndex: 0,
-          prevouts: [directOutput],
+          prevouts: extraPrevout === undefined ? [directOutput] : [directOutput, extraPrevout],
         },
         commitments: directCommitment,
       });
@@ -119,7 +130,7 @@ export function refundJobGroups(
       target: {
         transaction: refunds.directFromCpfpRefund.txBytes,
         inputIndex: 0,
-        prevouts: [nodeOutput],
+        prevouts: extraPrevout === undefined ? [nodeOutput] : [nodeOutput, extraPrevout],
       },
       commitments: directFromCpfpCommitment,
     });

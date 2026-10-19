@@ -24,7 +24,13 @@ export async function prepareTransferPackage(
     readonly transferId: string;
     readonly leaves: ReadonlyArray<SparkLeaf>;
     readonly receiverIdentityPublicKey: Uint8Array;
-    readonly buildRefunds: (entry: RefundJobLeaf, sequence: number) => RefundTxTrio;
+    readonly buildRefunds: (
+      entry: RefundJobLeaf,
+      sequence: number,
+    ) => {
+      refunds: RefundTxTrio;
+      extraPrevout?: { readonly script: Uint8Array; readonly amount: number };
+    };
     readonly call?: CallOptions;
   },
 ): Promise<TransferPackage> {
@@ -107,14 +113,15 @@ export async function sendTransfer(
 
   const transferPackage = await prepareTransferPackage({
     ...options,
-    buildRefunds: (entry, sequence) =>
-      createDecrementedTimelockRefundTxs({
+    buildRefunds: (entry, sequence) => ({
+      refunds: createDecrementedTimelockRefundTxs({
         nodeTx: entry.leaf.nodeTx,
         directNodeTx: entry.leaf.directTx,
         sequence,
         receivingPublicKey: options.receiverIdentityPublicKey,
         network,
       }),
+    }),
   });
 
   const response = await spark.start_transfer_v2(
