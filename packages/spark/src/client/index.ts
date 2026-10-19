@@ -7,6 +7,12 @@ import { SparkInputError } from "../errors/index.ts";
 import { createMemorySparkStore } from "../exit/store.ts";
 import type { SparkStore } from "../exit/store.ts";
 import type { ExitTransaction } from "../exit/unilateral.ts";
+import type {
+  LightningInvoice,
+  LightningPayment,
+  LightningReceiveStatus,
+  LightningSendStatus,
+} from "../lightning/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
 import type { SparkTokenBalance, SparkTokenOutput } from "../tokens/index.ts";
@@ -16,6 +22,7 @@ import type { SparkLeaf } from "../tree/index.ts";
 import { createClientContext } from "./context.ts";
 import { createDeposits } from "./deposits.ts";
 import { createInvoices } from "./invoices.ts";
+import { createLightning } from "./lightning.ts";
 import { createTokens } from "./tokens.ts";
 import { createTransfers } from "./transfers.ts";
 import { createWithdrawals } from "./withdrawals.ts";
@@ -105,6 +112,35 @@ export type SparkClient = {
   };
   /** SSP leaves-swap fee quote in sats. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
+  readonly lightning: {
+    /**
+     * Asks the SSP for a BOLT-11 invoice paying this identity. `amountSats` of 0 requests an
+     * amountless invoice; `includeSparkAddress` embeds a Spark fallback address payers can settle
+     * directly. The returned invoice is verified field-by-field before it is handed out.
+     */
+    readonly createInvoice: (options: {
+      readonly amountSats: number;
+      readonly memo?: string;
+      readonly descriptionHash?: Uint8Array;
+      readonly expirySecs?: number;
+      readonly includeSparkAddress?: boolean;
+    }) => Promise<LightningInvoice>;
+    /**
+     * Pays a BOLT-11 invoice via a preimage swap with the SSP. `amountSats` is required for
+     * zero-amount invoices and rejected otherwise; `transferId` makes a retry resume the same
+     * transfer instead of paying twice.
+     */
+    readonly pay: (options: {
+      readonly invoice: string;
+      readonly maxFeeSats: number;
+      readonly amountSats?: number;
+      readonly transferId?: string;
+    }) => Promise<LightningPayment>;
+    /** `user_request` status of a send; `preimage` appears once the SSP settled it. */
+    readonly sendStatus: (requestId: string) => Promise<LightningSendStatus>;
+    /** `user_request` status of a receive, with the inbound transfer id once present. */
+    readonly receiveStatus: (requestId: string) => Promise<LightningReceiveStatus>;
+  };
   readonly deposits: {
     /** Fresh single-use deposit address with a verified proof-of-possession. */
     readonly newAddress: () => Promise<string>;
@@ -305,6 +341,7 @@ export function createSparkClientWith(
     tokens: createTokens(context),
     invoices: createInvoices(context),
     swapFeeEstimate: async (amountSats) => context.sspClient.swapFeeEstimate(amountSats),
+    lightning: createLightning(context),
     deposits: createDeposits(context),
     withdrawals: createWithdrawals(context),
     events,
