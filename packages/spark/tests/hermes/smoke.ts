@@ -31,7 +31,6 @@ const fakeCrypto: SparkCrypto = {
 const DERIVATION = {
   seed: "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
   identity: "02698b27ac308b275671b3ca25436346469d04a5bba578ae39feba1d65897a6abc",
-  deposit: "02f4f6db6cf8f0ab8c9c95659b78448d09ebf490c4251349c6ebef7caf9ad6e10a",
   static0: "029f061ac1595c7b9386624866131a25af763233f8de42e2c5e623687cd67cc1b1",
   leafId: "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c",
   leaf: "0247a58a9af49c825fe343f3d270aad5d77ac567a12b9bff4044e23db9d3369e31",
@@ -129,22 +128,20 @@ export async function main(): Promise<void> {
     network: "regtest",
     random: (length) => new Uint8Array(length).fill(0xab),
   });
-  const [identity, deposit, static0, leaf] = await Promise.all([
+  const [identity, static0, leaf] = await Promise.all([
     sparkSigner.identityPublicKey(),
-    sparkSigner.publicKeys([{ type: "deposit" }]),
     sparkSigner.publicKeys([{ type: "static-deposit", index: 0 }]),
     sparkSigner.publicKeys([{ type: "leaf", leafId: DERIVATION.leafId }]),
   ]);
   assert(bytesToHex(identity) === DERIVATION.identity, "identity pubkey matches upstream vector");
-  assert(bytesToHex(deposit[0]!) === DERIVATION.deposit, "deposit pubkey matches upstream vector");
   assert(bytesToHex(static0[0]!) === DERIVATION.static0, "static-deposit pubkey matches vector");
   assert(bytesToHex(leaf[0]!) === DERIVATION.leaf, "leaf pubkey matches upstream vector");
 
   // signKeySpend covers the BIP-341 tweak + BIP-340 path end to end: verifying the signature
-  // against the vector sighash and the tweaked deposit key checks the digest function too.
-  const signature = await sparkSigner.signKeySpend({ type: "deposit" }, TARGET);
+  // against the vector sighash and the tweaked static-deposit key checks the digest function too.
+  const signature = await sparkSigner.signKeySpend({ type: "static-deposit", index: 0 }, TARGET);
   assert(signature.length === 64, "key-spend signature is 64 bytes");
-  const [tweakedX] = taprootTweakPubkey(hexToBytes(DERIVATION.deposit).slice(1), new Uint8Array());
+  const [tweakedX] = taprootTweakPubkey(hexToBytes(DERIVATION.static0).slice(1), new Uint8Array());
   assert(schnorr.verify(signature, TARGET.sighash, tweakedX), "key-spend signature verifies");
 
   // Hot loops — printed so host runs can compare CPU timings across Hermes builds.
@@ -158,7 +155,7 @@ export async function main(): Promise<void> {
   print(`hermes timing: 100 leaf derivations ${Date.now() - started}ms`);
   started = Date.now();
   for (let i = 0; i < 10; i++) {
-    const sig = await sparkSigner.signKeySpend({ type: "deposit" }, TARGET);
+    const sig = await sparkSigner.signKeySpend({ type: "static-deposit", index: 0 }, TARGET);
     assert(sig.length === 64, "sighash loop signature");
   }
   print(`hermes timing: 10 key-spend sighashes ${Date.now() - started}ms`);

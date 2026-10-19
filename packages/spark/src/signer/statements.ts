@@ -6,16 +6,8 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { taprootKeySpendSighash } from "../core/bitcoin/sighash.ts";
 import { hashSparkInvoice } from "../core/hashing/invoice.ts";
 import {
-  QuoteReason,
-  QuoteRole,
-  hashTransferManifest,
-  quoteEnvelopeDigest,
-  receiveAttestorTarget,
-} from "../core/hashing/manifest.ts";
-import {
   authnChallengeDigest,
   claimPackageDigest,
-  instantStaticDepositStatementDigest,
   sspChallengeDigest,
   staticDepositStatementDigest,
   transferPackageDigest,
@@ -23,14 +15,12 @@ import {
 } from "../core/hashing/statements.ts";
 import { hashPartialTokenTransaction } from "../core/hashing/token.ts";
 import { protoInvoiceToPlain } from "../core/invoice.ts";
-import { sparkNetworkFromProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SparkInputError } from "../errors/index.ts";
 import { ChallengeSchema } from "../proto/gen/spark_authn_pb.ts";
 import {
   ClaimPackageSchema,
   SparkInvoiceFieldsSchema,
-  TransferManifestSchema,
   TransferPackageSchema,
 } from "../proto/gen/spark_pb.ts";
 import { PartialTokenTransactionSchema } from "../proto/gen/spark_token_pb.ts";
@@ -111,19 +101,6 @@ export function statementDigest(
       format: "der",
     };
   }
-  if (statement.kind === "instant-static-deposit") {
-    return {
-      digest: instantStaticDepositStatementDigest({
-        network: statement.network,
-        creditAmountSats: statement.creditAmountSats,
-        secondaryCreditAmountSats: statement.secondaryCreditAmountSats,
-        destinationAddress: statement.destinationAddress,
-        satsValue: statement.satsValue,
-        sspSignature: statement.sspSignature,
-      }),
-      format: "der",
-    };
-  }
   if (statement.kind === "watchtower-recovery") {
     return {
       digest: watchtowerRecoveryStatementDigest(
@@ -131,24 +108,6 @@ export function statementDigest(
         statement.leafId,
         taprootKeySpendSighash(statement.target),
       ),
-      format: "der",
-    };
-  }
-  if (statement.kind === "receive-quote") {
-    const manifest = decode(TransferManifestSchema, statement.manifest, "receive quote");
-    if (sparkNetworkFromProto(manifest.network) !== statement.network) {
-      throw new SparkInputError(
-        "receive quote: manifest network does not match the statement network",
-      );
-    }
-    return {
-      digest: quoteEnvelopeDigest({
-        network: manifest.network,
-        manifestHash: hashTransferManifest(manifest),
-        reason: QuoteReason.RECEIVE,
-        role: QuoteRole.ATTESTOR,
-        target: receiveAttestorTarget(statement.paymentHash),
-      }),
       format: "der",
     };
   }

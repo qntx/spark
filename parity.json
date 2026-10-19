@@ -220,34 +220,6 @@
       ]
     },
     {
-      "id": "transfer-manifest",
-      "implementations": {
-        "rust": {
-          "module": "crates/interop/tests/hashing.rs",
-          "tests": ["crates/interop/tests/hashing.rs"]
-        },
-        "ts": {
-          "module": "packages/spark/src/core/hashing/manifest.ts",
-          "tests": ["packages/spark/tests/hashing.test.ts"]
-        }
-      },
-      "vectors": ["vectors/hashing.json", "vectors/upstream/transfer_manifest_hash_cases.json"]
-    },
-    {
-      "id": "quote-envelope",
-      "implementations": {
-        "rust": {
-          "module": "crates/interop/tests/hashing.rs",
-          "tests": ["crates/interop/tests/hashing.rs"]
-        },
-        "ts": {
-          "module": "packages/spark/src/core/hashing/manifest.ts",
-          "tests": ["packages/spark/tests/hashing.test.ts"]
-        }
-      },
-      "vectors": ["vectors/hashing.json", "vectors/upstream/quote_envelope_cases.json"]
-    },
-    {
       "id": "spark-invoice",
       "implementations": {
         "rust": {

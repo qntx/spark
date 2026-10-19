@@ -7,12 +7,12 @@ import type { SparkNetwork } from "../core/network.ts";
  *
  * - `leaf`: `LEAF{leafId}` path — hardened child `u32be(sha256(utf8(leafId))[0..4]) mod 2^31` of the
  *   signing root (`m/8797555'/a'/1'`).
- * - `deposit`: the deposit key (`m/8797555'/a'/2'`).
  * - `static-deposit`: hardened child `index` of the static-deposit root (`m/8797555'/a'/3'`).
+ *   (`m/8797555'/a'/2'` is upstream's deposit key; single-use deposits bind leaf keys, so it is
+ *   unused.)
  */
 export type SparkLeafKey =
   | { readonly type: "leaf"; readonly leafId: string }
-  | { readonly type: "deposit" }
   | { readonly type: "static-deposit"; readonly index: number };
 
 /**
@@ -20,7 +20,6 @@ export type SparkLeafKey =
  * identity key (ECIES) to recover the 32-byte key the sender sealed for this identity.
  */
 export type SparkKey =
-  | { readonly type: "identity" }
   | SparkLeafKey
   | { readonly type: "received"; readonly ciphertext: Uint8Array };
 
@@ -88,13 +87,10 @@ export type FrostAggregateJob = {
  * - `transfer-package` / `claim-package`: `package` is the serialized `spark.TransferPackage` /
  *   `spark.ClaimPackage`; the digest is computed from the decoded message fields.
  * - `static-deposit-claim`: the fixed-quote claim statement (`txid` in display byte order,
- *   `sspSignature` is the SSP quote signature string).
+ *   `sspSignature` is the SSP quote signature's decoded bytes).
  * - `static-deposit-refund`: the refund statement; `txid`/`vout`/`amount` describe the deposit output
  *   and `target` is the refund transaction whose sighash becomes the payload.
- * - `instant-static-deposit`: the 0-confirmation tagged-hash statement.
  * - `watchtower-recovery`: `target` is the recovery transaction; its sighash enters the digest.
- * - `receive-quote`: `manifest` is a serialized `spark.TransferManifest`; `network` must match the
- *   manifest's own network field.
  * - `spark-invoice`: `invoice` is a serialized `spark.SparkInvoiceFields`; signed with BIP-340.
  * - `token-transaction`: `partialTransaction` is a serialized `spark_token.PartialTokenTransaction`;
  *   the digest is its V3 protoreflecthash, signed with BIP-340 (upstream tokenSignatures:
@@ -125,26 +121,10 @@ export type IdentityStatement =
       readonly target: SigningTarget;
     }
   | {
-      readonly kind: "instant-static-deposit";
-      readonly network: SparkNetwork;
-      readonly creditAmountSats: number;
-      readonly secondaryCreditAmountSats: number;
-      readonly destinationAddress: string;
-      readonly satsValue: number;
-      readonly sspSignature: Uint8Array;
-    }
-  | {
       readonly kind: "watchtower-recovery";
       readonly network: SparkNetwork;
       readonly leafId: string;
       readonly target: SigningTarget;
-    }
-  | {
-      readonly kind: "receive-quote";
-      readonly network: SparkNetwork;
-      /** Serialized `spark.TransferManifest`. */
-      readonly manifest: Uint8Array;
-      readonly paymentHash: Uint8Array;
     }
   | { readonly kind: "spark-invoice"; readonly invoice: Uint8Array }
   | {

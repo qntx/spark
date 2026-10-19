@@ -6,22 +6,10 @@ export {
   hashPartialTokenTransaction,
   hashTokenTransactionV3,
 } from "./token.ts";
-export {
-  QuoteReason,
-  QuoteRole,
-  coopExitTarget,
-  hashSerializedTransferManifest,
-  hashTransferManifest,
-  quoteEnvelopeDigest,
-  receiveAttestorTarget,
-  sendTarget,
-  staticDepositTarget,
-} from "./manifest.ts";
 export { hashSparkInvoice } from "./invoice.ts";
 export {
   authnChallengeDigest,
   claimPackageDigest,
-  instantStaticDepositStatementDigest,
   proofOfPossessionDigest,
   sendLeafSigningDigest,
   sspChallengeDigest,

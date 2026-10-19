@@ -11,15 +11,9 @@ import { describe, expect, test } from "vite-plus/test";
 import type { SigningTarget } from "../src/core/bitcoin/sighash.ts";
 import { taprootKeySpendSighash } from "../src/core/bitcoin/sighash.ts";
 import {
-  QuoteReason,
-  QuoteRole,
   authnChallengeDigest,
   claimPackageDigest,
   hashSparkInvoice,
-  hashTransferManifest,
-  instantStaticDepositStatementDigest,
-  quoteEnvelopeDigest,
-  receiveAttestorTarget,
   sendLeafSigningDigest,
   sspChallengeDigest,
   staticDepositStatementDigest,
@@ -36,11 +30,9 @@ import {
   ClaimLeafKeyTweaksSchema,
   ClaimPackageSchema,
   HashVariant,
-  Network,
   SecretShareSchema,
   SendLeafKeyTweaksSchema,
   SparkInvoiceFieldsSchema,
-  TransferManifestSchema,
   TransferPackageSchema,
 } from "../src/proto/gen/spark_pb.ts";
 import { PartialTokenTransactionSchema } from "../src/proto/gen/spark_token_pb.ts";
@@ -62,7 +54,6 @@ type DerivationCase = {
   account: number;
   account_key: string;
   identity_public_key: string;
-  deposit_public_key: string;
   static_deposit_public_keys: Array<{ index: number; public_key: string }>;
   leaf_public_keys: Array<{ leaf_id: string; public_key: string }>;
 };
@@ -163,23 +154,21 @@ describe("sparkAccountKey + derivation vectors", () => {
   });
 
   test.each(derivation.cases)(
-    "identity/deposit/static/leaf public keys match upstream (case $account)",
+    "identity/static/leaf public keys match upstream (case $account)",
     async (c) => {
       const signer = await signerFor(c.seed_hex, c.account);
       expect(bytesToHex(await signer.identityPublicKey())).toBe(c.identity_public_key);
       const keys = await signer.publicKeys([
-        { type: "deposit" },
         ...c.static_deposit_public_keys.map(
           (k) => ({ type: "static-deposit", index: k.index }) as const,
         ),
         ...c.leaf_public_keys.map((k) => ({ type: "leaf", leafId: k.leaf_id }) as const),
       ]);
-      expect(bytesToHex(keys[0]!)).toBe(c.deposit_public_key);
       for (const [i, k] of c.static_deposit_public_keys.entries()) {
-        expect(bytesToHex(keys[i + 1]!)).toBe(k.public_key);
+        expect(bytesToHex(keys[i]!)).toBe(k.public_key);
       }
       for (const [i, k] of c.leaf_public_keys.entries()) {
-        expect(bytesToHex(keys[i + 1 + c.static_deposit_public_keys.length]!)).toBe(k.public_key);
+        expect(bytesToHex(keys[i + c.static_deposit_public_keys.length]!)).toBe(k.public_key);
       }
       signer.dispose();
     },
@@ -476,34 +465,6 @@ describe("signIdentity", () => {
     signer.dispose();
   });
 
-  test("instant-static-deposit signs the zero-confirmation statement", async () => {
-    const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const identity = await signer.identityPublicKey();
-    const statement = {
-      kind: "instant-static-deposit",
-      network: "regtest",
-      creditAmountSats: 10_000,
-      secondaryCreditAmountSats: 5000,
-      destinationAddress: "bcrt1ptest",
-      satsValue: 9000,
-      sspSignature: new Uint8Array(64).fill(3),
-    } as const;
-    const signature = await signer.signIdentity(statement);
-    expectDerSignature(
-      signature,
-      instantStaticDepositStatementDigest({
-        network: "regtest",
-        creditAmountSats: 10_000,
-        secondaryCreditAmountSats: 5000,
-        destinationAddress: "bcrt1ptest",
-        satsValue: 9000,
-        sspSignature: statement.sspSignature,
-      }),
-      identity,
-    );
-    signer.dispose();
-  });
-
   test("watchtower-recovery signs the recovery statement", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
     const identity = await signer.identityPublicKey();
@@ -518,51 +479,6 @@ describe("signIdentity", () => {
       watchtowerRecoveryStatementDigest("regtest", TRANSFER_ID, taprootKeySpendSighash(TARGET)),
       identity,
     );
-    signer.dispose();
-  });
-
-  test("receive-quote signs the attestor envelope digest", async () => {
-    const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const identity = await signer.identityPublicKey();
-    const manifest = create(TransferManifestSchema, {
-      version: 1,
-      transferId: TRANSFER_ID,
-      network: Network.REGTEST,
-      edges: [
-        {
-          senderIdentityPublicKey: identity,
-          receiverIdentityPublicKey: Point.BASE.toBytes(true),
-          amount: { amount: { case: "sats", value: 1000n } },
-        },
-      ],
-    });
-    const manifestBytes = toBinary(TransferManifestSchema, manifest);
-    const paymentHash = new Uint8Array(32).fill(11);
-    const signature = await signer.signIdentity({
-      kind: "receive-quote",
-      network: "regtest",
-      manifest: manifestBytes,
-      paymentHash,
-    });
-    expectDerSignature(
-      signature,
-      quoteEnvelopeDigest({
-        network: Network.REGTEST,
-        manifestHash: hashTransferManifest(manifest),
-        reason: QuoteReason.RECEIVE,
-        role: QuoteRole.ATTESTOR,
-        target: receiveAttestorTarget(paymentHash),
-      }),
-      identity,
-    );
-    await expect(
-      signer.signIdentity({
-        kind: "receive-quote",
-        network: "mainnet",
-        manifest: manifestBytes,
-        paymentHash,
-      }),
-    ).rejects.toThrow(SparkInputError);
     signer.dispose();
   });
 
@@ -638,10 +554,10 @@ describe("signIdentity", () => {
 describe("signKeySpend", () => {
   test("produces a BIP-340 signature valid under the taproot-tweaked key", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const [depositPublic] = await signer.publicKeys([{ type: "deposit" }]);
-    const signature = await signer.signKeySpend({ type: "deposit" }, TARGET);
+    const [staticPublic] = await signer.publicKeys([{ type: "static-deposit", index: 0 }]);
+    const signature = await signer.signKeySpend({ type: "static-deposit", index: 0 }, TARGET);
     expect(signature).toHaveLength(64);
-    const tweaked = taprootTweakedKey(depositPublic!).point;
+    const tweaked = taprootTweakedKey(staticPublic!).point;
     expect(
       schnorr.verify(signature, taprootKeySpendSighash(TARGET), be32(tweaked.toAffine().x)),
     ).toBe(true);
@@ -801,7 +717,7 @@ describe("FROST sign + aggregate round trip", () => {
     });
     const [commitment] = await signer.newCommitments(1);
     const job = {
-      key: { type: "deposit" } as const,
+      key: { type: "static-deposit", index: 0 } as const,
       target: TARGET,
       verifyingKey: Point.BASE.toBytes(true),
       commitment: commitment!,
@@ -1191,7 +1107,9 @@ describe("signer lifecycle", () => {
     await expect(
       signer.signIdentity({ kind: "ssp-challenge", protectedChallenge: "eA" }),
     ).rejects.toThrow(SparkError);
-    await expect(signer.signKeySpend({ type: "deposit" }, TARGET)).rejects.toThrow(SparkError);
+    await expect(signer.signKeySpend({ type: "static-deposit", index: 0 }, TARGET)).rejects.toThrow(
+      SparkError,
+    );
     await expect(signer.signFrost([])).rejects.toThrow(SparkError);
   });
 
