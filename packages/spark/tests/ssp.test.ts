@@ -22,6 +22,7 @@ function fakeSsp(handlers: {
   feeValue?: number;
   failFirstAuthed?: boolean;
   graphqlError?: { message: string; code?: string };
+  swap?: { status?: string; sparkId?: string | null; feeValue?: number; feeUnit?: string };
 }) {
   const requests: CapturedRequest[] = [];
   const challengeBytes = new Uint8Array(32).fill(9);
@@ -84,6 +85,53 @@ function fakeSsp(handlers: {
           },
         });
 
+      case "RequestSwap": {
+        const swap = handlers.swap ?? {};
+        const inbound =
+          swap.sparkId === null || (swap.sparkId === undefined && swap.status === "FAILED")
+            ? null
+            : {
+                __typename: "Transfer",
+                transfer_total_amount: {
+                  __typename: "CurrencyAmount",
+                  currency_amount_original_value: 0,
+                  currency_amount_original_unit: "SATOSHI",
+                },
+                transfer_spark_id: swap.sparkId ?? "inbound-transfer-1",
+                transfer_user_request: { id: "req-1" },
+              };
+        return json({
+          request_swap: {
+            request: {
+              __typename: "LeavesSwapRequest",
+              leaves_swap_request_id: "swap-1",
+              leaves_swap_request_created_at: "2025-01-01T00:00:00Z",
+              leaves_swap_request_updated_at: "2025-01-01T00:00:00Z",
+              leaves_swap_request_network: "REGTEST",
+              leaves_swap_request_status: swap.status ?? "SUCCEEDED",
+              leaves_swap_request_total_amount: {
+                __typename: "CurrencyAmount",
+                currency_amount_original_value: 0,
+                currency_amount_original_unit: "SATOSHI",
+              },
+              leaves_swap_request_target_amount: {
+                __typename: "CurrencyAmount",
+                currency_amount_original_value: 0,
+                currency_amount_original_unit: "SATOSHI",
+              },
+              leaves_swap_request_fee: {
+                __typename: "CurrencyAmount",
+                currency_amount_original_value: swap.feeValue ?? 42,
+                currency_amount_original_unit: swap.feeUnit ?? "SATOSHI",
+              },
+              leaves_swap_request_inbound_transfer: inbound,
+              leaves_swap_request_outbound_transfer: null,
+              leaves_swap_request_expires_at: null,
+              leaves_swap_request_swap_leaves: [],
+            },
+          },
+        });
+      }
       default:
         return new Response("not found", { status: 404 });
     }
@@ -132,5 +180,74 @@ test("graphql errors map to SparkRequestError with the extensions code", async (
     name: "SparkRequestError",
     code: "bad_user_input",
     message: expect.stringContaining("amount too small"),
+  });
+});
+
+const SWAP_INPUT = {
+  adaptorPublicKey: new Uint8Array(33).fill(2),
+  totalAmountSats: 150,
+  targetAmountsSats: [100],
+  feeSats: 0,
+  userLeaves: [
+    {
+      leafId: "leaf-1",
+      rawUnsignedRefundTransaction: new Uint8Array([1, 2, 3]),
+      adaptorAddedSignature: new Uint8Array(64).fill(4),
+    },
+  ],
+  userOutboundTransferId: "01955cc1-0000-7000-8000-000000000001",
+};
+
+test("requestSwap sends hex variables and parses the inbound transfer + fee", async () => {
+  const { fetchImpl, requests } = fakeSsp({ swap: { sparkId: "inbound-abc", feeValue: 17 } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const result = await client.requestSwap(SWAP_INPUT);
+  expect(result).toStrictEqual({
+    status: "SUCCEEDED",
+    inboundTransferId: "inbound-abc",
+    feeSats: 17,
+  });
+  const call = requests.find((r) => r.operationName === "RequestSwap");
+  expect(call).toBeDefined();
+  expect(call?.authorization).toBe("Bearer ssp-token-1");
+  expect(call?.variables).toStrictEqual({
+    adaptor_pubkey: bytesToHex(SWAP_INPUT.adaptorPublicKey),
+    total_amount_sats: 150,
+    target_amount_sats: [100],
+    fee_sats: 0,
+    user_leaves: [
+      {
+        leaf_id: "leaf-1",
+        raw_unsigned_refund_transaction: bytesToHex(
+          SWAP_INPUT.userLeaves[0]!.rawUnsignedRefundTransaction,
+        ),
+        adaptor_added_signature: bytesToHex(SWAP_INPUT.userLeaves[0]!.adaptorAddedSignature),
+      },
+    ],
+    user_outbound_transfer_external_id: SWAP_INPUT.userOutboundTransferId,
+  });
+});
+
+test("requestSwap maps a FAILED swap to swap_failed", async () => {
+  const { fetchImpl } = fakeSsp({ swap: { status: "FAILED" } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(client.requestSwap(SWAP_INPUT)).rejects.toMatchObject({
+    code: "swap_failed",
+  });
+});
+
+test("requestSwap rejects a missing inbound transfer spark id", async () => {
+  const { fetchImpl } = fakeSsp({ swap: { sparkId: null } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(client.requestSwap(SWAP_INPUT)).rejects.toMatchObject({
+    code: "unexpected_response",
+  });
+});
+
+test("requestSwap rejects a non-SATOSHI fee", async () => {
+  const { fetchImpl } = fakeSsp({ swap: { feeUnit: "MILLISATOSHI" } });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(client.requestSwap(SWAP_INPUT)).rejects.toMatchObject({
+    code: "unexpected_response",
   });
 });
