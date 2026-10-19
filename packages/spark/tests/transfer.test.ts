@@ -1374,6 +1374,14 @@ describe("transfers.swap", () => {
         Promise.reject(new SparkRequestError("ssp: lightningSendRequest not stubbed")),
       lightningReceiveRequest: async () =>
         Promise.reject(new SparkRequestError("ssp: lightningReceiveRequest not stubbed")),
+      coopExitFeeQuote: async () =>
+        Promise.reject(new SparkRequestError("ssp: coopExitFeeQuote not stubbed")),
+      requestCoopExit: async () =>
+        Promise.reject(new SparkRequestError("ssp: requestCoopExit not stubbed")),
+      completeCoopExit: async () =>
+        Promise.reject(new SparkRequestError("ssp: completeCoopExit not stubbed")),
+      coopExitRequest: async () =>
+        Promise.reject(new SparkRequestError("ssp: coopExitRequest not stubbed")),
     };
     return { ssp, requests };
   }
