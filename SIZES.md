@@ -35,7 +35,7 @@ sha256 = 1287f5c192d9b1d122f74988cf766f2507bbf2eca4da4d722b1a47e48fa6ae32
 The `wasm` CI job rebuilds through the same image and diffs the committed
 bytes, uploading its rebuild as an artifact on mismatch.
 
-# Native
+## Native
 
 `packages/spark-native` ships the `spark-ffi` cdylib prebuilt for the React
 Native targets (`bun run build:native` — cargo with the NDK clang linkers for
