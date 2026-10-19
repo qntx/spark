@@ -1,19 +1,16 @@
 import { uuidv7 } from "../core/uuid.ts";
-import { SparkError } from "../errors/index.ts";
 import {
   claimTransfer,
   CLAIMABLE_TRANSFER_STATUSES,
   queryAllTransfers,
   queryPendingTransfers,
   sendTransfer,
-  swapLeaves,
 } from "../transfer/index.ts";
 import type { SparkTransfer } from "../transfer/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
-import { renewLeaf, renewalKind } from "../tree/renew.ts";
-import { selectExact, selectLeaves } from "../tree/select.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
+import { selectSendLeaves } from "./leaves.ts";
 
 /**
  * Sats send shared by `transfers.send` and `invoices.pay`: pick an exact leaf combination, or swap
@@ -28,46 +25,9 @@ export async function sendSats(
     readonly sparkInvoice?: string;
   },
 ): Promise<SparkTransfer> {
-  const { coordinatorConnection, signer, network, store, random, now } = context;
-  const { spark } = coordinatorConnection;
+  const { store, random, now } = context;
 
-  // Renew any leaf whose refund timelock is spent before it leaves the wallet.
-  const renewForSend = async (leaves: ReadonlyArray<SparkLeaf>): Promise<SparkLeaf[]> => {
-    const out: SparkLeaf[] = [];
-    for (const leaf of leaves) {
-      if (renewalKind(leaf) === undefined) {
-        out.push(leaf);
-        continue;
-      }
-      // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order before send
-      out.push(await renewLeaf({ spark, signer, network, leaf }));
-    }
-    return out;
-  };
-
-  const selection = selectLeaves(await context.leaves(), options.amountSats);
-  let sendLeaves: SparkLeaf[];
-  if (selection.kind === "swap") {
-    const swapInputs = await renewForSend(selection.leaves);
-    const claimed = await swapLeaves({
-      ...context.transferCoordinator,
-      ssp: context.sspClient,
-      sspIdentityPublicKey: context.config.ssp.identityPublicKey,
-      transferId: uuidv7(random, now),
-      leaves: swapInputs,
-      targetAmountsSats: [options.amountSats],
-      random,
-    });
-    await store.deleteExitChains(swapInputs.map((leaf) => leaf.id));
-    await context.storeChainsFor(claimed);
-    const exact = selectExact(claimed, options.amountSats);
-    if (exact === undefined) {
-      throw new SparkError(`send: swapped leaves cannot cover ${options.amountSats} sats exactly`);
-    }
-    sendLeaves = await renewForSend(exact);
-  } else {
-    sendLeaves = await renewForSend(selection.leaves);
-  }
+  const sendLeaves = await selectSendLeaves(context, options.amountSats);
   const sent = await sendTransfer({
     ...context.transferCoordinator,
     transferId: uuidv7(random, now),
