@@ -75,6 +75,10 @@ export type {
   SparkTokenOutput,
   SparkTokenOutputStatus,
   SparkInvoiceStatus,
+  StaticDepositClaim,
+  StaticDepositClaimResult,
+  StaticDepositRefund,
+  StaticDepositUtxo,
 } from "../src/index.ts";
 
 function names(mod: object): string[] {
@@ -83,6 +87,7 @@ function names(mod: object): string[] {
 
 test("root runtime exports are exactly the core surface", () => {
   expect(names(root)).toStrictEqual([
+    "MIN_STATIC_REFUND_FEE_SATS",
     "SparkCryptoError",
     "SparkError",
     "SparkInputError",
