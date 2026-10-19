@@ -1,3 +1,4 @@
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 
@@ -6,9 +7,11 @@ import { assertSats, assertU32, MAX_SATS } from "../assert.ts";
 import type { SparkNetwork } from "../network.ts";
 import {
   btcNetwork,
+  computeTaprootKeyNoScript,
   EPHEMERAL_ANCHOR_SCRIPT,
   p2trAddressFromScript,
   p2trScriptFromPublicKey,
+  xOnlyPublicKey,
 } from "./script.ts";
 import {
   checkIfValidSequence,
@@ -68,6 +71,33 @@ export function txIdBytes(txBytes: Uint8Array): Uint8Array {
  */
 export function txIdInputBytes(txBytes: Uint8Array): Uint8Array {
   return hexToBytes(parseTransaction(txBytes).id);
+}
+
+/**
+ * Verifies the aggregated Schnorr key-path signature an operator attaches to a finalized
+ * transaction (e.g. the root node and refund returned by `finalize_deposit_tree_creation`): input
+ * 0's first witness element must be a 64-byte BIP-340 signature over `sighash` under the BIP-341
+ * taproot output key of `verifyingPublicKey` with an empty script tree. Fails closed — any
+ * malformed input returns `false` rather than throwing, matching breez-spark-sdk
+ * `verify_finalized_taproot_signature` (bitcoin/service.rs @956ff90).
+ */
+export function verifyFinalizedTaprootSignature(
+  signedTxBytes: Uint8Array,
+  sighash: Uint8Array,
+  verifyingPublicKey: Uint8Array,
+): boolean {
+  try {
+    const tx = parseTransaction(signedTxBytes);
+    const witness = tx.inputsLength > 0 ? tx.getInput(0).finalScriptWitness : undefined;
+    const signature = witness?.[0];
+    if (signature === undefined || signature.length !== 64 || sighash.length !== 32) {
+      return false;
+    }
+    const taprootKey = computeTaprootKeyNoScript(xOnlyPublicKey(verifyingPublicKey)).subarray(1);
+    return schnorr.verify(signature, sighash, taprootKey);
+  } catch {
+    return false;
+  }
 }
 
 /** Subtracts `feeSats` when the amount can cover it; otherwise returns the amount unchanged. */
