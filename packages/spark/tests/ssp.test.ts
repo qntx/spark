@@ -556,6 +556,20 @@ test("lightningSendRequest parses a settled send with preimage and transfer id",
   expect(result.feeSats).toBe(1);
 });
 
+test("lightningSendRequest maps a non-hex or wrong-length preimage to unexpected_response", async () => {
+  await Promise.all(
+    (["zz".repeat(32), "ab".repeat(31), 42] as const).map(async (preimage) => {
+      const { fetchImpl } = fakeSsp({
+        userRequest: lightningSendRequestJson({ preimage: preimage as string }),
+      });
+      const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+      await expect(client.lightningSendRequest("send-1")).rejects.toMatchObject({
+        code: "unexpected_response",
+      });
+    }),
+  );
+});
+
 test("lightningSendRequest rejects a request of another type", async () => {
   const { fetchImpl } = fakeSsp({
     userRequest: { __typename: "CoopExitRequest" },
