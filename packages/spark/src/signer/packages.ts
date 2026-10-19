@@ -336,21 +336,39 @@ export function prepareLightningReceivePackage(
 }
 
 /**
- * The only method returning private key material: the static-deposit child secret key plus the
- * identity-key DER signature over the claim statement.
+ * The static-deposit claim: ECIES-seals the child secret key to the SSP identity (the same scheme
+ * as transfer leaf secret ciphers) and signs the claim statement with the identity key. The
+ * plaintext key is wiped before returning.
  */
 export function claimStaticDepositPackage(
   request: StaticDepositClaimRequest,
   context: PackageContext,
-): { secretKey: Uint8Array; signature: Uint8Array } {
-  const { keys, network } = context;
+): { encryptedSecretKey: Uint8Array; signature: Uint8Array } {
+  const { crypto, keys, network, random } = context;
   const { digest } = statementDigest(request.statement, {
     identityPoint: keys.identityPoint,
     identityPublicKey: keys.identityPublicKey,
     network,
   });
-  return {
-    secretKey: keys.staticDepositPrivateKey(request.index),
-    signature: ecdsaSign(digest, keys.identityPrivateKey, "der"),
-  };
+  if (request.sspIdentityPublicKey.length !== PUBLIC_KEY_LENGTH) {
+    throw new SparkInputError("claimStaticDeposit: sspIdentityPublicKey must be 33 bytes");
+  }
+  try {
+    secp256k1.Point.fromBytes(request.sspIdentityPublicKey);
+  } catch (error) {
+    throw new SparkInputError("claimStaticDeposit: sspIdentityPublicKey is not a valid point", {
+      cause: error,
+    });
+  }
+  const secret = keys.staticDepositPrivateKey(request.index);
+  try {
+    return {
+      encryptedSecretKey: backendCall(() =>
+        crypto.eciesEncrypt(request.sspIdentityPublicKey, secret, randomBytes(random, 32)),
+      ),
+      signature: ecdsaSign(digest, keys.identityPrivateKey, "der"),
+    };
+  } finally {
+    secret.fill(0);
+  }
 }

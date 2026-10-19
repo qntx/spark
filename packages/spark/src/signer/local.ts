@@ -184,7 +184,7 @@ export function createSparkSigner(options: {
 
   const claimStaticDeposit = async (
     request: StaticDepositClaimRequest,
-  ): Promise<{ secretKey: Uint8Array; signature: Uint8Array }> => {
+  ): Promise<{ encryptedSecretKey: Uint8Array; signature: Uint8Array }> => {
     ensureAlive();
     await ready;
     ensureAlive();

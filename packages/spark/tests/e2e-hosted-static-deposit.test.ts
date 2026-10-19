@@ -6,7 +6,7 @@ import { hostedSeed, hostedWallet } from "./support/hosted.ts";
 
 const UTXO_POLLS = 20;
 const UTXO_POLL_DELAY_MS = 30_000;
-const EXIT_AMOUNT_SATS = 6000;
+const EXIT_AMOUNT_SATS = 4000;
 const FUNDED_ADDRESS = "sparkrt1pgssy2j63j3kmdzg54wavqs2z7yljfmk7j5adt5p4046lk5dzp7qjn3mz0ecyh";
 
 function describeUtxo(utxo: StaticDepositUtxo): string {

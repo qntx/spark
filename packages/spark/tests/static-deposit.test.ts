@@ -133,6 +133,9 @@ async function testSigner(): Promise<SparkSigner> {
 
 const STATIC_PUB_SLOT = { type: "static-deposit", index: 0 } as const;
 
+const SSP_SECRET = new Uint8Array(32).fill(77);
+const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
+
 async function staticPublicKey(signer: SparkSigner): Promise<Uint8Array> {
   const keys = await signer.publicKeys([STATIC_PUB_SLOT]);
   return required(keys[0], "static-deposit public key");
@@ -553,23 +556,25 @@ describe("claimStaticDeposit", () => {
     });
   }
 
-  test("quotes, signs the claim statement, and zeroes the returned secret key", async () => {
+  test("quotes, signs the claim statement, and sends the sealed secret key", async () => {
     const signer = await testSigner();
-    const { fabricated, txid, depositTx, identityPublicKey } = await claimFixture(signer);
+    const { fabricated, txid, depositTx, identityPublicKey, signingPublicKey } =
+      await claimFixture(signer);
     const ssp = fakeSsp({ quoteCredit: QUOTE_CREDIT, claimTransferId: "ssp-transfer-1" });
-    let returnedSecret: Uint8Array | undefined;
+    let sealed: Uint8Array | undefined;
     let claimCalls = 0;
     const spied: SparkSigner = {
       ...signer,
       claimStaticDeposit: async (request) => {
         claimCalls += 1;
+        expect(request.sspIdentityPublicKey).toStrictEqual(SSP_IDENTITY);
         const result = await signer.claimStaticDeposit(request);
-        returnedSecret = new Uint8Array(result.secretKey);
+        sealed = new Uint8Array(result.encryptedSecretKey);
         return result;
       },
     };
     const result = await claimStaticDeposit(
-      { ...claimCoordinator(spied, fabricated), ssp: ssp.ssp },
+      { ...claimCoordinator(spied, fabricated), ssp: ssp.ssp, sspIdentityPublicKey: SSP_IDENTITY },
       { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
     );
     expect(claimCalls).toBe(1);
@@ -598,32 +603,43 @@ describe("claimStaticDeposit", () => {
         prehash: false,
       }),
     ).toBe(true);
-    // The secret key went to the SSP as hex; the copy kept here is unmodified, and the
-    // separate zeroing test proves the signer's own buffer was wiped.
-    const secret = required(returnedSecret, "returned secret key");
-    expect(secret).toHaveLength(32);
-    expect(claim.depositSecretKey).toBe(bytesToHex(secret));
+    // The request carries the ECIES-sealed key: decrypting it with the SSP secret yields the
+    // static-deposit key — the signer test proves the signer-side plaintext wipe.
+    const ciphertext = required(sealed, "sealed secret key");
+    const crypto = await loadWasmBackend();
+    const secret = crypto.eciesDecrypt(SSP_SECRET, ciphertext);
+    try {
+      expect(secret).toHaveLength(32);
+      expect(secp256k1.getPublicKey(secret, true)).toStrictEqual(signingPublicKey);
+    } finally {
+      secret.fill(0);
+    }
+    expect(claim.encryptedSecretKey).toBe(bytesToHex(ciphertext));
     signer.dispose();
   });
 
-  test("zeroes the secret-key buffer the signer returned", async () => {
+  test("rejects a malformed quote signature before asking the signer for the key", async () => {
     const signer = await testSigner();
     const { fabricated, txid, depositTx } = await claimFixture(signer);
-    const ssp = fakeSsp({ quoteCredit: QUOTE_CREDIT });
-    let reference: Uint8Array | undefined;
+    let claimCalls = 0;
     const spied: SparkSigner = {
       ...signer,
       claimStaticDeposit: async (request) => {
-        const result = await signer.claimStaticDeposit(request);
-        reference = result.secretKey;
-        return result;
+        claimCalls += 1;
+        return signer.claimStaticDeposit(request);
       },
     };
-    await claimStaticDeposit(
-      { ...claimCoordinator(spied, fabricated), ssp: ssp.ssp },
-      { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
-    );
-    expect(required(reference, "secret reference").every((b) => b === 0)).toBe(true);
+    await expect(
+      claimStaticDeposit(
+        {
+          ...claimCoordinator(spied, fabricated),
+          ssp: fakeSsp({ quoteCredit: QUOTE_CREDIT, quoteSignature: "zz" }).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
+        },
+        { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
+      ),
+    ).rejects.toMatchObject({ code: "unexpected_response" });
+    expect(claimCalls).toBe(0);
     signer.dispose();
   });
 
@@ -640,7 +656,11 @@ describe("claimStaticDeposit", () => {
     };
     await expect(
       claimStaticDeposit(
-        { ...claimCoordinator(spied, fabricated), ssp: fakeSsp({ quoteCredit: 0 }).ssp },
+        {
+          ...claimCoordinator(spied, fabricated),
+          ssp: fakeSsp({ quoteCredit: 0 }).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
+        },
         { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
       ),
     ).rejects.toThrow("credits 0 sats");
@@ -661,7 +681,11 @@ describe("claimStaticDeposit", () => {
     };
     await expect(
       claimStaticDeposit(
-        { ...claimCoordinator(spied, fabricated), ssp: fakeSsp({ quoteCredit: QUOTE_CREDIT }).ssp },
+        {
+          ...claimCoordinator(spied, fabricated),
+          ssp: fakeSsp({ quoteCredit: QUOTE_CREDIT }).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
+        },
         { txid, vout: 0, maxFeeSats: 199, rawTx: depositTx },
       ),
     ).rejects.toThrow("exceeds maxFeeSats 199");
@@ -675,7 +699,11 @@ describe("claimStaticDeposit", () => {
     const other = txPaying(script, UTXO_SATS);
     await expect(
       claimStaticDeposit(
-        { ...claimCoordinator(signer, fabricated), ssp: fakeSsp({}).ssp },
+        {
+          ...claimCoordinator(signer, fabricated),
+          ssp: fakeSsp({}).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
+        },
         { txid: "ab".repeat(32), vout: 0, maxFeeSats: 500, rawTx: other },
       ),
     ).rejects.toThrow("is not transaction");
@@ -691,7 +719,11 @@ describe("claimStaticDeposit", () => {
     );
     await expect(
       claimStaticDeposit(
-        { ...claimCoordinator(signer, fabricated), ssp: fakeSsp({}).ssp },
+        {
+          ...claimCoordinator(signer, fabricated),
+          ssp: fakeSsp({}).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
+        },
         { txid: txId(foreign), vout: 0, maxFeeSats: 500, rawTx: foreign },
       ),
     ).rejects.toThrow("does not pay our static address");
@@ -706,6 +738,7 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(signer, fabricated, [{ txid, vout: 0 }]),
           ssp: fakeSsp({}).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid, vout: 0, maxFeeSats: 500 },
       ),
@@ -721,6 +754,7 @@ describe("claimStaticDeposit", () => {
       {
         ...claimCoordinator(signer, fabricated, [{ txid, vout: 0, rawTx: depositTx }]),
         ssp: ssp.ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
       },
       { txid, vout: 0, maxFeeSats: 500 },
     );
@@ -740,9 +774,15 @@ describe("refundStaticDeposit", () => {
       txid: new Uint8Array(32),
       vout: 0,
       creditAmountSats: 1,
-      sspSignature: "cd".repeat(64),
+      sspSignature: hexToBytes("cd".repeat(64)),
     };
-    const { secretKey } = await signer.claimStaticDeposit({ index: 0, statement });
+    const { encryptedSecretKey } = await signer.claimStaticDeposit({
+      index: 0,
+      statement,
+      sspIdentityPublicKey: SSP_IDENTITY,
+    });
+    const crypto = await loadWasmBackend();
+    const secretKey = crypto.eciesDecrypt(SSP_SECRET, encryptedSecretKey);
     const userSecret = bytesToNumberBE(secretKey);
     secretKey.fill(0);
     const group = frostGroup(
@@ -1031,8 +1071,6 @@ describe("refundStaticDeposit", () => {
 });
 
 describe("deposits.claimStatic via the client", () => {
-  const SSP_SECRET = new Uint8Array(32).fill(77);
-  const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
   const UTXO_SATS = 5000n;
   const CREDIT_SATS = 4800;
 
@@ -1331,7 +1369,9 @@ describe("deposits.claimStatic via the client", () => {
       sspRequests.find((r) => r.operationName === "ClaimStaticDeposit"),
       "claim_static_deposit call",
     );
-    expect(claimCall.variables["request_type"]).toBe("FIXED_AMOUNT");
+    expect(claimCall.variables["request_type"]).toBeUndefined();
+    expect(claimCall.variables["deposit_secret_key"]).toBeUndefined();
+    expect(claimCall.variables["encrypted_deposit_secret_key"]).toBeTypeOf("string");
     expect(claimCall.variables["transaction_id"]).toBe(txid);
     expect(claimCall.variables["output_index"]).toBe(0);
     expect(claimCall.variables["credit_amount_sats"]).toBe(CREDIT_SATS);

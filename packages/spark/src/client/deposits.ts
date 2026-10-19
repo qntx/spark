@@ -119,7 +119,11 @@ export function createDeposits(context: ClientContext): SparkClient["deposits"] 
     staticUtxos: async () => queryStaticDepositUtxos(context.depositCoordinator),
     claimStatic: async (claimOptions) => {
       const claim = await claimStaticDeposit(
-        { ...context.depositCoordinator, ssp: context.sspClient },
+        {
+          ...context.depositCoordinator,
+          ssp: context.sspClient,
+          sspIdentityPublicKey: context.config.ssp.identityPublicKey,
+        },
         claimOptions,
       );
       const leaves = await claimInboundTransfer(context, claim.transferId);

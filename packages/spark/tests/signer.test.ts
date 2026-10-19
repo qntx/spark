@@ -432,7 +432,7 @@ describe("signIdentity", () => {
       txid,
       vout: 2,
       creditAmountSats: 50_000,
-      sspSignature: "aabbcc",
+      sspSignature: hexToBytes("aabbcc"),
     });
     expectDerSignature(
       signature,
@@ -1095,7 +1095,10 @@ describe("prepareLightningReceive", () => {
 });
 
 describe("claimStaticDeposit + receivedPublicKeys", () => {
-  test("returns the static-deposit secret and a DER statement signature", async () => {
+  const SSP_SECRET = new Uint8Array(32).fill(42);
+  const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
+
+  test("seals the static-deposit secret to the SSP and signs the claim statement", async () => {
     const c = derivation.cases[0]!;
     const signer = await signerFor(c.seed_hex);
     const identity = await signer.identityPublicKey();
@@ -1106,13 +1109,23 @@ describe("claimStaticDeposit + receivedPublicKeys", () => {
       txid,
       vout: 0,
       creditAmountSats: 10_000,
-      sspSignature: "ff00",
+      sspSignature: hexToBytes("ff00"),
     } as const;
-    const result = await signer.claimStaticDeposit({ index: 0, statement });
-    expect(result.secretKey).toHaveLength(32);
-    expect(bytesToHex(Point.BASE.multiply(Fn.fromBytes(result.secretKey)).toBytes(true))).toBe(
-      c.static_deposit_public_keys[0]!.public_key,
-    );
+    const result = await signer.claimStaticDeposit({
+      index: 0,
+      statement,
+      sspIdentityPublicKey: SSP_IDENTITY,
+    });
+    // Only the SSP identity key can open the sealed deposit key.
+    const crypto = await backend();
+    const secret = crypto.eciesDecrypt(SSP_SECRET, result.encryptedSecretKey);
+    try {
+      expect(bytesToHex(Point.BASE.multiply(Fn.fromBytes(secret)).toBytes(true))).toBe(
+        c.static_deposit_public_keys[0]!.public_key,
+      );
+    } finally {
+      secret.fill(0);
+    }
     expectDerSignature(
       result.signature,
       staticDepositStatementDigest({
@@ -1125,6 +1138,33 @@ describe("claimStaticDeposit + receivedPublicKeys", () => {
       }),
       identity,
     );
+    signer.dispose();
+  });
+
+  test("rejects an sspIdentityPublicKey that is not a 33-byte point", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const statement = {
+      kind: "static-deposit-claim",
+      network: "regtest",
+      txid: new Uint8Array(32).fill(9),
+      vout: 0,
+      creditAmountSats: 10_000,
+      sspSignature: hexToBytes("ff00"),
+    } as const;
+    await expect(
+      signer.claimStaticDeposit({
+        index: 0,
+        statement,
+        sspIdentityPublicKey: new Uint8Array(32),
+      }),
+    ).rejects.toThrow(SparkInputError);
+    await expect(
+      signer.claimStaticDeposit({
+        index: 0,
+        statement,
+        sspIdentityPublicKey: new Uint8Array(33).fill(4),
+      }),
+    ).rejects.toThrow(SparkInputError);
     signer.dispose();
   });
 
