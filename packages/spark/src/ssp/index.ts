@@ -2,6 +2,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
 
 import { SESSION_EXPIRY_BUFFER_MS } from "../core/session.ts";
+import { serverErrorText } from "../core/text.ts";
 import { SparkInputError, SparkRequestError } from "../errors/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 
@@ -302,7 +303,7 @@ export function createSspClient(options: {
           ? asObject(extensions, "extensions")["code"]
           : undefined;
       throw new SparkRequestError(
-        `ssp error: ${asString(first["message"], "errors[0].message")}`,
+        `ssp error: ${serverErrorText(asString(first["message"], "errors[0].message"))}`,
         typeof code === "string" ? { code: code.toLowerCase() } : {},
       );
     }

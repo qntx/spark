@@ -494,6 +494,26 @@ test("maps service ERROR bodies to lnurl_error", async () => {
   ).rejects.toThrow("daily limit reached");
 });
 
+test("strips control characters and truncates server error reasons", async () => {
+  const reason = `forged\nfake-log-line\u0007 ${"x".repeat(300)}`;
+  const fetch = fetchJson({ status: "ERROR", reason });
+  const thrown = await requestInvoice(REQUEST, {
+    fetch,
+    network: "mainnet",
+    amountMsat: 5000,
+  }).then(
+    () => {
+      throw new Error("expected rejection");
+    },
+    (error: unknown) => error,
+  );
+  const { message } = thrown as Error;
+  expect(message).not.toContain("\n");
+  expect(message).not.toContain("\u0007");
+  expect(message).toContain("forgedfake-log-line");
+  expect(message.length).toBeLessThanOrEqual("lnurl error: ".length + 256 + 1);
+});
+
 test("works without the WHATWG URL global (React Native polyfill)", async () => {
   const original = globalThis.URL;
   delete (globalThis as { URL?: unknown }).URL;

@@ -86,6 +86,7 @@ export function createSparkSigner(options: {
   const identityPublicKey = async (): Promise<Uint8Array> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return new Uint8Array(keys.identityPublicKey);
   };
 
@@ -94,6 +95,7 @@ export function createSparkSigner(options: {
   ): Promise<ReadonlyArray<Uint8Array>> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     checkBatch(descriptors.length, "publicKeys");
     return keys.publicKeys(descriptors);
   };
@@ -103,6 +105,7 @@ export function createSparkSigner(options: {
   ): Promise<ReadonlyArray<Uint8Array>> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     checkBatch(ciphertexts.length, "receivedPublicKeys");
     return keys.receivedPublicKeys(ciphertexts);
   };
@@ -110,6 +113,7 @@ export function createSparkSigner(options: {
   const newCommitments = async (count: number): Promise<ReadonlyArray<SigningCommitment>> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return nonces.commit(count);
   };
 
@@ -118,6 +122,7 @@ export function createSparkSigner(options: {
   ): Promise<ReadonlyArray<Uint8Array>> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return frostSignJobs(crypto, jobs, keys, nonces);
   };
 
@@ -126,12 +131,14 @@ export function createSparkSigner(options: {
   ): Promise<ReadonlyArray<Uint8Array>> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return frostAggregateJobs(crypto, jobs, keys);
   };
 
   const signIdentity = async (statement: IdentityStatement): Promise<Uint8Array> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     const { digest, format } = statementDigest(statement, statements);
     return signDigest(digest, format, keys.identityPrivateKey, random);
   };
@@ -139,6 +146,7 @@ export function createSparkSigner(options: {
   const signKeySpend = async (key: SparkKey, target: SigningTarget): Promise<Uint8Array> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     const secretKey = keys.resolve(key);
     let tweaked: Uint8Array | undefined;
     try {
@@ -153,12 +161,14 @@ export function createSparkSigner(options: {
   const prepareTransfer = async (request: PrepareTransferRequest): Promise<PreparedTransfer> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return prepareTransferPackage(request, packages);
   };
 
   const prepareClaim = async (request: PrepareClaimRequest): Promise<PreparedClaim> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return prepareClaimPackage(request, packages);
   };
 
@@ -168,6 +178,7 @@ export function createSparkSigner(options: {
   }): Promise<PreparedLightningReceive> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return prepareLightningReceivePackage(request, packages);
   };
 
@@ -176,6 +187,7 @@ export function createSparkSigner(options: {
   ): Promise<{ secretKey: Uint8Array; signature: Uint8Array }> => {
     ensureAlive();
     await ready;
+    ensureAlive();
     return claimStaticDepositPackage(request, packages);
   };
 

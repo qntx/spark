@@ -6,6 +6,7 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 
 import type { SparkOperatorConfig } from "../core/network.ts";
 import { SESSION_EXPIRY_BUFFER_MS } from "../core/session.ts";
+import { serverErrorText } from "../core/text.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import { SparkError, SparkRequestError } from "../errors/index.ts";
 import { ChallengeSchema, SparkAuthnService } from "../proto/gen/spark_authn_pb.ts";
@@ -138,7 +139,7 @@ function toSparkRequestError(error: unknown, operator: SparkOperatorConfig): Spa
     if (error.cause instanceof SparkError) {
       return toSparkRequestError(error.cause, operator);
     }
-    return new SparkRequestError(error.rawMessage, {
+    return new SparkRequestError(serverErrorText(error.rawMessage), {
       code: codeName(error.code),
       operator: operator.identifier,
       cause: error,
