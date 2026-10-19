@@ -70,6 +70,32 @@ function optionalBytes(value: Uint8Array | undefined): Uint8Array | undefined {
   return value === undefined || value.length === 0 ? undefined : value;
 }
 
+/** The outpoint input 0 spends: display-order parent txid and output index. */
+function input0Spends(txBytes: Uint8Array, what: string): { txid: string; vout: number } {
+  const input = parseTransaction(txBytes).getInput(0);
+  if (input.txid === undefined || input.index === undefined) {
+    throw new SparkError(`unilateral exit: ${what} has no input 0 outpoint`);
+  }
+  // btc-signer keeps input txids in display order.
+  return { txid: bytesToHex(input.txid), vout: input.index };
+}
+
+/**
+ * Fails closed on a transaction that does not spend the expected outpoint — a coordinator-supplied
+ * chain whose transactions do not chain together can never be broadcast.
+ */
+function requireSpends(
+  txBytes: Uint8Array,
+  parentTxBytes: Uint8Array,
+  vout: number,
+  what: string,
+): void {
+  const spent = input0Spends(txBytes, what);
+  if (spent.txid !== txId(parentTxBytes) || spent.vout !== vout) {
+    throw new SparkError(`unilateral exit: ${what} does not spend its parent output`);
+  }
+}
+
 /**
  * Builds each requested leaf's storable exit chain from a node map. A requested id the map does not
  * hold is a `SparkInputError`, as is a node carrying no refund (not a leaf).
@@ -89,12 +115,46 @@ export function buildExitChains(
     }
     const directRefundTx = optionalBytes(requested.directRefundTx);
     const directFromCpfpRefundTx = optionalBytes(requested.directFromCpfpRefundTx);
+    // Verify the chain really chains: each node's input 0 spends the parent node's tx at the
+    // output `node.vout` names (Breez tree/mod.rs: "the vout to spend the previous
+    // transaction"), and the leaf's refunds spend the leaf transactions themselves.
+    const chain = exitChain(leafId, nodes);
+    for (const [i, node] of chain.entries()) {
+      const parent = chain[i - 1];
+      if (parent === undefined) {
+        continue;
+      }
+      requireSpends(
+        node.nodeTx,
+        parent.nodeTx,
+        node.vout,
+        `node tx of ${node.id} (parent ${parent.id}, vout ${node.vout})`,
+      );
+    }
+    requireSpends(requested.refundTx, requested.nodeTx, 0, `refund tx of leaf ${leafId}`);
+    if (directFromCpfpRefundTx !== undefined) {
+      requireSpends(
+        directFromCpfpRefundTx,
+        requested.nodeTx,
+        0,
+        `direct-from-CPFP refund tx of leaf ${leafId}`,
+      );
+    }
+    if (directRefundTx !== undefined) {
+      const directTx = optionalBytes(requested.directTx);
+      if (directTx === undefined) {
+        throw new SparkError(
+          `unilateral exit: leaf ${leafId} has a direct refund but no direct tx`,
+        );
+      }
+      requireSpends(directRefundTx, directTx, 0, `direct refund tx of leaf ${leafId}`);
+    }
     const chainNodes: Array<{
       nodeId: string;
       nodeTx: Uint8Array;
       directTx?: Uint8Array;
     }> = [];
-    for (const node of exitChain(leafId, nodes)) {
+    for (const node of chain) {
       const directTx = optionalBytes(node.directTx);
       chainNodes.push({
         nodeId: node.id,
