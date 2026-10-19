@@ -976,7 +976,7 @@ test("staticDepositQuote rejects a null quote", async () => {
   ).rejects.toMatchObject({ code: "unexpected_response" });
 });
 
-test("claimStaticDeposit sends the FIXED_AMOUNT claim and parses the transfer id", async () => {
+test("claimStaticDeposit sends the sealed-key claim and parses the transfer id", async () => {
   const { fetchImpl, requests } = fakeSsp({ claimDeposit: { transferId: "tr-static-1" } });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
   const result = await client.claimStaticDeposit({
@@ -984,7 +984,7 @@ test("claimStaticDeposit sends the FIXED_AMOUNT claim and parses the transfer id
     outputIndex: 2,
     network: "regtest",
     creditAmountSats: 950,
-    depositSecretKey: "01".repeat(32),
+    encryptedSecretKey: "01".repeat(65),
     signature: "3045".concat("02".repeat(66)),
     quoteSignature: "cd".repeat(70),
   });
@@ -994,9 +994,8 @@ test("claimStaticDeposit sends the FIXED_AMOUNT claim and parses the transfer id
     transaction_id: "ab".repeat(32),
     output_index: 2,
     network: "REGTEST",
-    request_type: "FIXED_AMOUNT",
     credit_amount_sats: 950,
-    deposit_secret_key: "01".repeat(32),
+    encrypted_deposit_secret_key: "01".repeat(65),
     signature: "3045".concat("02".repeat(66)),
     quote_signature: "cd".repeat(70),
   });
@@ -1011,7 +1010,7 @@ test("claimStaticDeposit tolerates a null transfer id", async () => {
       outputIndex: 0,
       network: "regtest",
       creditAmountSats: 950,
-      depositSecretKey: "01".repeat(32),
+      encryptedSecretKey: "01".repeat(65),
       signature: "3045".concat("02".repeat(66)),
       quoteSignature: "cd".repeat(70),
     }),

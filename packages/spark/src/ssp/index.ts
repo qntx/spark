@@ -166,8 +166,8 @@ export type SspClaimStaticDepositRequest = {
   readonly outputIndex: number;
   readonly network: SparkNetwork;
   readonly creditAmountSats: number;
-  /** Hex-encoded static-deposit secret key — the only flow that hands a private key to the SSP. */
-  readonly depositSecretKey: string;
+  /** Hex of the static-deposit secret key ECIES-sealed to the SSP identity public key. */
+  readonly encryptedSecretKey: string;
   /** Hex-encoded DER identity signature over the `static-deposit-claim` statement. */
   readonly signature: string;
   /** The quote signature `static_deposit_quote` returned. */
@@ -679,14 +679,17 @@ fragment StaticDepositQuoteOutputFragment on StaticDepositQuoteOutput {
     static_deposit_quote_output_signature: signature
 }`;
 
+// Upstream JS's document sends deposit_secret_key in cleartext; the Lightspark schema
+// (ClaimStaticDepositInput — via breez-spark-sdk's crates/spark/schema/spark.graphql) accepts
+// encrypted_deposit_secret_key, the key ECIES-sealed to the SSP identity, and deprecates
+// request_type. This document sends neither — the raw key never leaves the signer.
 const CLAIM_STATIC_DEPOSIT = `
   mutation ClaimStaticDeposit(
     $transaction_id: String!
     $output_index: Int!
     $network: BitcoinNetwork!
-    $request_type: ClaimStaticDepositRequestType!
     $credit_amount_sats: Long
-    $deposit_secret_key: String!
+    $encrypted_deposit_secret_key: String!
     $signature: String!
     $quote_signature: String!
   ) {
@@ -694,10 +697,9 @@ const CLAIM_STATIC_DEPOSIT = `
       transaction_id: $transaction_id
       output_index: $output_index
       network: $network
-      request_type: $request_type
       credit_amount_sats: $credit_amount_sats
       max_fee_sats: null
-      deposit_secret_key: $deposit_secret_key
+      encrypted_deposit_secret_key: $encrypted_deposit_secret_key
       signature: $signature
       quote_signature: $quote_signature
     }) {
@@ -1551,9 +1553,8 @@ export function createSspClient(options: {
         transaction_id: request.transactionId,
         output_index: request.outputIndex,
         network: request.network === "mainnet" ? "MAINNET" : "REGTEST",
-        request_type: "FIXED_AMOUNT",
         credit_amount_sats: request.creditAmountSats,
-        deposit_secret_key: request.depositSecretKey,
+        encrypted_deposit_secret_key: request.encryptedSecretKey,
         signature: request.signature,
         quote_signature: request.quoteSignature,
       });

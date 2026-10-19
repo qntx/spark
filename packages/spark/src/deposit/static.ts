@@ -16,7 +16,7 @@ import {
   verifyFinalizedTaprootSignature,
 } from "../core/bitcoin/index.ts";
 import { sparkNetworkProto } from "../core/network.ts";
-import { SparkError, SparkInputError } from "../errors/index.ts";
+import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.ts";
 import { HashVariant, SigningJobSchema } from "../proto/gen/spark_pb.ts";
 import type { SigningTarget } from "../signer/types.ts";
 import type { SspClient } from "../ssp/index.ts";
@@ -25,9 +25,9 @@ import type { DepositCoordinator } from "./index.ts";
 
 // Static deposits: upstream spark-wallet.ts getStaticDepositAddress/
 // getUtxosForDepositAddress/claimStaticDepositWithMaxFee/refundStaticDeposit and
-// Breez services/deposit.rs. The claim hands the static-deposit secret key to
-// the SSP — the only flow that does — so every check that can run before the
-// signer reveals it runs first.
+// Breez services/deposit.rs. The claim seals the static-deposit secret key to
+// the SSP inside the signer — the only flow where the key leaves key storage at
+// all — so every check that can run before that happens runs first.
 
 /** Upstream binds every static deposit address to static-deposit key index 0. */
 export const STATIC_DEPOSIT_INDEX = 0;
@@ -249,11 +249,15 @@ async function resolveStaticUtxo(
 /**
  * Claims a confirmed static-deposit UTXO through the SSP: quotes the credit amount, rejects `credit
  * <= 0` and fees over `maxFeeSats` before touching the signer, then authorizes the swap with the
- * `static-deposit-claim` statement and the static key — the only protocol step that reveals a
- * private key (to the SSP).
+ * `static-deposit-claim` statement, and seals the static key to the SSP — the only protocol step
+ * where the key leaves key storage at all.
  */
 export async function claimStaticDeposit(
-  options: DepositCoordinator & { readonly ssp: SspClient; readonly call?: CallOptions },
+  options: DepositCoordinator & {
+    readonly ssp: SspClient;
+    readonly sspIdentityPublicKey: Uint8Array;
+    readonly call?: CallOptions;
+  },
   request: {
     readonly txid: string;
     readonly vout: number;
@@ -289,7 +293,22 @@ export async function claimStaticDeposit(
     );
   }
 
-  const { secretKey, signature } = await signer.claimStaticDeposit({
+  let quoteSignatureBytes: Uint8Array;
+  try {
+    quoteSignatureBytes = hexToBytes(quote.signature);
+  } catch (error) {
+    throw new SparkRequestError("ssp response: quote signature is not hex", {
+      code: "unexpected_response",
+      cause: error,
+    });
+  }
+  if (quoteSignatureBytes.length === 0) {
+    throw new SparkRequestError("ssp response: quote signature is empty", {
+      code: "unexpected_response",
+    });
+  }
+
+  const { encryptedSecretKey, signature } = await signer.claimStaticDeposit({
     index: STATIC_DEPOSIT_INDEX,
     statement: {
       kind: "static-deposit-claim",
@@ -297,28 +316,24 @@ export async function claimStaticDeposit(
       txid: hexToBytes(request.txid),
       vout: request.vout,
       creditAmountSats,
-      sspSignature: quote.signature,
+      sspSignature: quoteSignatureBytes,
     },
+    sspIdentityPublicKey: options.sspIdentityPublicKey,
   });
-  try {
-    const claim = await options.ssp.claimStaticDeposit({
-      transactionId: request.txid,
-      outputIndex: request.vout,
-      network,
-      creditAmountSats,
-      depositSecretKey: bytesToHex(secretKey),
-      signature: bytesToHex(signature),
-      quoteSignature: quote.signature,
-    });
-    return {
-      creditAmountSats,
-      feeSats,
-      ...(claim.transferId === undefined ? {} : { transferId: claim.transferId }),
-    };
-  } finally {
-    // The hex string handed to the SSP cannot be wiped; zero the byte copy.
-    secretKey.fill(0);
-  }
+  const claim = await options.ssp.claimStaticDeposit({
+    transactionId: request.txid,
+    outputIndex: request.vout,
+    network,
+    creditAmountSats,
+    encryptedSecretKey: bytesToHex(encryptedSecretKey),
+    signature: bytesToHex(signature),
+    quoteSignature: quote.signature,
+  });
+  return {
+    creditAmountSats,
+    feeSats,
+    ...(claim.transferId === undefined ? {} : { transferId: claim.transferId }),
+  };
 }
 
 /**

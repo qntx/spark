@@ -67,7 +67,7 @@ export type SignerKeys = {
   readonly accountPrivate: Uint8Array;
   /** Resolves a key descriptor to a private-key copy the caller wipes after use. */
   readonly resolve: (key: SparkKey) => Uint8Array;
-  /** The hardened `index` child of the static-deposit root — live reference. */
+  /** The hardened `index` child of the static-deposit root — fresh derivation owned by the caller. */
   readonly staticDepositPrivateKey: (index: number) => Uint8Array;
   /** Compressed public keys for the given descriptors, in order. */
   readonly publicKeys: (keys: ReadonlyArray<SparkLeafKey>) => ReadonlyArray<Uint8Array>;

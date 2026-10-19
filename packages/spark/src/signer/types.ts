@@ -112,8 +112,8 @@ export type IdentityStatement =
       readonly txid: Uint8Array;
       readonly vout: number;
       readonly creditAmountSats: number;
-      /** The SSP quote signature as hex; its decoded bytes enter the statement payload. */
-      readonly sspSignature: string;
+      /** The SSP's quote signature bytes — the payload the statement hashes. */
+      readonly sspSignature: Uint8Array;
     }
   | {
       readonly kind: "static-deposit-refund";
@@ -224,11 +224,16 @@ export type PreparedLightningReceive = {
   readonly operatorPackages: Record<string, Uint8Array>;
 };
 
-/** The static-deposit claim request: which key index and the statement the SSP expects signed. */
+/**
+ * The static-deposit claim request: which key index, the statement the SSP expects signed, and the
+ * SSP identity public key the deposit secret is sealed to.
+ */
 export type StaticDepositClaimRequest = {
   /** Static-deposit child index (upstream uses 0 for the current deposit address). */
   readonly index: number;
   readonly statement: Extract<IdentityStatement, { readonly kind: "static-deposit-claim" }>;
+  /** The SSP's compressed identity public key — the deposit secret is ECIES-sealed to it. */
+  readonly sspIdentityPublicKey: Uint8Array;
 };
 
 /**
@@ -285,12 +290,13 @@ export type SparkSigner = {
     readonly threshold: number;
   }) => Promise<PreparedLightningReceive>;
   /**
-   * The only method returning private key material (the SSP claim protocol requires it): the
-   * static-deposit child secret key plus the identity-key DER signature over the claim statement.
+   * The static-deposit claim: the child secret key ECIES-sealed to `sspIdentityPublicKey` (the same
+   * scheme as transfer leaf secret ciphers) plus the identity-key DER signature over the claim
+   * statement. The plaintext key never leaves the signer.
    */
   readonly claimStaticDeposit: (
     request: StaticDepositClaimRequest,
-  ) => Promise<{ readonly secretKey: Uint8Array; readonly signature: Uint8Array }>;
+  ) => Promise<{ readonly encryptedSecretKey: Uint8Array; readonly signature: Uint8Array }>;
   /** Wipes every private key, cached secret and unused nonce, then rejects all further calls. */
   readonly dispose: () => void;
 };
