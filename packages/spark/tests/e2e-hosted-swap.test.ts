@@ -13,6 +13,46 @@ const FUNDED_ADDRESS = "sparkrt1pgssy2j63j3kmdzg54wavqs2z7yljfmk7j5adt5p4046lk5d
 
 const denominations = (leaves: ReadonlyArray<SparkLeaf>): number[] =>
   leaves.map((leaf) => leaf.valueSats);
+
+/**
+ * Returns whichever wallet ended the test ahead to its starting balance: spark sends conserve sats,
+ * so at most one side can be up — and a whole-balance send would also sweep every leaf the account
+ * has ever accumulated into one transfer.
+ */
+async function returnNetGain(
+  clientA: HostedWallet["client"],
+  clientB: HostedWallet["client"],
+  identityA: Uint8Array,
+  identityB: Uint8Array,
+  balanceA0: number,
+  balanceB0: number,
+): Promise<void> {
+  const balanceA1 = await clientA.balance();
+  const balanceB1 = await clientB.balance();
+  if (balanceB1 > balanceB0) {
+    const sentBack = await clientB.transfers.send({
+      receiver: identityA,
+      amountSats: balanceB1 - balanceB0,
+    });
+    console.log("B sent back:", sentBack.id, sentBack.status);
+    const reclaimed = await claimPendingUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
+    if (reclaimed.length === 0) {
+      throw new Error("A never claimed the returned sats");
+    }
+    console.log("A reclaimed denominations:", denominations(reclaimed));
+  } else if (balanceA1 > balanceA0) {
+    const sentBack = await clientA.transfers.send({
+      receiver: identityB,
+      amountSats: balanceA1 - balanceA0,
+    });
+    console.log("A sent back:", sentBack.id, sentBack.status);
+    const reclaimed = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    if (reclaimed.length === 0) {
+      throw new Error("B never claimed the returned sats");
+    }
+    console.log("B reclaimed denominations:", denominations(reclaimed));
+  }
+}
 function totalSats(leaves: ReadonlyArray<SparkLeaf>): number {
   let sum = 0;
   for (const leaf of leaves) {
@@ -115,7 +155,7 @@ function pickMultiSwapSender(options: {
 }
 
 describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest leaves swap", () => {
-  test("A pays B unselectable amounts via single-leaf and multi-leaf swaps; B returns the balance", async (ctx) => {
+  test("A pays B unselectable amounts via single-leaf and multi-leaf swaps; the net gain returns", async (ctx) => {
     const seed = hostedSeed();
     const walletA = await hostedWallet(seed, 0);
     const walletB = await hostedWallet(seed, 1);
@@ -200,15 +240,10 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest leaves 
     await expect(sender.balance()).resolves.toBe(senderBefore - satsMulti);
     await expect(receiver.balance()).resolves.toBe(receiverBefore + satsMulti);
 
-    const sentBack = await clientB.transfers.send({
-      receiver: identityA,
-      amountSats: await clientB.balance(),
-    });
-    console.log("B sent back:", sentBack.id, sentBack.status);
-    const reclaimed = await claimPendingUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
-    expect(reclaimed.length).toBeGreaterThan(0);
-    console.log("A reclaimed denominations:", denominations(reclaimed));
-    await expect(clientA.balance()).resolves.toBe(balanceA0 + balanceB0);
+    // Return this test's net gain so the accounts end where they started.
+    await returnNetGain(clientA, clientB, identityA, identityB, balanceA0, balanceB0);
+    await expect(clientA.balance()).resolves.toBe(balanceA0);
+    await expect(clientB.balance()).resolves.toBe(balanceB0);
     console.log("A denominations final:", denominations(await clientA.leaves()));
 
     clientA.close();

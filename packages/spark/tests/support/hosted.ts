@@ -8,6 +8,7 @@ import { createMemorySparkStore } from "../../src/exit/store.ts";
 import type { LightningSendStatus } from "../../src/lightning/index.ts";
 import { createSparkSigner, sparkAccountKey } from "../../src/signer/index.ts";
 import { loadWasmBackend } from "./backend.ts";
+import { claimPendingUntil } from "./local.ts";
 
 // Opt-in: SPARK_E2E_HOSTED=1. The funded-account seed comes from SPARK_HOSTED_SEED or the
 // gitignored .env.hosted at the repo root (mode 600); its value is never logged.
@@ -42,6 +43,28 @@ export type HostedWallet = {
   readonly store: ReturnType<typeof createMemorySparkStore>;
   readonly client: ReturnType<typeof createSparkClient>;
 };
+
+/**
+ * Sends `amountSats` to `receiverIdentity` when positive and waits for the receiver's claim; a zero
+ * shortfall is a no-op. Hosted tests share one funded seed, so cross-account flows use this for the
+ * payer's shortfall and the end-of-test return — the funder loses only real fees.
+ */
+export async function sendAndClaimIfPositive(
+  sender: HostedWallet["client"],
+  receiver: HostedWallet["client"],
+  receiverIdentity: Uint8Array,
+  amountSats: number,
+  deadline: number,
+): Promise<void> {
+  if (amountSats === 0) {
+    return;
+  }
+  await sender.transfers.send({ receiver: receiverIdentity, amountSats });
+  const claimed = await claimPendingUntil(receiver, deadline);
+  if (claimed.length === 0) {
+    throw new Error("the receiver never claimed the sent sats");
+  }
+}
 
 /** Signer + client + memory store for one account index on the hosted regtest deployment. */
 export async function hostedWallet(seed: Uint8Array, account: number): Promise<HostedWallet> {
