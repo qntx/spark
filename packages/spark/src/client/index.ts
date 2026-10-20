@@ -34,6 +34,8 @@ import { createDeposits } from "./deposits.ts";
 import type { StaticDepositClaimResult } from "./deposits.ts";
 import { createInvoices } from "./invoices.ts";
 import { createLightning } from "./lightning.ts";
+import { optimizeLeaves } from "./optimize.ts";
+import type { OptimizeLeavesOptions, OptimizeLeavesResult } from "./optimize.ts";
 import { createWalletSettings } from "./settings.ts";
 import { createTokens } from "./tokens.ts";
 import { createTransfers } from "./transfers.ts";
@@ -46,6 +48,17 @@ export type SparkClient = {
   readonly balance: () => Promise<number>;
   /** The owner's `AVAILABLE` leaves from the coordinator's `query_nodes`. */
   readonly leaves: () => Promise<ReadonlyArray<SparkLeaf>>;
+  /**
+   * Reshapes leaf denominations through zero-fee SSP swaps (upstream `optimizeLeaves`): with
+   * `multiplicity` 1–5 (default 1) each power of two is kept up to that many times so sends can pay
+   * from exact leaves without a swap; `multiplicity` 0 consolidates into the fewest leaves
+   * (cheapest unilateral exit). Swaps run one at a time under the leaf lock — a concurrent spend
+   * sees a consistent leaf set between rounds. The wallet decides when to call this (e.g. after
+   * claims); nothing schedules it. Returns the executed swap count and leaf counts before/after.
+   */
+  readonly optimizeLeaves: (
+    optimizeOptions?: OptimizeLeavesOptions,
+  ) => Promise<OptimizeLeavesResult>;
   readonly transfers: {
     /** Transfers awaiting this identity as receiver. */
     readonly pending: () => Promise<ReadonlyArray<SparkTransfer>>;
@@ -492,6 +505,7 @@ export function createSparkClientWith(
     identityPublicKey: async () => options.signer.identityPublicKey(),
     balance: async () => leavesBalance(await context.leaves()),
     leaves: context.leaves,
+    optimizeLeaves: async (optimizeOptions) => optimizeLeaves(context, optimizeOptions),
     transfers: createTransfers(context),
     tokens: createTokens(context),
     invoices: createInvoices(context),
