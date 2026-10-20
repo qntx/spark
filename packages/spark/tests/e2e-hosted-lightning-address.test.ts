@@ -13,7 +13,13 @@ import {
   createMemoryLightningAddressStore,
 } from "../src/server/index.ts";
 import type { LightningAddressInvoice, LightningAddressServer } from "../src/server/index.ts";
-import { hostedSeed, hostedWallet, sendStatusUntil, sleep } from "./support/hosted.ts";
+import {
+  hostedSeed,
+  hostedWallet,
+  sendAndClaimIfPositive,
+  sendStatusUntil,
+  sleep,
+} from "./support/hosted.ts";
 import { claimPendingUntil, required } from "./support/local.ts";
 
 const CLAIM_DEADLINE_MS = 180_000;
@@ -86,13 +92,19 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       const { paymentHash } = decodeBolt11(offer.pr);
       console.log("invoice:", offer.pr.slice(0, 60), "verify:", offer.verify);
 
-      // Fund the payer with a fixed 5,000 sats from account 0, then pay.
+      // Fund the payer only for what this payment needs (invoice plus the max fee); the
+      // top-up comes back to account 0 at the end, so the funder loses only the fee.
       const payerIdentity = await payer.client.identityPublicKey();
-      await funder.client.transfers.send({ receiver: payerIdentity, amountSats: 5000 });
-      const funded = await claimPendingUntil(payer.client, Date.now() + CLAIM_DEADLINE_MS);
-      expect(funded.length).toBeGreaterThan(0);
-      const balanceP1 = await payer.client.balance();
-      expect(balanceP1).toBe(balanceP0 + 5000);
+      const funderIdentity = await funder.client.identityPublicKey();
+      const topUp = Math.max(0, 700 + 50 - balanceP0);
+      await sendAndClaimIfPositive(
+        funder.client,
+        payer.client,
+        payerIdentity,
+        topUp,
+        Date.now() + CLAIM_DEADLINE_MS,
+      );
+      await expect(payer.client.balance()).resolves.toBe(balanceP0 + topUp);
 
       const payment = await payer.client.lightning.pay({ invoice: offer.pr, maxFeeSats: 50 });
       console.log("payment:", payment.requestId, payment.status, "fee:", payment.feeSats);
@@ -123,13 +135,25 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       expect(claimed.length).toBeGreaterThan(0);
       await expect(registrant.client.balance()).resolves.toBe(balanceR0 + 700);
 
-      // Close the loop: the registrant returns the 700 sats to the payer, so the only loss is
-      // the lightning fee the payer spent (and the 5,000 the funder put in).
+      // Close the loop: the registrant returns the 700 sats to the payer, and the payer
+      // returns the top-up less the fee it covered — account 0 loses only the fee.
       await registrant.client.transfers.send({ receiver: payerIdentity, amountSats: 700 });
       const returned = await claimPendingUntil(payer.client, Date.now() + CLAIM_DEADLINE_MS);
       expect(returned.length).toBeGreaterThan(0);
       await expect(registrant.client.balance()).resolves.toBe(balanceR0);
-      await expect(payer.client.balance()).resolves.toBe(balanceP1 - payment.feeSats);
+
+      const refund = Math.max(0, topUp - payment.feeSats);
+      await sendAndClaimIfPositive(
+        payer.client,
+        funder.client,
+        funderIdentity,
+        refund,
+        Date.now() + CLAIM_DEADLINE_MS,
+      );
+      await expect(funder.client.balance()).resolves.toBe(balanceF0 - topUp + refund);
+      await expect(payer.client.balance()).resolves.toBe(
+        balanceP0 + topUp - payment.feeSats - refund,
+      );
 
       // Give the name up.
       const unreg = await lightningAddressUnregisterBody({
