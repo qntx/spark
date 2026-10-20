@@ -128,7 +128,7 @@ jobs:
         working-directory: packages/spark
         env:
           SPARK_E2E_LOCAL: "1"
-        run: bunx vp test --no-file-parallelism tests/e2e-local-exit.test.ts tests/e2e-local-expiry.test.ts tests/e2e-local-invoices.test.ts tests/e2e-local-renew.test.ts tests/e2e-local-store.test.ts tests/e2e-local-tokens.test.ts tests/e2e-local-transfer.test.ts tests/e2e-local-watchtower-refund.test.ts tests/e2e-local-watchtower.test.ts
+        run: bunx vp test --no-file-parallelism tests/e2e-local-broadcast-dedup.test.ts tests/e2e-local-exit.test.ts tests/e2e-local-expiry.test.ts tests/e2e-local-invoices.test.ts tests/e2e-local-renew.test.ts tests/e2e-local-store.test.ts tests/e2e-local-tokens.test.ts tests/e2e-local-transfer.test.ts tests/e2e-local-watchtower-refund.test.ts tests/e2e-local-watchtower.test.ts
       - name: Collect compose logs
         if: failure()
         env:
