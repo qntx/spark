@@ -1,0 +1,147 @@
+name: Regtest
+
+on:
+  schedule:
+    # Nightly cheap suite, off-peak UTC.
+    - cron: "43 4 * * 1-6"
+    # Weekly full suite on Sundays; it spends SSP exit fees on the shared seed.
+    - cron: "43 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Hosted suite: cheap skips the SSP-fee exit deposits"
+        required: true
+        type: choice
+        options:
+          - cheap
+          - full
+        default: cheap
+  pull_request:
+    paths:
+      - ".github/workflows/regtest.yml"
+      - "scripts/spark-local.ts"
+      - "scripts/spark-local.override.yml"
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with the Sunday cron above: the full suite runs on that
+  # schedule or on a `suite: full` dispatch; everything else runs cheap.
+  FULL_CRON: "43 4 * * 0"
+
+jobs:
+  # The hosted suites all spend from one funded seed: never let two runs
+  # overlap. Forked PRs get no secrets, so the whole job is skipped there.
+  hosted:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: regtest-${{ github.ref }}-hosted
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      # apps/lnurl-server uses node:sqlite, unflagged only on Node >= 24.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Select suite
+        id: suite
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "suite=${{ inputs.suite }}" >>"$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "$FULL_CRON" ]; then
+            echo "suite=full" >>"$GITHUB_OUTPUT"
+          else
+            echo "suite=cheap" >>"$GITHUB_OUTPUT"
+          fi
+      # Prints the spendable sats (number only); fails below 100k with the
+      # account 0 spark address to top up via the regtest faucet.
+      - name: Hosted balance (before)
+        env:
+          SPARK_HOSTED_SEED: ${{ secrets.SPARK_HOSTED_SEED }}
+        run: bun packages/spark/scripts/hosted-balance.ts
+      - name: Hosted e2e — packages/spark (${{ steps.suite.outputs.suite }})
+        working-directory: packages/spark
+        env:
+          SPARK_E2E_HOSTED: "1"
+          SPARK_HOSTED_SEED: ${{ secrets.SPARK_HOSTED_SEED }}
+          SUITE: ${{ steps.suite.outputs.suite }}
+        run: |
+          set -euo pipefail
+          files="tests/e2e-hosted-swap.test.ts tests/e2e-hosted-multi-send.test.ts tests/e2e-hosted-lightning.test.ts tests/e2e-hosted-lightning-failure.test.ts tests/e2e-hosted-settings-and-delegated-invoice.test.ts tests/e2e-hosted-lightning-address.test.ts"
+          if [ "$SUITE" = "full" ]; then
+            files="$files tests/e2e-hosted-coop-exit.test.ts tests/e2e-hosted-static-deposit.test.ts tests/e2e-hosted-static-refund.test.ts tests/e2e-hosted-multi-deposit.test.ts"
+          fi
+          bunx vp test --no-file-parallelism $files
+      - name: Hosted e2e — apps/lnurl-server
+        working-directory: apps/lnurl-server
+        env:
+          SPARK_E2E_HOSTED: "1"
+          SPARK_HOSTED_SEED: ${{ secrets.SPARK_HOSTED_SEED }}
+        run: bunx vp test --no-file-parallelism tests/e2e-hosted.test.ts
+      - name: Hosted balance (after)
+        if: always() && !cancelled()
+        env:
+          SPARK_HOSTED_SEED: ${{ secrets.SPARK_HOSTED_SEED }}
+        run: bun packages/spark/scripts/hosted-balance.ts
+
+  # The local suite builds the upstream docker stack from source at the commit
+  # pinned in scripts/lock.json — no secrets, so it also runs on forked PRs.
+  local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: lock
+        run: echo "commit=$(jq -r .spark.commit scripts/lock.json)" >>"$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: buildonspark/spark
+          ref: ${{ steps.lock.outputs.commit }}
+          path: spark-ref
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Start the local SO stack
+        env:
+          SPARK_REF: ${{ github.workspace }}/spark-ref
+        run: bun scripts/spark-local.ts up
+      - name: Local e2e — packages/spark
+        working-directory: packages/spark
+        env:
+          SPARK_E2E_LOCAL: "1"
+        run: bunx vp test --no-file-parallelism tests/e2e-local-exit.test.ts tests/e2e-local-invoices.test.ts tests/e2e-local-renew.test.ts tests/e2e-local-store.test.ts tests/e2e-local-tokens.test.ts tests/e2e-local-transfer.test.ts tests/e2e-local-watchtower-refund.test.ts tests/e2e-local-watchtower.test.ts
+      - name: Stop the local stack
+        if: always()
+        env:
+          SPARK_REF: ${{ github.workspace }}/spark-ref
+        run: bun scripts/spark-local.ts down
+      - name: Collect compose logs
+        if: failure()
+        env:
+          SPARK_REF: ${{ github.workspace }}/spark-ref
+        run: docker compose -f "$SPARK_REF/docker-compose.yml" -f scripts/spark-local.override.yml -p spark-local logs --no-color > spark-local-logs.txt || true
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spark-local-logs
+          path: spark-local-logs.txt
+          if-no-files-found: ignore
