@@ -1,22 +1,97 @@
-# Caller owns on:. Pin at @v2.
-# OIDC. Do not pass NPM_TOKEN. Do not set environment, runs-on, or steps.
-# Required check-run on a tag: spark / publish.
+# Real publish runs on `v*.*.*` tags only (tag the release merge commit by
+# hand; GITHUB_TOKEN tags do not trigger workflows). Everything else —
+# pull_request and workflow_dispatch without `dry-run: false` — runs the full
+# pipeline with `npm publish --dry-run`.
 name: Publish
 
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Publish with npm publish --dry-run. Only false publishes for real."
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - ".github/workflows/publish-npm.yml"
+      - ".github/workflows/native.yml"
+      - "bump.config.ts"
+      - "scripts/check-version.ts"
+      - "packages/*/package.json"
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  native:
+    uses: ./.github/workflows/native.yml
+    permissions:
+      contents: read
+
+  # Packages the iOS and Android native.yml artifacts into one upload-artifact
+  # laid out relative to packages/spark-native — exactly the gitignored
+  # entries of the package's `files` (the publish workflow downloads it into
+  # the package directory).
+  native-artifact:
+    needs: native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: QntxSpark.xcframework
+          path: staging/ios/QntxSpark.xcframework
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qntx-spark-jniLibs
+          path: staging
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spark-native-prebuilt
+          path: staging
+          retention-days: 1
+
+  # Pinned to the feat/publish-npm-artifact head for the `artifact` input;
+  # switch back to @v2 once qntx/workflows releases it.
   spark:
-    uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@472e8a857e0eeccee1274392470d9d26b2a5fbfb # v2 + artifact input
     permissions:
       contents: read
       id-token: write
     with:
       package-manager: bun
+      install-directory: .
       working-directory: packages/spark
+      dry-run: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
+
+  spark-wasm:
+    needs: spark
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@472e8a857e0eeccee1274392470d9d26b2a5fbfb # v2 + artifact input
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      package-manager: bun
+      install-directory: .
+      working-directory: packages/spark-wasm
+      dry-run: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
+
+  spark-native:
+    needs: [spark, native-artifact]
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@472e8a857e0eeccee1274392470d9d26b2a5fbfb # v2 + artifact input
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      package-manager: bun
+      install-directory: .
+      working-directory: packages/spark-native
+      artifact: spark-native-prebuilt
+      dry-run: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}

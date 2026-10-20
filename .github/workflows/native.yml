@@ -7,6 +7,9 @@ name: Native
 # prints sizes and SHA-256 for SIZES.md.
 
 on:
+  # publish-npm.yml calls this workflow for release builds; the uploaded
+  # artifacts are what `spark-native-prebuilt` is assembled from.
+  workflow_call:
   pull_request:
     paths:
       - "crates/**"
@@ -79,4 +82,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qntx-spark-jniLibs
-          path: packages/spark-native/android/src/main/jniLibs
+          # include/ ships the generated qntx_spark.h copy; both paths sit
+          # under packages/spark-native so the artifact keeps package-relative
+          # layout for spark-native-prebuilt.
+          path: |
+            packages/spark-native/android/src/main/jniLibs
+            packages/spark-native/include

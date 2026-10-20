@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -69,6 +70,16 @@ function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+// Measurement lines go to the job summary on CI so release runs keep the
+// artifact sizes and hashes next to the build logs.
+function report(line: string): void {
+  console.log(line);
+  const summary = process.env["GITHUB_STEP_SUMMARY"];
+  if (summary !== undefined) {
+    appendFileSync(summary, `${line}\n`);
+  }
+}
+
 // Dynamic symbols a stripped shared library legitimately carries besides the
 // ABI: ELF section-boundary markers emitted by the linker.
 const PLATFORM_SYMBOLS = new Set([
@@ -105,7 +116,7 @@ function copyHeader(): void {
   // include/ is gitignored (it only holds this copy) — recreate it in clean checkouts.
   mkdirSync(dirname(HEADER_DST), { recursive: true });
   copyFileSync(HEADER_SRC, HEADER_DST);
-  console.log(`header: packages/spark-native/include/qntx_spark.h sha256=${sha256(HEADER_DST)}`);
+  report(`header: packages/spark-native/include/qntx_spark.h sha256=${sha256(HEADER_DST)}`);
 }
 
 // --- iOS -------------------------------------------------------------------
@@ -224,12 +235,12 @@ function buildIos(): void {
   ] as const) {
     const exports = listExports("nm", ["-gU"], binary);
     checkExports(exports, label);
-    console.log(
+    report(
       `ios ${label}: ${statSync(binary).size} B sha256=${sha256(binary)} exports=${exports.length}`,
     );
   }
   rmSync(staging, { recursive: true, force: true });
-  console.log(`xcframework: packages/spark-native/ios/QntxSpark.xcframework`);
+  report(`xcframework: packages/spark-native/ios/QntxSpark.xcframework`);
 }
 
 // --- Android ---------------------------------------------------------------
@@ -296,7 +307,7 @@ function buildAndroid(): void {
     sh(llvmStrip, ["--strip-unneeded", dest]);
     const exports = listExports(llvmNm, ["-D", "--defined-only"], dest);
     checkExports(exports, `android ${abi}`);
-    console.log(
+    report(
       `android ${abi}: ${statSync(dest).size} B sha256=${sha256(dest)} exports=${exports.length}`,
     );
   }
