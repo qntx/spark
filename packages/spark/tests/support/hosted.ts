@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { hexToBytes, randomBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 
 import { createSparkClient } from "../../src/client/index.ts";
 import { createMemorySparkStore } from "../../src/exit/store.ts";
@@ -59,4 +59,97 @@ export async function hostedWallet(seed: Uint8Array, account: number): Promise<H
     store,
   });
   return { signer, store, client };
+}
+
+export const sleep = async (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+// Minimal Esplora client for Lightspark's public regtest mempool — the endpoint and credentials
+// the upstream open-source SDK publishes: REGTEST.PROD.ELECTRS and ELECTRS_CREDENTIALS in
+// sdks/js/packages/spark-sdk/src/services/wallet-config.ts.
+const ESPLORA_URL = "https://regtest-mempool.us-west-2.sparkinfra.net/api";
+const ESPLORA_AUTH = `Basic ${btoa("spark-sdk:mCMk1JqlBNtetUNy")}`;
+
+async function esplora(
+  path: string,
+  options?: { readonly method?: string; readonly body?: string },
+): Promise<Response> {
+  const response = await globalThis.fetch(`${ESPLORA_URL}${path}`, {
+    method: options?.method ?? "GET",
+    headers: {
+      authorization: ESPLORA_AUTH,
+      ...(options?.body === undefined ? {} : { "content-type": "text/plain" }),
+    },
+    ...(options?.body === undefined ? {} : { body: options.body }),
+  });
+  if (!response.ok) {
+    throw new Error(`esplora ${path}: HTTP ${response.status} ${await response.text()}`);
+  }
+  return response;
+}
+
+export type EsploraTxStatus = {
+  readonly confirmed: boolean;
+  readonly block_height?: number;
+  readonly block_time?: number;
+};
+
+/** `GET /tx/:txid` — the transaction record, including confirmation status. */
+export async function esploraTx(txid: string): Promise<{ status: EsploraTxStatus }> {
+  const response = await esplora(`/tx/${txid}`);
+  return (await response.json()) as { status: EsploraTxStatus };
+}
+
+/** `GET /tx/:txid/hex` — the raw transaction bytes. */
+export async function esploraRawTx(txid: string): Promise<Uint8Array> {
+  const response = await esplora(`/tx/${txid}/hex`);
+  return hexToBytes(await response.text());
+}
+
+/** `POST /tx` — broadcasts a signed transaction; returns its txid. */
+export async function esploraBroadcast(transaction: Uint8Array): Promise<string> {
+  const response = await esplora("/tx", { method: "POST", body: bytesToHex(transaction) });
+  return response.text();
+}
+
+/** Polls `esploraTx` until `txid` confirms; returns the block height. */
+export async function esploraWaitConfirmed(txid: string, deadlineMs: number): Promise<number> {
+  // 404s are expected: a transaction can take a while to reach the mempool after broadcast.
+  const tx = await esploraTx(txid).catch(() => undefined);
+  if (tx?.status.confirmed === true && tx.status.block_height !== undefined) {
+    return tx.status.block_height;
+  }
+  if (Date.now() > deadlineMs) {
+    throw new Error(`esplora: ${txid} was not confirmed in time`);
+  }
+  await sleep(10_000);
+  return esploraWaitConfirmed(txid, deadlineMs);
+}
+
+export type EsploraUtxo = {
+  readonly txid: string;
+  readonly vout: number;
+  readonly status: EsploraTxStatus;
+  readonly value: number;
+};
+
+/** `GET /address/:address/utxo` — unspent outputs paying the address (chain + mempool). */
+export async function esploraAddressUtxos(address: string): Promise<EsploraUtxo[]> {
+  const response = await esplora(`/address/${address}/utxo`);
+  return (await response.json()) as EsploraUtxo[];
+}
+
+/** `GET /address/:address` — net sats the address received (chain + mempool, funded − spent). */
+export async function esploraAddressReceivedSats(address: string): Promise<number> {
+  const response = await esplora(`/address/${address}`);
+  const info = (await response.json()) as {
+    chain_stats: { funded_txo_sum: number; spent_txo_sum: number };
+    mempool_stats: { funded_txo_sum: number; spent_txo_sum: number };
+  };
+  return (
+    info.chain_stats.funded_txo_sum -
+    info.chain_stats.spent_txo_sum +
+    info.mempool_stats.funded_txo_sum -
+    info.mempool_stats.spent_txo_sum
+  );
 }
