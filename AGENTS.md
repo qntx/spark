@@ -16,7 +16,7 @@
   imports, no ES2023+ array methods. All I/O (fetch, random, storage) is injected; no singletons.
 - One-directional layering in `packages/spark/src`, enforced by `scripts/check-layers.ts`:
   `errors` and `proto` are leaves; `crypto`, `core`; then `signer`, `connection`, `ssp`; the
-  protocol services `tree`, `transfer`, `lightning`, `deposit`, `exit`, `tokens`, `invoice`
+  protocol services `tree`, `transfer`, `lightning`, `deposit`, `exit`, `tokens`, `invoice`, `settings`
   build on them; `client` composes all services; `server` uses `client` and `lnurl`; `lnurl`
   uses `core` only. Services and `client` may use `import type` from `signer` but never import
   its implementation (`signer/local.ts` is reachable only through `signer/index.ts`).

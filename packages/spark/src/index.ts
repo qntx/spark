@@ -50,6 +50,7 @@ export type {
 export type { WatchtowerExitedLeaf } from "./exit/watchtower.ts";
 export { createMemorySparkStore } from "./exit/store.ts";
 export type { SparkExitChain, SparkStore } from "./exit/store.ts";
+export type { SparkWalletSettings } from "./settings/index.ts";
 export type { SparkLeaf } from "./tree/index.ts";
 export type { SparkTransfer, SparkTransferLeaf } from "./transfer/index.ts";
 export type {
