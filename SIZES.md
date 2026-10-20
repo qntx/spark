@@ -41,18 +41,25 @@ bytes, uploading its rebuild as an artifact on mismatch.
 Native targets (`bun run build:native` — cargo with the NDK clang linkers for
 Android, `lipo` + `xcodebuild -create-xcframework` for iOS). The artifacts are
 gitignored build outputs; the npm package ships them via `files`. These are
-the measurements from the reference build on macOS arm64 (rust 1.99.1,
-`release` profile: thin LTO, `codegen-units = 1`, `panic = "abort"`,
-`strip = true`; the Android `.so`s additionally `llvm-strip --strip-unneeded`).
+the measurements from the `native.yml` CI jobs (rust 1.99.1, `release`
+profile: thin LTO, `codegen-units = 1`, `panic = "abort"`, `strip = true`; the
+Android `.so`s additionally `llvm-strip --strip-unneeded`).
 
 | Artifact                                           | Size        | SHA-256 (first 16) |
 | -------------------------------------------------- | ----------- | ------------------ |
-| ios-arm64 `QntxSpark` (dylib)                      | 529,512 B   | `f3911c77548de07a` |
-| ios-arm64+x86_64-simulator `QntxSpark` (fat dylib) | 1,123,504 B | `38604c1ef3fbee68` |
-| android `arm64-v8a/libqntx_spark.so`               | 563,728 B   | `e8cb3e1351523e35` |
-| android `armeabi-v7a/libqntx_spark.so`             | 377,192 B   | `6264b9c01670fea0` |
-| android `x86_64/libqntx_spark.so`                  | 687,504 B   | `b0218300b750aa3a` |
-| android `x86/libqntx_spark.so`                     | 675,232 B   | `6dbecf3285510340` |
+| ios-arm64 `QntxSpark` (dylib)                      | 529,512 B   | `a50e11560c149cbc` |
+| ios-arm64+x86_64-simulator `QntxSpark` (fat dylib) | 1,123,504 B | `81b61dfd52b922e6` |
+| android `arm64-v8a/libqntx_spark.so`               | 563,288 B   | `3e4e97e819ca4230` |
+| android `armeabi-v7a/libqntx_spark.so`             | 376,640 B   | `15b1cce07e6a3264` |
+| android `x86_64/libqntx_spark.so`                  | 687,312 B   | `e6ea76f3311d41f6` |
+| android `x86/libqntx_spark.so`                     | 674,792 B   | `bc4ea52788b90883` |
+
+Unlike `spark.wasm`, the native builds are not hermetic: these hashes are
+specific to the CI runner image and toolchain (`macos-latest` Xcode, NDK r27d
+linkers on `ubuntu-latest`) and shift when the image or toolchain does —
+consecutive CI runs at the same revision reproduce them, a local build on a
+different toolchain may not. The wasm hash above is reproducible through the
+pinned container and enforced by the `wasm` CI job.
 
 Every artifact exports exactly the nine `qs_*` ABI functions
 (`qs_abi_version`, `qs_alloc`, `qs_free`, `qs_frost_commit`, `qs_frost_sign`,
