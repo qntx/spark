@@ -40,6 +40,8 @@ export type LightningReceiveStatus = {
   readonly status: string;
   /** The inbound transfer's spark id, once the SSP reports the payment arrived. */
   readonly transferId?: string;
+  /** The settled payment preimage — verified against the request invoice's payment hash. */
+  readonly preimage?: Uint8Array;
 };
 
 /** A `LightningPayment` satisfies this shape — pass the pay() result straight in. */
@@ -84,14 +86,27 @@ export async function lightningSendStatus(
   };
 }
 
-/** `user_request` status of a lightning receive, with the inbound transfer id once present. */
+/**
+ * `user_request` status of a lightning receive, with the inbound transfer id once present. A
+ * reported preimage is returned only after `sha256(preimage)` is checked against the request
+ * invoice's own payment hash — a mismatched preimage must not look like settlement proof.
+ */
 export async function lightningReceiveStatus(
   ssp: SspClient,
   requestId: string,
 ): Promise<LightningReceiveStatus> {
   const request = await ssp.lightningReceiveRequest(requestId);
+  if (request.paymentPreimage !== undefined) {
+    const invoice = decodeBolt11(request.invoice);
+    if (!equalBytes(sha256(request.paymentPreimage), invoice.paymentHash)) {
+      throw new SparkError(
+        "lightning receive status: preimage does not match the invoice payment hash",
+      );
+    }
+  }
   return {
     status: request.status,
     ...(request.transferId === undefined ? {} : { transferId: request.transferId }),
+    ...(request.paymentPreimage === undefined ? {} : { preimage: request.paymentPreimage }),
   };
 }

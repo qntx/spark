@@ -44,6 +44,7 @@ import type { SparkSigner } from "../src/signer/index.ts";
 import type {
   SspClient,
   SspLightningReceiveRequest,
+  SspLightningReceiveResult,
   SspLightningSendRequest,
   SspLightningSendResult,
 } from "../src/ssp/index.ts";
@@ -325,7 +326,7 @@ function fakeSsp(handlers: {
   lightningSendFeeEstimate?: (invoice: string, amountSats?: number) => number;
   requestLightningSend?: (req: SspLightningSendRequest) => Partial<SspLightningSendResult>;
   lightningSendRequest?: (id: string) => Partial<SspLightningSendResult> & { status: string };
-  lightningReceiveRequest?: (id: string) => { status: string; transferId?: string };
+  lightningReceiveRequest?: (id: string) => Partial<SspLightningReceiveResult> & { status: string };
 }): {
   ssp: SspClient;
   receiveRequests: SspLightningReceiveRequest[];
@@ -388,8 +389,11 @@ function fakeSsp(handlers: {
       return Promise.resolve({
         id,
         status: result.status,
-        invoice: "",
+        invoice: result.invoice ?? "",
         ...(result.transferId === undefined ? {} : { transferId: result.transferId }),
+        ...(result.paymentPreimage === undefined
+          ? {}
+          : { paymentPreimage: result.paymentPreimage }),
       });
     },
     coopExitFeeQuote: async () =>
@@ -1429,6 +1433,12 @@ describe("lightningSendStatus", () => {
 });
 
 describe("lightningReceiveStatus", () => {
+  const RECEIVED_INVOICE = encodeTestBolt11({
+    secretKey: INVOICE_SECRET,
+    paymentHash: PAYMENT_HASH,
+    amountMsat: 1_000_000n,
+  });
+
   test("returns status and the inbound transfer id", async () => {
     const { ssp } = fakeSsp({
       lightningReceiveRequest: () => ({
@@ -1439,6 +1449,34 @@ describe("lightningReceiveStatus", () => {
     const status = await lightningReceiveStatus(ssp, "req-2");
     expect(status.status).toBe("TRANSFER_COMPLETED");
     expect(status.transferId).toBe("transfer-abc");
+  });
+
+  test("returns the preimage once it verifies against the request invoice", async () => {
+    const { ssp } = fakeSsp({
+      lightningReceiveRequest: () => ({
+        status: "TRANSFER_COMPLETED",
+        invoice: RECEIVED_INVOICE,
+        transferId: "transfer-abc",
+        paymentPreimage: PREIMAGE,
+      }),
+    });
+    const status = await lightningReceiveStatus(ssp, "req-2");
+    expect(status.transferId).toBe("transfer-abc");
+    expect(bytesToHex(required(status.preimage, "preimage"))).toBe(bytesToHex(PREIMAGE));
+  });
+
+  test("rejects a preimage that does not hash to the request invoice's payment hash", async () => {
+    const { ssp } = fakeSsp({
+      lightningReceiveRequest: () => ({
+        status: "TRANSFER_COMPLETED",
+        invoice: RECEIVED_INVOICE,
+        paymentPreimage: new Uint8Array(32).fill(0x99),
+      }),
+    });
+    await expect(lightningReceiveStatus(ssp, "req-2")).rejects.toThrow(SparkError);
+    await expect(lightningReceiveStatus(ssp, "req-2")).rejects.toThrow(
+      "does not match the invoice payment hash",
+    );
   });
 });
 
