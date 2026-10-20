@@ -110,7 +110,12 @@ type CreateInvoiceCall = {
   receiver?: string | Uint8Array;
 };
 
-function fakeClient(options?: { preimage?: Uint8Array }): {
+function fakeClient(options?: {
+  /** The preimage `receiveStatus` reports for `req-{index + 1}` — its sha256 is the invoice hash. */
+  readonly preimages?: ReadonlyArray<Uint8Array | undefined>;
+  /** Request ids whose `receiveStatus` read rejects. */
+  readonly failFor?: ReadonlyArray<string>;
+}): {
   client: LightningAddressServerClient;
   calls: CreateInvoiceCall[];
   statusCalls: string[];
@@ -123,24 +128,28 @@ function fakeClient(options?: { preimage?: Uint8Array }): {
       createInvoice: async (request: CreateInvoiceCall) => {
         calls.push(request);
         counter += 1;
+        const preimage = options?.preimages?.[counter - 1];
         return Promise.resolve({
           id: `req-${counter}`,
           invoice: `lnbcrt-fake-${counter}`,
           // A configured preimage always matches the invoice hash — the real client's
           // receiveStatus only hands back verified preimages.
           paymentHash:
-            options?.preimage === undefined
-              ? sha256(utf8ToBytes(`hash-${counter}`))
-              : sha256(options.preimage),
+            preimage === undefined ? sha256(utf8ToBytes(`hash-${counter}`)) : sha256(preimage),
           amountSats: request.amountSats,
           expiresAtMs: NOW_MS + 600_000,
         });
       },
       receiveStatus: async (requestId: string) => {
         statusCalls.push(requestId);
+        if (options?.failFor?.includes(requestId)) {
+          throw new Error(`status read failed for ${requestId}`);
+        }
+        const index = Number(requestId.slice(4)) - 1;
+        const preimage = options?.preimages?.[index];
         return Promise.resolve({
           status: "TRANSFER_COMPLETED",
-          ...(options?.preimage === undefined ? {} : { preimage: options.preimage }),
+          ...(preimage === undefined ? {} : { preimage }),
         });
       },
     },
@@ -435,7 +444,7 @@ describe("invoice", () => {
 describe("verify + settlePending", () => {
   test("verify reports unsettled and settled invoices; unknown is an error", async () => {
     const preimage = hexToBytes("ab".repeat(32));
-    const { client } = fakeClient({ preimage });
+    const { client } = fakeClient({ preimages: [preimage] });
     const { server } = serverWith(client);
     await registerAlice(server);
     await server.invoice("alice", { amount: 1000 });
@@ -481,5 +490,41 @@ describe("verify + settlePending", () => {
 
     const record = await store.invoiceByPaymentHash(bytesToHex(sha256(utf8ToBytes("hash-1"))));
     expect(record?.preimageHex).toBeUndefined();
+  });
+
+  test("a failing status read stays pending without aborting the round", async () => {
+    const preimage = hexToBytes("ab".repeat(32));
+    const { client } = fakeClient({ preimages: [preimage], failFor: ["req-2"] });
+    const { server, store } = serverWith(client);
+    await registerAlice(server);
+    await server.invoice("alice", { amount: 1000 }); // req-1
+    await server.invoice("alice", { amount: 2000 }); // req-2 — its status read throws
+
+    const settled = await server.settlePending();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.paymentHash).toBe(bytesToHex(sha256(preimage)));
+
+    // req-2 stays pending — the next round retries it.
+    const pending = await store.pendingInvoices(NOW_MS);
+    expect(pending.map((i) => i.requestId)).toStrictEqual(["req-2"]);
+  });
+
+  test("verify lowercases the hash and rejects malformed input", async () => {
+    const { server } = serverWith(fakeClient().client);
+    await registerAlice(server);
+    await server.invoice("alice", { amount: 1000 });
+    const hash = bytesToHex(sha256(utf8ToBytes("hash-1")));
+
+    const upper = await server.verify(hash.toUpperCase());
+    expect((upper.body as Record<string, unknown>)["status"]).toBe("OK");
+
+    await expect(bodyOf(server.verify("not-a-hash"))).resolves.toStrictEqual({
+      status: "ERROR",
+      reason: "Not found",
+    });
+    await expect(bodyOf(server.verify("12".repeat(40)))).resolves.toStrictEqual({
+      status: "ERROR",
+      reason: "Not found",
+    });
   });
 });
