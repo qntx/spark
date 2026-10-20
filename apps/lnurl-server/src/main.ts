@@ -3,9 +3,6 @@
 // the HTTP routes, and runs the settlement + zap-receipt poll loop until SIGINT/SIGTERM.
 
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { serve } from "@hono/node-server";
@@ -13,27 +10,18 @@ import { serve } from "@hono/node-server";
 import { Keys, Pool } from "@qntx/nostr";
 import { createMemorySparkStore, createSparkClient } from "@qntx/spark";
 import { loadSparkWasm } from "@qntx/spark-wasm";
-import type { SparkCrypto } from "@qntx/spark/crypto";
 import { createLightningAddressServer } from "@qntx/spark/server";
 import { createSparkSigner, sparkAccountKey } from "@qntx/spark/signer";
 
 import { loadConfig } from "./config.ts";
 import { createLnurlApp } from "./http.ts";
+import { abortableSleep } from "./sleep.ts";
 import { createLnurlStore } from "./store.ts";
 import { publishZapReceipts, validateZapRequest } from "./zap.ts";
 
 const log = (message: string): void => {
   process.stdout.write(`[lnurl-server] ${message}\n`);
 };
-
-/** `spark.wasm` bytes from the installed backend package (dist first, in-repo src fallback). */
-function wasmModuleBytes(): Uint8Array {
-  const require = createRequire(import.meta.url);
-  const pkgDir = dirname(require.resolve("@qntx/spark-wasm/package.json"));
-  const dist = join(pkgDir, "dist", "spark.wasm");
-  const path = existsSync(dist) ? dist : join(pkgDir, "src", "spark.wasm");
-  return new Uint8Array(readFileSync(path));
-}
 
 export type RunningServer = {
   readonly port: number;
@@ -51,7 +39,7 @@ export async function startLnurlServer(
 ): Promise<RunningServer> {
   const config = loadConfig(env);
 
-  const crypto: SparkCrypto = await loadSparkWasm({ module: wasmModuleBytes() });
+  const crypto = await loadSparkWasm();
   const signer = createSparkSigner({
     crypto,
     accountKey: sparkAccountKey(config.seed, config.network, config.account),
@@ -116,17 +104,7 @@ export async function startLnurlServer(
         log(`settle round failed: ${String(error)}`);
       }
       // oxlint-disable-next-line no-await-in-loop -- the interval between rounds is deliberate
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, config.pollIntervalMs);
-        stop.signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true },
-        );
-      });
+      await abortableSleep(config.pollIntervalMs, stop.signal);
     }
   })();
 

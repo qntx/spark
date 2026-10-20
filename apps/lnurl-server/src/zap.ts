@@ -2,6 +2,12 @@
 // construction/signing, and relay publishing with retries. Ported from Breez
 // crates/breez-sdk/lnurl/src/routes.rs (`validate_nostr_zap_request`) and zap.rs
 // (`publish_zap_receipt`) @956ff90.
+//
+// SSRF note: the `relays` tag is payer-controlled and this server connects to whatever it names,
+// so `isAcceptedRelayUrl` only admits `wss://` on plausibly public hosts — no localhost names, no
+// IPv6 literals, no IPv4 literals in private/reserved ranges. A public DNS name can still resolve
+// to a private address (DNS rebinding); operators must mitigate that residual at the network
+// layer — see README.
 
 import type { Pool } from "@qntx/nostr";
 import type { Event, Tag, Keys } from "@qntx/nostr/core";
@@ -99,15 +105,70 @@ export function validateZapRequest(
   }
 }
 
+/**
+ * A dotted-quad IPv4 host is public only outside the private/reserved ranges (0/8, 10/8, 100.64/10,
+ * 127/8, 169.254/16, 172.16/12, 192.168/16, 198.18/15, 224/4+). Returns undefined when `host` is
+ * not an IPv4 literal.
+ */
+function isPublicIpv4(host: string): boolean | undefined {
+  const parts = host.split(".");
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/u.test(part))) {
+    return undefined;
+  }
+  const [a = 0, b = 0] = parts.map(Number);
+  if (a === 0 || a === 10 || a === 127 || a >= 224) {
+    return false;
+  }
+  if (a === 100 && b >= 64 && b <= 127) {
+    return false;
+  }
+  if (a === 169 && b === 254) {
+    return false;
+  }
+  if (a === 172 && b >= 16 && b <= 31) {
+    return false;
+  }
+  if (a === 192 && b === 168) {
+    return false;
+  }
+  if (a === 198 && b >= 18 && b <= 19) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The payer names receipt relays, so only `wss://` URLs with a plausibly public host are
+ * publishable targets: no `ws://`, no localhost (or `*.localhost`), no IPv6 literals and no
+ * private/reserved IPv4 literals. The WHATWG parser normalizes hex/octal/integer IPv4 spellings to
+ * dotted-quad, so those forms are rejected by the same rule.
+ */
+function isAcceptedRelayUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "wss:") {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/\.$/u, "");
+  if (host === "" || host.includes(":")) {
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return false;
+  }
+  return isPublicIpv4(host) !== false;
+}
+
 function zapRequestRelays(request: Event): string[] {
   const relaysTag = request.tags.find((tag) => tag[0] === "relays");
   if (relaysTag === undefined) {
     return [];
   }
-  return relaysTag
-    .slice(1)
-    .filter((url) => url.startsWith("wss://") || url.startsWith("ws://"))
-    .slice(0, MAX_NOSTR_RELAYS);
+  return relaysTag.slice(1).filter(isAcceptedRelayUrl).slice(0, MAX_NOSTR_RELAYS);
 }
 
 export type BuiltZapReceipt = {
