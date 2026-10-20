@@ -12,7 +12,8 @@ export type LightningSendOutcome = "pending" | "succeeded" | "failed" | "returne
  * SSP send statuses where the payment will not settle. `PENDING_USER_SWAP_RETURN` and
  * `USER_SWAP_RETURN_FAILED` are transient stages of the SSP's swap-return flow — the return retries
  * until `USER_SWAP_RETURNED` (≈5 min observed on hosted). `USER_TRANSFER_VALIDATION_FAILED` has no
- * return flow: the funds come back only when the committed transfer expires.
+ * return flow: the leaves come back only when the preimage-swap transfer expires
+ * (`LIGHTNING_TRANSFER_EXPIRY_MS`, 16 days).
  */
 const LIGHTNING_SEND_FAILED = new Set([
   "LIGHTNING_PAYMENT_FAILED",
