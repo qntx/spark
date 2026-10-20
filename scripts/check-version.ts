@@ -36,6 +36,20 @@ export function peerRange(version: string): string {
 }
 
 /**
+ * Rewrite `pkg`'s {@link CORE_PACKAGE} peer range to the {@link peerRange} of `version`, in place.
+ * bumpp's `execute` hook applies this to the backend packages — it only rewrites `version` fields
+ * in JSON, while the peer range must track the lockstep version. Throws when the package does not
+ * already declare the peer dependency.
+ */
+export function updatePeerRange(pkg: unknown, version: string): void {
+  const peer = isRecord(pkg) ? pkg["peerDependencies"] : undefined;
+  if (!isRecord(peer) || !(CORE_PACKAGE in peer)) {
+    throw new Error(`missing "${CORE_PACKAGE}" peerDependency`);
+  }
+  peer[CORE_PACKAGE] = peerRange(version);
+}
+
+/**
  * Lockstep check: every published workspace package's `version` must equal
  * `[workspace.package].version`, every workspace crate manifest must inherit it via
  * `version.workspace`, every internal `crates/` path dependency must pin `=<version>`, and the

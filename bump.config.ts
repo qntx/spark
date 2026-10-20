@@ -1,6 +1,14 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 
 import { defineConfig } from "bumpp";
+
+import { updatePeerRange } from "./scripts/check-version.ts";
+
+// bumpp rewrites only the `version` field of JSON manifests; the backend
+// packages' @qntx/spark peer ranges must track the lockstep version, so
+// execute rewrites them before the Cargo lockfiles refresh.
+const PEER_MANIFESTS = ["packages/spark-wasm/package.json", "packages/spark-native/package.json"];
 
 // npm package and Cargo workspace versions are lockstep; bumpp rewrites every
 // `x.y.z` occurrence of the current version in non-JSON files, so Cargo.toml
@@ -15,7 +23,12 @@ const config: ReturnType<typeof defineConfig> = defineConfig({
   // crates/interop is its own workspace, so its lockfile needs a separate
   // `cargo update`. A string `execute` is not run through a shell, so the
   // updates run as separate processes.
-  execute: () => {
+  execute: (operation) => {
+    for (const path of PEER_MANIFESTS) {
+      const manifest: unknown = JSON.parse(readFileSync(path, "utf8"));
+      updatePeerRange(manifest, operation.state.newVersion);
+      writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    }
     for (const manifest of ["Cargo.toml", "crates/interop/Cargo.toml"]) {
       execFileSync("cargo", ["update", "--workspace", "--manifest-path", manifest], {
         stdio: "inherit",
