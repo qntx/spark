@@ -6,6 +6,7 @@ import { exitTransactions } from "../src/index.ts";
 import {
   bitcoinRpc,
   CLAIM_DEADLINE_MS,
+  claimManyUntilAccepted,
   claimPendingUntil,
   claimUntilAccepted,
   leavesUntil,
@@ -43,6 +44,37 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO transfer flow"
     expect(unused.map((u) => u.address)).not.toContain(address);
 
     await expect(client.deposits.claim({ transaction })).rejects.toThrow(/./);
+    client.close();
+    signer.dispose();
+  }, 180_000);
+
+  test("two UTXOs to one single-use address claim as a single summed leaf", async () => {
+    const { signer, client } = await localWallet(randomBytes(32));
+
+    const address = await client.deposits.newAddress();
+    console.log("multi-utxo deposit address:", address);
+    const txidA = (await bitcoinRpc("sendtoaddress", [address, 0.0004])) as string;
+    const txidB = (await bitcoinRpc("sendtoaddress", [address, 0.0006])) as string;
+    console.log("deposit txs:", txidA, txidB);
+    const minerAddress = (await bitcoinRpc("getnewaddress", [])) as string;
+    await bitcoinRpc("generatetoaddress", [2, minerAddress]);
+    const transactionA = hexToBytes((await bitcoinRpc("getrawtransaction", [txidA])) as string);
+    const transactionB = hexToBytes((await bitcoinRpc("getrawtransaction", [txidB])) as string);
+
+    const leaf = await claimManyUntilAccepted(
+      client,
+      [transactionA, transactionB],
+      Date.now() + CLAIM_DEADLINE_MS,
+    );
+    expect(leaf.valueSats).toBe(100_000);
+    console.log("claimed multi-utxo leaf:", leaf.id, leaf.status, leaf.valueSats, "sats");
+
+    const leaves = await leavesUntil(client, Date.now() + CLAIM_DEADLINE_MS);
+    expect(leaves.map((l) => l.id)).toContain(leaf.id);
+    await expect(client.balance()).resolves.toBe(100_000);
+
+    const unused = await client.deposits.unused();
+    expect(unused.map((u) => u.address)).not.toContain(address);
     client.close();
     signer.dispose();
   }, 180_000);

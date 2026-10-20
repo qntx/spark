@@ -483,7 +483,7 @@ export async function refundStaticDeposit(
   }
 
   const signed = finalizeKeySpend(transaction, signature);
-  if (!verifyFinalizedTaprootSignature(signed, taprootKeySpendSighash(target), verifyingKey)) {
+  if (!verifyFinalizedTaprootSignature(signed, taprootKeySpendSighash(target), verifyingKey, 0)) {
     throw new SparkError("refundStatic: the aggregated signature does not verify");
   }
   return { transaction: signed, txid: txId(signed) };

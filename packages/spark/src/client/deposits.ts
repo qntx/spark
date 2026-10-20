@@ -112,8 +112,21 @@ export function createDeposits(context: ClientContext): SparkClient["deposits"] 
       context.leafLock.run(async () => {
         const leaf = await claimDeposit({
           ...context.depositCoordinator,
-          transaction: claimOptions.transaction,
-          ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
+          outputs: [
+            {
+              transaction: claimOptions.transaction,
+              ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
+            },
+          ],
+        });
+        await context.storeChainsFor([leaf]);
+        return leaf;
+      }),
+    claimMany: async (claimOptions) =>
+      context.leafLock.run(async () => {
+        const leaf = await claimDeposit({
+          ...context.depositCoordinator,
+          outputs: claimOptions.outputs,
         });
         await context.storeChainsFor([leaf]);
         return leaf;

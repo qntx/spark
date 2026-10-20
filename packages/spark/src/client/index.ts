@@ -182,6 +182,17 @@ export type SparkClient = {
       readonly transaction: Uint8Array;
       readonly vout?: number;
     }) => Promise<SparkLeaf>;
+    /**
+     * Claims several confirmed UTXOs paying the SAME single-use address into one leaf — the only
+     * way to claim more than one UTXO, since a single-use address is consumed by a claim. At most
+     * 11 outputs; `vout` is resolved by unique match when omitted.
+     */
+    readonly claimMany: (options: {
+      readonly outputs: ReadonlyArray<{
+        readonly transaction: Uint8Array;
+        readonly vout?: number;
+      }>;
+    }) => Promise<SparkLeaf>;
     /** The identity's reusable static deposit address — the same address on every call. */
     readonly staticAddress: () => Promise<string>;
     /** Confirmed, unclaimed UTXOs paying the static deposit address. */
