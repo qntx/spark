@@ -312,6 +312,16 @@
         }
       },
       "vectors": ["vectors/lightning-address.json"]
+    },
+    {
+      "id": "leaf-optimize",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/tree/optimize.ts",
+          "tests": ["packages/spark/tests/optimize.test.ts"]
+        }
+      },
+      "vectors": ["vectors/optimize.json"]
     }
   ]
 }
