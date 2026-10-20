@@ -63,16 +63,16 @@ function validateReceivedInvoice(
 }
 
 /**
- * The Spark address embedded in an SSP-returned receive invoice's route hints must be ours, and
- * present only if we asked for one — a payer that finds an address transfers to it directly, so an
- * injected address is paid instead of us (Breez `validate_received_spark_address`). EVERY hop under
- * the Spark short channel id is checked: one foreign hop among several would pass a first-match
- * scan just the same.
+ * The Spark address embedded in an SSP-returned receive invoice's route hints must be the payee's,
+ * and present only if we asked for one — a payer that finds an address transfers to it directly, so
+ * an injected address is paid instead of the payee (Breez `validate_received_spark_address`). EVERY
+ * hop under the Spark short channel id is checked: one foreign hop among several would pass a
+ * first-match scan just the same.
  */
 function validateReceivedSparkAddress(
   invoice: Bolt11Invoice,
   includeSparkAddress: boolean,
-  identityPublicKey: Uint8Array,
+  payeeIdentityPublicKey: Uint8Array,
 ): void {
   const sparkHops = invoice.routeHints
     .flat()
@@ -87,8 +87,8 @@ function validateReceivedSparkAddress(
     throw new SparkRequestError("ssp invoice is missing the requested spark address");
   }
   for (const hop of sparkHops) {
-    if (!equalBytes(hop.publicKey, identityPublicKey)) {
-      throw new SparkRequestError("ssp invoice spark address does not match our identity");
+    if (!equalBytes(hop.publicKey, payeeIdentityPublicKey)) {
+      throw new SparkRequestError("ssp invoice spark address does not match the payee identity");
     }
   }
 }
@@ -107,6 +107,13 @@ export async function createLightningInvoice(
     readonly descriptionHash?: Uint8Array;
     readonly expirySecs?: number;
     readonly includeSparkAddress?: boolean;
+    /**
+     * Payee's identity public key. When set, the invoice is created for that identity: the SSP
+     * routes the incoming payment to it, the preimage share is stored under it, and an embedded
+     * Spark address must be its (upstream `createLightningInvoiceWithPreImage`). Omitted, the
+     * invoice pays this wallet's own identity.
+     */
+    readonly receiverIdentityPublicKey?: Uint8Array;
   },
 ): Promise<LightningInvoice> {
   // Reject malformed options before any signer work — an invalid request must not sign.
@@ -120,8 +127,15 @@ export async function createLightningInvoice(
   if (options.descriptionHash !== undefined && options.descriptionHash.length !== 32) {
     throw new SparkInputError("lightning receive: descriptionHash must be 32 bytes");
   }
+  if (
+    options.receiverIdentityPublicKey !== undefined &&
+    options.receiverIdentityPublicKey.length !== 33
+  ) {
+    throw new SparkInputError("lightning receive: receiver identity public key must be 33 bytes");
+  }
 
   const identityPublicKey = await deps.signer.identityPublicKey();
+  const payeeIdentityPublicKey = options.receiverIdentityPublicKey ?? identityPublicKey;
   const prepared = await deps.signer.prepareLightningReceive({
     operators: deps.operators,
     threshold: deps.threshold,
@@ -132,7 +146,7 @@ export async function createLightningInvoice(
     amountSats: options.amountSats,
     paymentHash: prepared.paymentHash,
     expirySecs,
-    receiverIdentityPublicKey: identityPublicKey,
+    receiverIdentityPublicKey: payeeIdentityPublicKey,
     ...(options.memo === undefined ? {} : { memo: options.memo }),
     ...(options.descriptionHash === undefined ? {} : { descriptionHash: options.descriptionHash }),
     ...(options.includeSparkAddress === undefined
@@ -152,14 +166,18 @@ export async function createLightningInvoice(
     },
     deps.network,
   );
-  validateReceivedSparkAddress(invoice, options.includeSparkAddress === true, identityPublicKey);
+  validateReceivedSparkAddress(
+    invoice,
+    options.includeSparkAddress === true,
+    payeeIdentityPublicKey,
+  );
 
   await deps.spark.store_preimage_share_v2({
     paymentHash: prepared.paymentHash,
     encryptedPreimageShares: prepared.operatorPackages,
     threshold: deps.threshold,
     invoiceString: request.invoice,
-    userIdentityPublicKey: identityPublicKey,
+    userIdentityPublicKey: payeeIdentityPublicKey,
   });
 
   return {

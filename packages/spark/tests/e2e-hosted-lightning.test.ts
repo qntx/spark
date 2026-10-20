@@ -3,43 +3,12 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { decodeSparkAddress } from "../src/core/address.ts";
 import { decodeBolt11 } from "../src/core/bolt11.ts";
-import type { HostedWallet } from "./support/hosted.ts";
-import { hostedSeed, hostedWallet } from "./support/hosted.ts";
+import { hostedSeed, hostedWallet, SEND_OK, sendStatusUntil } from "./support/hosted.ts";
 import { claimPendingUntil } from "./support/local.ts";
 
 const CLAIM_DEADLINE_MS = 180_000;
 const SEND_DEADLINE_MS = 180_000;
 const FUNDED_ADDRESS = "sparkrt1pgssy2j63j3kmdzg54wavqs2z7yljfmk7j5adt5p4046lk5dzp7qjn3mz0ecyh";
-
-/**
- * Terminal send-request statuses per upstream SparkLightningSendRequestStatus. A same-SSP
- * ("internal") lightning payment converges to TRANSFER_COMPLETED rather than
- * LIGHTNING_PAYMENT_SUCCEEDED — upstream's integration test asserts exactly that. The hosted SSP
- * still surfaces payment_preimage on the send request, which sendStatus verifies.
- */
-const SEND_DONE = new Set([
-  "TRANSFER_COMPLETED",
-  "TRANSFER_FAILED",
-  "LIGHTNING_PAYMENT_SUCCEEDED",
-  "LIGHTNING_PAYMENT_FAILED",
-  "USER_TRANSFER_VALIDATION_FAILED",
-  "USER_SWAP_RETURNED",
-  "USER_SWAP_RETURN_FAILED",
-]);
-const SEND_OK = new Set(["TRANSFER_COMPLETED", "LIGHTNING_PAYMENT_SUCCEEDED"]);
-
-async function sendStatusUntil(
-  client: HostedWallet["client"],
-  payment: { requestId: string; paymentHash: Uint8Array },
-  deadline: number,
-): Promise<{ status: string; preimage?: Uint8Array }> {
-  const status = await client.lightning.sendStatus(payment);
-  if (SEND_DONE.has(status.status) || Date.now() > deadline) {
-    return status;
-  }
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-  return sendStatusUntil(client, payment, deadline);
-}
 
 describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightning", () => {
   test("B invoices A twice over lightning; B returns the balance over spark", async (ctx) => {
