@@ -51,7 +51,12 @@ Secrets are never logged or echoed in errors.
 With `LNURL_ZAP_SECRET_KEY` set the pay request advertises `allowsNostr`/`nostrPubkey` (LUD-06
 zaps extension): `nostr` invoice parameters are validated per NIP-57 appendix D, and every
 settled zapped invoice produces a signed kind-9735 receipt persisted in `zap_receipts` and
-published to the request's `relays` (up to 10 `ws(s)://` URLs, retried up to 5 rounds).
+published to the request's `relays` (up to 10 URLs, retried up to 5 rounds).
+
+Receipt relays are payer-controlled, so the server only connects to `wss://` URLs whose host is
+plausibly public (no `localhost`/`*.localhost`, no IPv6 literals, no private or reserved IPv4
+literals). A public DNS name can still resolve to a private address (DNS rebinding): run the
+service where outbound connections to internal ranges are denied at the network layer.
 
 ## Layout
 
@@ -61,9 +66,13 @@ published to the request's `relays` (up to 10 `ws(s)://` URLs, retried up to 5 r
 - `src/http.ts` — Hono routes over the framework-agnostic server handlers
 - `src/main.ts` — composition root (wasm backend, signer, client, poll loop, signals)
 
-## Tests
+## Development
+
+Build the workspace packages first — the app consumes `@qntx/spark*` through their built `dist/`
+entries at runtime:
 
 ```bash
-bun run test                          # unit tests
+bun run build                           # from the repository root
+bun run test                            # unit tests (tests alias the package sources)
 SPARK_E2E_HOSTED=1 bunx vp test tests/e2e-hosted.test.ts
 ```
