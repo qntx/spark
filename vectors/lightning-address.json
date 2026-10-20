@@ -1,0 +1,31 @@
+{
+  "note": "Test vectors only. Never use these keys for funds.",
+  "source": "breez-spark-sdk crates/breez-sdk/lnurl-models/src/signed_message.rs golden_vectors @ breez-spark-sdk@956ff90b44bed9da9a559372ed3cf1fefe06b8a8",
+  "cases": [
+    {
+      "kind": "register",
+      "domain": "lnurl.example.com",
+      "username": "alice",
+      "description": "Pay to alice",
+      "timestamp": 1700000000,
+      "message": "breez-lnurl:v2\nregister\nlnurl.example.com\nalice\n0261d8b11c7eba9f71ccf5180df58416d3b2d19ba917caf57ba4bacead3ce2c2\n1700000000"
+    },
+    {
+      "kind": "unregister",
+      "domain": "lnurl.example.com",
+      "username": "alice",
+      "timestamp": 1700000000,
+      "message": "breez-lnurl:v2\nunregister\nlnurl.example.com\nalice\n1700000000"
+    }
+  ],
+  "descriptionHashes": [
+    {
+      "description": "",
+      "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "description": "abc",
+      "hash": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  ]
+}

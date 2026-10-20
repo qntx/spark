@@ -302,6 +302,16 @@
         }
       },
       "vectors": ["vectors/token-identifier.json"]
+    },
+    {
+      "id": "lightning-address",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/core/lightning-address.ts",
+          "tests": ["packages/spark/tests/lightning-address.test.ts"]
+        }
+      },
+      "vectors": ["vectors/lightning-address.json"]
     }
   ]
 }
