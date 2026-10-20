@@ -138,3 +138,15 @@ export function leavesBalance(leaves: ReadonlyArray<SparkLeaf>): number {
 export { selectExact, selectExactMany, selectLeaves } from "./select.ts";
 export type { LeafSelection } from "./select.ts";
 export { malformedLeafTx, operatorsDisagree, ownsLeaf } from "./verify.ts";
+export {
+  assertOptimizationOptions,
+  DEFAULT_MAX_LEAVES_PER_SWAP,
+  greedyLeaves,
+  MAX_PLANNING_ITERATIONS,
+  maximizeUnilateralExit,
+  minimizeTransferSwap,
+  optimize,
+  shouldOptimize,
+  swapMinimizingLeaves,
+} from "./optimize.ts";
+export type { OptimizationSwap } from "./optimize.ts";

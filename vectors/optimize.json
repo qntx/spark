@@ -1,0 +1,278 @@
+{
+  "vector": "optimize",
+  "version": 1,
+  "source": [
+    "lightspark-spark @0b3a32a sdks/js/packages/spark-sdk/src/tests/optimize.test.ts",
+    "lightspark-spark @0b3a32a sdks/js/packages/spark-sdk/src/utils/optimize.ts",
+    "breez-spark-sdk crates/spark/src/tree/leaf_optimizer.rs (test_calculate_optimization_swaps*)"
+  ],
+  "notes": [
+    "Test only — never use for funds.",
+    "Leaf values are satoshis as safe integers.",
+    "Breez's `max_leaves_per_swap` is an optimization parameter (not a hard SO bound): upstream may emit swaps whose input side exceeds it by one when the receive side forces a larger batch — see case optimize.max64-oversize-input."
+  ],
+  "cases": [
+    {
+      "id": "greedy.zero",
+      "fn": "greedyLeaves",
+      "amount": 0,
+      "expected": []
+    },
+    {
+      "id": "greedy.one",
+      "fn": "greedyLeaves",
+      "amount": 1,
+      "expected": [1]
+    },
+    {
+      "id": "greedy.100",
+      "fn": "greedyLeaves",
+      "amount": 100,
+      "expected": [4, 32, 64]
+    },
+    {
+      "id": "greedy.255",
+      "fn": "greedyLeaves",
+      "amount": 255,
+      "expected": [1, 2, 4, 8, 16, 32, 64, 128]
+    },
+    {
+      "id": "greedy.256",
+      "fn": "greedyLeaves",
+      "amount": 256,
+      "expected": [256]
+    },
+    {
+      "id": "greedy.100000",
+      "fn": "greedyLeaves",
+      "amount": 100000,
+      "expected": [32, 128, 512, 1024, 32768, 65536]
+    },
+    {
+      "id": "swapMinimizing.zero",
+      "fn": "swapMinimizingLeaves",
+      "amount": 0,
+      "multiplicity": 1,
+      "expected": []
+    },
+    {
+      "id": "swapMinimizing.one",
+      "fn": "swapMinimizingLeaves",
+      "amount": 1,
+      "multiplicity": 1,
+      "expected": [1]
+    },
+    {
+      "id": "swapMinimizing.100",
+      "fn": "swapMinimizingLeaves",
+      "amount": 100,
+      "multiplicity": 1,
+      "expected": [1, 1, 2, 4, 4, 8, 16, 32, 32]
+    },
+    {
+      "id": "swapMinimizing.255",
+      "fn": "swapMinimizingLeaves",
+      "amount": 255,
+      "multiplicity": 1,
+      "expected": [1, 2, 4, 8, 16, 32, 64, 128]
+    },
+    {
+      "id": "swapMinimizing.256",
+      "fn": "swapMinimizingLeaves",
+      "amount": 256,
+      "multiplicity": 1,
+      "expected": [1, 1, 2, 4, 8, 16, 32, 64, 128]
+    },
+    {
+      "id": "maximizeUnilateralExit.mixed-batch",
+      "fn": "maximizeUnilateralExit",
+      "inputLeaves": [100, 64, 28, 1, 1],
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [1, 1, 28, 64, 100], "outLeaves": [2, 64, 128] }
+      ]
+    },
+    {
+      "id": "maximizeUnilateralExit.pairs-of-ones",
+      "fn": "maximizeUnilateralExit",
+      "inputLeaves": [1, 1, 1, 1, 1, 1, 1, 1],
+      "maxLeavesPerSwap": 2,
+      "expected": [
+        { "inLeaves": [1, 1], "outLeaves": [2] },
+        { "inLeaves": [1, 1], "outLeaves": [2] },
+        { "inLeaves": [1, 1], "outLeaves": [2] },
+        { "inLeaves": [1, 1], "outLeaves": [2] }
+      ]
+    },
+    {
+      "id": "minimizeTransferSwap.eight",
+      "fn": "minimizeTransferSwap",
+      "inputLeaves": [8],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [8], "outLeaves": [1, 1, 2, 4] }
+      ]
+    },
+    {
+      "id": "minimizeTransferSwap.non-denomination",
+      "fn": "minimizeTransferSwap",
+      "inputLeaves": [100],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [100], "outLeaves": [1, 1, 2, 4, 4, 8, 16, 32, 32] }
+      ]
+    },
+    {
+      "id": "minimizeTransferSwap.split-16-impossible",
+      "fn": "minimizeTransferSwap",
+      "inputLeaves": [16],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 2,
+      "expected": [],
+      "note": "The optimal receive side needs 5 leaves; no cutoff of it fits maxLeavesPerSwap=2, so the batch is dropped entirely (upstream JS and Breez agree: the swap is silently discarded)."
+    },
+    {
+      "id": "shouldOptimize.single-16-mult0",
+      "fn": "shouldOptimize",
+      "inputLeaves": [16],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": false
+    },
+    {
+      "id": "shouldOptimize.two-16-mult0",
+      "fn": "shouldOptimize",
+      "inputLeaves": [16, 16],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": false
+    },
+    {
+      "id": "shouldOptimize.eight-16-mult0",
+      "fn": "shouldOptimize",
+      "inputLeaves": [16, 16, 16, 16, 16, 16, 16, 16],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": true
+    },
+    {
+      "id": "shouldOptimize.single-2-mult1",
+      "fn": "shouldOptimize",
+      "inputLeaves": [2],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": false
+    },
+    {
+      "id": "shouldOptimize.single-64-mult1",
+      "fn": "shouldOptimize",
+      "inputLeaves": [64],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": true
+    },
+    {
+      "id": "optimize.mult0-empty",
+      "fn": "optimize",
+      "inputLeaves": [8],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": []
+    },
+    {
+      "id": "optimize.mult0-single-denom",
+      "fn": "optimize",
+      "inputLeaves": [16],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": []
+    },
+    {
+      "id": "optimize.mult0-consolidate",
+      "fn": "optimize",
+      "inputLeaves": [16, 16, 16, 16, 16, 16, 16, 16],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [16, 16, 16, 16, 16, 16, 16, 16], "outLeaves": [128] }
+      ]
+    },
+    {
+      "id": "optimize.mult0-non-denomination",
+      "fn": "optimize",
+      "inputLeaves": [100000],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [100000], "outLeaves": [32, 128, 512, 1024, 32768, 65536] }
+      ]
+    },
+    {
+      "id": "optimize.mult0-split-non-converging",
+      "fn": "optimize",
+      "inputLeaves": [16, 16, 16, 16],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 2,
+      "expected": [
+        { "inLeaves": [16, 16], "outLeaves": [32] },
+        { "inLeaves": [16, 16], "outLeaves": [32] }
+      ]
+    },
+    {
+      "id": "optimize.mult1-eight",
+      "fn": "optimize",
+      "inputLeaves": [8],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [8], "outLeaves": [1, 1, 2, 4] }
+      ]
+    },
+    {
+      "id": "optimize.mult1-split-4",
+      "fn": "optimize",
+      "inputLeaves": [1, 4],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [4], "outLeaves": [2, 2] }
+      ]
+    },
+    {
+      "id": "optimize.mult1-split-16",
+      "fn": "optimize",
+      "inputLeaves": [1, 16],
+      "multiplicity": 1,
+      "maxLeavesPerSwap": 64,
+      "expected": [
+        { "inLeaves": [16], "outLeaves": [2, 2, 4, 8] }
+      ]
+    },
+    {
+      "id": "optimize.invalid-multiplicity-negative",
+      "fn": "optimize",
+      "inputLeaves": [8],
+      "multiplicity": -1,
+      "maxLeavesPerSwap": 64,
+      "expectError": "SparkInputError"
+    },
+    {
+      "id": "optimize.invalid-multiplicity-above-5",
+      "fn": "optimize",
+      "inputLeaves": [8],
+      "multiplicity": 6,
+      "maxLeavesPerSwap": 64,
+      "expectError": "SparkInputError"
+    },
+    {
+      "id": "optimize.invalid-max-leaves",
+      "fn": "optimize",
+      "inputLeaves": [8],
+      "multiplicity": 0,
+      "maxLeavesPerSwap": 0,
+      "expectError": "SparkInputError"
+    }
+  ]
+}
