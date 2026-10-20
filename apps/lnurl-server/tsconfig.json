@@ -1,4 +1,23 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src", "tests", "vite.config.ts"]
+  "compilerOptions": {
+    // Development resolution for the workspace siblings without a prior pack
+    // build; the emitted app keeps importing the published @qntx/spark* packages.
+    "paths": {
+      "@qntx/spark": ["../../packages/spark/src/index.ts"],
+      "@qntx/spark/crypto": ["../../packages/spark/src/crypto/index.ts"],
+      "@qntx/spark/lnurl": ["../../packages/spark/src/lnurl/index.ts"],
+      "@qntx/spark/server": ["../../packages/spark/src/server/index.ts"],
+      "@qntx/spark/signer": ["../../packages/spark/src/signer/index.ts"],
+      "@qntx/spark-wasm": ["../../packages/spark-wasm/src/index.ts"]
+    }
+  },
+  "include": [
+    "src",
+    "tests",
+    "vite.config.ts",
+    // Ambient declarations the path-mapped spark-wasm sources need in the program.
+    "../../packages/spark-wasm/src/wasm-modules.d.ts",
+    "../../packages/spark-wasm/src/wasm-env.d.ts"
+  ]
 }
