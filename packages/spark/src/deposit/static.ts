@@ -38,6 +38,12 @@ export const MIN_STATIC_REFUND_FEE_SATS = 194;
 
 const UTXO_PAGE_SIZE = 100;
 
+/**
+ * Hard bound on coordinator-driven pagination, same as `query_nodes`/`query_unused_deposit_
+ * addresses`: a hostile SO can keep returning full pages forever, so the walk must terminate.
+ */
+const MAX_PAGES = 1000;
+
 export type StaticDepositUtxo = {
   /** Display-order hex txid. */
   readonly txid: string;
@@ -170,12 +176,16 @@ function mapUtxo(
  * `claimStatic`/`refundStatic` alongside a caller-supplied `rawTx`.
  */
 export async function queryStaticDepositUtxos(
-  options: DepositCoordinator & { readonly call?: CallOptions },
+  options: DepositCoordinator & {
+    readonly call?: CallOptions;
+    /** Page bound override, for focused tests; walks default to {@link MAX_PAGES}. */
+    readonly maxPages?: number;
+  },
 ): Promise<StaticDepositUtxo[]> {
   const { address, script } = await staticDepositAddress(options);
   const utxos: StaticDepositUtxo[] = [];
   let offset = 0;
-  for (;;) {
+  for (let pageIndex = 0; pageIndex < (options.maxPages ?? MAX_PAGES); pageIndex++) {
     // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
     const response = await utxoPage(options, address, offset);
     for (const utxo of response.utxos) {
@@ -184,8 +194,13 @@ export async function queryStaticDepositUtxos(
     if (response.utxos.length < UTXO_PAGE_SIZE) {
       return utxos;
     }
-    offset += UTXO_PAGE_SIZE;
+    const nextOffset = Number(response.offset);
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+      throw new SparkError("static deposit: coordinator returned a non-advancing offset");
+    }
+    offset = nextOffset;
   }
+  throw new SparkError("static deposit: coordinator did not stop returning full pages");
 }
 
 function checkUtxoRef(txid: string, vout: number): void {
@@ -201,14 +216,18 @@ function checkUtxoRef(txid: string, vout: number): void {
  * (P2TR(verifyingKey)).
  */
 async function resolveStaticUtxo(
-  options: DepositCoordinator & { readonly call?: CallOptions },
+  options: DepositCoordinator & {
+    readonly call?: CallOptions;
+    readonly maxPages?: number;
+  },
   request: { readonly txid: string; readonly vout: number; readonly rawTx?: Uint8Array },
   deposit: { readonly address: string; readonly script: Uint8Array },
 ): Promise<{ rawTx: Uint8Array; script: Uint8Array; amountSats: number }> {
   let { rawTx } = request;
   if (rawTx === undefined) {
     let offset = 0;
-    for (;;) {
+    let done = false;
+    for (let pageIndex = 0; pageIndex < (options.maxPages ?? MAX_PAGES) && !done; pageIndex++) {
       // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
       const response = await utxoPage(options, deposit.address, offset);
       const found = response.utxos.find(
@@ -217,10 +236,17 @@ async function resolveStaticUtxo(
       if (found !== undefined && found.rawTx.length > 0) {
         ({ rawTx } = found);
       }
-      if (found !== undefined || response.utxos.length < UTXO_PAGE_SIZE) {
-        break;
+      done = found !== undefined || response.utxos.length < UTXO_PAGE_SIZE;
+      if (!done) {
+        const nextOffset = Number(response.offset);
+        if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+          throw new SparkError("static deposit: coordinator returned a non-advancing offset");
+        }
+        offset = nextOffset;
       }
-      offset += UTXO_PAGE_SIZE;
+    }
+    if (!done) {
+      throw new SparkError("static deposit: coordinator did not stop returning full pages");
     }
   }
   if (rawTx === undefined) {
@@ -258,6 +284,8 @@ export async function claimStaticDeposit(
     readonly ssp: SspClient;
     readonly sspIdentityPublicKey: Uint8Array;
     readonly call?: CallOptions;
+    /** Page bound override for the UTXO lookup, for focused tests. */
+    readonly maxPages?: number;
   },
   request: {
     readonly txid: string;
@@ -345,7 +373,11 @@ export async function claimStaticDeposit(
  * broadcast.
  */
 export async function refundStaticDeposit(
-  options: DepositCoordinator & { readonly call?: CallOptions },
+  options: DepositCoordinator & {
+    readonly call?: CallOptions;
+    /** Page bound override for the UTXO lookup, for focused tests. */
+    readonly maxPages?: number;
+  },
   request: {
     readonly txid: string;
     readonly vout: number;

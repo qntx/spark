@@ -524,6 +524,62 @@ describe("deposits.staticUtxos", () => {
     ).rejects.toThrow("does not pay the static address");
     signer.dispose();
   });
+
+  test("throws when the coordinator never stops returning full pages", async () => {
+    const signer = await testSigner();
+    const { fabricated } = await staticFixture(signer);
+    // Every page full and advancing — the walk must give up at its page bound instead of
+    // paginating forever. Three pages stand in for MAX_PAGES.
+    let pages = 0;
+    await expect(
+      queryStaticDepositUtxos({
+        ...coordinator(signer, {
+          generate_static_deposit_address: staticAddressHandler(fabricated),
+          get_utxos_for_address: (req) => {
+            pages += 1;
+            return create(GetUtxosForAddressResponseSchema, {
+              utxos: Array.from({ length: 100 }, (_, i) =>
+                create(UTXOSchema, {
+                  txid: hexToBytes("ab".repeat(32)),
+                  vout: i,
+                  network: Network.REGTEST,
+                }),
+              ),
+              offset: req.offset + 100n,
+            });
+          },
+        }),
+        maxPages: 3,
+      }),
+    ).rejects.toThrow("did not stop returning full pages");
+    expect(pages).toBe(3);
+    signer.dispose();
+  });
+
+  test("throws when the coordinator's offset does not advance", async () => {
+    const signer = await testSigner();
+    const { fabricated } = await staticFixture(signer);
+    await expect(
+      queryStaticDepositUtxos(
+        coordinator(signer, {
+          generate_static_deposit_address: staticAddressHandler(fabricated),
+          // A full page whose offset rewinds would otherwise paginate forever.
+          get_utxos_for_address: () =>
+            create(GetUtxosForAddressResponseSchema, {
+              utxos: Array.from({ length: 100 }, (_, i) =>
+                create(UTXOSchema, {
+                  txid: hexToBytes("ab".repeat(32)),
+                  vout: i,
+                  network: Network.REGTEST,
+                }),
+              ),
+              offset: 0n,
+            }),
+        }),
+      ),
+    ).rejects.toThrow("non-advancing offset");
+    signer.dispose();
+  });
 });
 
 describe("claimStaticDeposit", () => {
@@ -746,6 +802,42 @@ describe("claimStaticDeposit", () => {
         { txid, vout: 0, maxFeeSats: 500 },
       ),
     ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("throws when the SO keeps returning full UTXO pages without the output", async () => {
+    const signer = await testSigner();
+    const { fabricated, txid } = await claimFixture(signer);
+    // Every page full, advancing, and never carrying the requested txid — the scan must give
+    // up at its page bound instead of paginating forever.
+    let pages = 0;
+    await expect(
+      claimStaticDeposit(
+        {
+          ...coordinator(signer, {
+            generate_static_deposit_address: staticAddressHandler(fabricated),
+            get_utxos_for_address: (req) => {
+              pages += 1;
+              return create(GetUtxosForAddressResponseSchema, {
+                utxos: Array.from({ length: 100 }, (_, i) =>
+                  create(UTXOSchema, {
+                    txid: hexToBytes("cd".repeat(32)),
+                    vout: i,
+                    network: Network.REGTEST,
+                  }),
+                ),
+                offset: req.offset + 100n,
+              });
+            },
+          }),
+          ssp: fakeSsp({}).ssp,
+          sspIdentityPublicKey: SSP_IDENTITY,
+          maxPages: 3,
+        },
+        { txid, vout: 0, maxFeeSats: 500 },
+      ),
+    ).rejects.toThrow("did not stop returning full pages");
+    expect(pages).toBe(3);
     signer.dispose();
   });
 

@@ -226,6 +226,10 @@ export type SparkClient = {
      * Pays a BOLT-11 invoice via a preimage swap with the SSP. `amountSats` is required for
      * zero-amount invoices and rejected otherwise; `transferId` makes a retry resume the same
      * transfer instead of paying twice.
+     *
+     * On a `transferId` retry the reported `feeSats` is derived as the committed transfer total
+     * minus the amount passed in this call — pass the same invoice and `amountSats` as the first
+     * attempt. The SSP send request's echoed invoice is still verified before continuing.
      */
     readonly pay: (options: {
       readonly invoice: string;
