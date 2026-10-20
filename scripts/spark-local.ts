@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 // scripts/lock.json (three TLS operators + bitcoind + postgres). Test-only tooling; the
 // packages never run against it.
 //
-//   bun scripts/spark-local.ts up      # verify pin, start stack, wait for SOs, export certs
+//   bun scripts/spark-local.ts up      # verify pin, start stack, wait for SOs + keyshares, certs
 //   bun scripts/spark-local.ts status  # compose ps + port probe
 //   bun scripts/spark-local.ts down    # stop the stack (keeps volumes)
 //   bun scripts/spark-local.ts reset   # down -v + up: wipes chain state (use when bitcoind
@@ -36,6 +36,7 @@ const PROJECT = "spark-local";
 const SO_PORTS = [8535, 8536, 8537] as const;
 const CERT_DIR = join(tmpdir(), "spark-local-certs");
 const READY_TIMEOUT_MS = 300_000;
+const KEYSHARE_TIMEOUT_MS = 300_000;
 
 function fail(message: string): never {
   console.error(`spark-local: ${message}`);
@@ -106,6 +107,55 @@ function waitForOperators(): void {
   }
 }
 
+/**
+ * A fresh stack has no signing keyshares: each operator's `dkg` task (10s tick) runs a
+ * cross-operator DKG only once the operators are all up. Until every operator holds at least one
+ * AVAILABLE keyshare of its own, deposit/tree creation fails with "not enough signing keyshares
+ * available". Poll each operator DB through the postgres service.
+ */
+function waitForKeyshares(): void {
+  const deadline = Date.now() + KEYSHARE_TIMEOUT_MS;
+  const databases = SO_PORTS.map((_, index) => `sparkoperator_${index}`);
+  for (;;) {
+    const counts = databases.map((db) => {
+      const result = spawnSync(
+        "docker",
+        [
+          "compose",
+          "-f",
+          COMPOSE,
+          "-f",
+          COMPOSE_OVERRIDE,
+          "-p",
+          PROJECT,
+          "exec",
+          "-T",
+          "postgres",
+          "psql",
+          "-U",
+          "postgres",
+          "-d",
+          db,
+          "-tAc",
+          "SELECT COUNT(*) FROM signing_keyshares WHERE status = 'AVAILABLE'",
+        ],
+        { encoding: "utf8" },
+      );
+      return Math.trunc(Number((result.stdout ?? "").trim())) || 0;
+    });
+    if (counts.every((count) => count > 0)) {
+      console.log(`all operators hold keyshares (available: ${counts.join(", ")})`);
+      return;
+    }
+    if (Date.now() > deadline) {
+      fail(
+        `keyshares not ready after ${KEYSHARE_TIMEOUT_MS / 1000}s (available: ${counts.join(",")})`,
+      );
+    }
+    spawnSync("sleep", ["5"]);
+  }
+}
+
 function exportCerts(): void {
   const volume = `${PROJECT}_tls-certs`;
   const listing = sh(
@@ -138,6 +188,7 @@ function printEnv(): void {
 function up(): void {
   compose("up", "-d");
   waitForOperators();
+  waitForKeyshares();
   exportCerts();
   printEnv();
 }
