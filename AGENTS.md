@@ -48,6 +48,11 @@ bun run test:parity
 bun run test:ffi-host                            # C host drives the shared vectors
 SPARK_E2E_HOSTED=1 bun run --cwd packages/spark test tests/e2e-hosted-swap.test.ts  # seed from SPARK_HOSTED_SEED or the gitignored .env.hosted
 bun run --cwd packages/spark-wasm build:wasm     # hermetic docker build (pinned linux/amd64)
+
+# The regtest workflow (.github/workflows/regtest.yml) runs these serially:
+SPARK_E2E_LOCAL=1 bunx vp test --no-file-parallelism tests/e2e-local-*.test.ts   # needs `bun scripts/spark-local.ts up` with SPARK_REF set first
+SPARK_E2E_HOSTED=1 bunx vp test --no-file-parallelism tests/e2e-hosted-*.test.ts  # both run from packages/spark
+bun packages/spark/scripts/hosted-balance.ts   # account 0 sats; the hosted job fails below 100_000
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features -- -D warnings
