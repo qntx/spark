@@ -5,7 +5,7 @@ import { connectOperator } from "../src/connection/index.ts";
 import { encodeSparkAddress } from "../src/core/address.ts";
 import { sparkNetworkConfig, sparkNetworkProto } from "../src/core/network.ts";
 import { TreeNodeStatus } from "../src/proto/gen/spark_pb.ts";
-import { hostedSeed, hostedWallet, SEND_OK, sendStatusUntil } from "./support/hosted.ts";
+import { hostedSeed, hostedWallet, sendStatusUntil } from "./support/hosted.ts";
 import { claimPendingUntil } from "./support/local.ts";
 
 const CLAIM_DEADLINE_MS = 180_000;
@@ -134,7 +134,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       console.log("C paid:", paid1.requestId, "transfer:", paid1.transferId, "fee:", paid1.feeSats);
       const settled1 = await sendStatusUntil(clientC, paid1, Date.now() + SEND_DEADLINE_MS);
       console.log("send status:", settled1.status);
-      expect(SEND_OK.has(settled1.status)).toBe(true);
+      expect(settled1.outcome).toBe("succeeded");
 
       const claimed1 = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
       expect(claimed1.length).toBeGreaterThan(0);
@@ -151,7 +151,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       console.log("C paid:", paid2.requestId, "transfer:", paid2.transferId, "fee:", paid2.feeSats);
       const settled2 = await sendStatusUntil(clientC, paid2, Date.now() + SEND_DEADLINE_MS);
       console.log("send status:", settled2.status);
-      expect(SEND_OK.has(settled2.status)).toBe(true);
+      expect(settled2.outcome).toBe("succeeded");
       const claimed2 = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
       expect(claimed2.length).toBeGreaterThan(0);
       await expect(clientB.balance()).resolves.toBe(balanceB0 + 1000);

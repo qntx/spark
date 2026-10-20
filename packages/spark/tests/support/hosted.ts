@@ -5,6 +5,7 @@ import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 
 import { createSparkClient } from "../../src/client/index.ts";
 import { createMemorySparkStore } from "../../src/exit/store.ts";
+import type { LightningSendStatus } from "../../src/lightning/index.ts";
 import { createSparkSigner, sparkAccountKey } from "../../src/signer/index.ts";
 import { loadWasmBackend } from "./backend.ts";
 
@@ -89,30 +90,17 @@ async function esplora(
 }
 
 /**
- * Terminal send-request statuses per upstream SparkLightningSendRequestStatus. A same-SSP
- * ("internal") lightning payment converges to TRANSFER_COMPLETED rather than
- * LIGHTNING_PAYMENT_SUCCEEDED — upstream's integration test asserts exactly that. The hosted SSP
- * still surfaces payment_preimage on the send request, which sendStatus verifies.
+ * Polls `lightning.sendStatus` until the send is settled either way for the funds — `succeeded`
+ * (verified preimage) or `returned` (swap undone) — or the deadline passes. `failed` is not
+ * terminal: the SSP keeps retrying the swap return until `returned`.
  */
-export const SEND_DONE = new Set<string>([
-  "TRANSFER_COMPLETED",
-  "TRANSFER_FAILED",
-  "LIGHTNING_PAYMENT_SUCCEEDED",
-  "LIGHTNING_PAYMENT_FAILED",
-  "USER_TRANSFER_VALIDATION_FAILED",
-  "USER_SWAP_RETURNED",
-  "USER_SWAP_RETURN_FAILED",
-]);
-export const SEND_OK = new Set<string>(["TRANSFER_COMPLETED", "LIGHTNING_PAYMENT_SUCCEEDED"]);
-
-/** Polls `lightning.sendStatus` until the request reaches a terminal status. */
 export async function sendStatusUntil(
   client: HostedWallet["client"],
   payment: { requestId: string; paymentHash: Uint8Array },
   deadline: number,
-): Promise<{ status: string; outcome: string; preimage?: Uint8Array }> {
+): Promise<LightningSendStatus> {
   const status = await client.lightning.sendStatus(payment);
-  if (SEND_DONE.has(status.status) || Date.now() > deadline) {
+  if (status.outcome === "succeeded" || status.outcome === "returned" || Date.now() > deadline) {
     return status;
   }
   await sleep(5000);

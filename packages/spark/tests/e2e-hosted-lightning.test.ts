@@ -3,7 +3,7 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { decodeSparkAddress } from "../src/core/address.ts";
 import { decodeBolt11 } from "../src/core/bolt11.ts";
-import { hostedSeed, hostedWallet, SEND_OK, sendStatusUntil } from "./support/hosted.ts";
+import { hostedSeed, hostedWallet, sendStatusUntil } from "./support/hosted.ts";
 import { claimPendingUntil } from "./support/local.ts";
 
 const CLAIM_DEADLINE_MS = 180_000;
@@ -59,7 +59,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     // Internal (same-SSP) payments terminate at TRANSFER_COMPLETED; a real outbound
     // lightning payment would end at LIGHTNING_PAYMENT_SUCCEEDED. When the SSP surfaces a
     // preimage, sendStatus has already verified sha256(preimage) == the payment hash.
-    expect(SEND_OK.has(settled1.status)).toBe(true);
+    expect(settled1.outcome).toBe("succeeded");
     console.log("preimage surfaced:", settled1.preimage !== undefined);
 
     const claimed1 = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
@@ -89,7 +89,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     );
     const settled2 = await sendStatusUntil(clientA, paid2, Date.now() + SEND_DEADLINE_MS);
     console.log("send status:", settled2.status);
-    expect(SEND_OK.has(settled2.status)).toBe(true);
+    expect(settled2.outcome).toBe("succeeded");
     console.log("preimage surfaced:", settled2.preimage !== undefined);
     await expect(clientB.lightning.receiveStatus(invoice2.id)).resolves.toMatchObject({
       status: expect.any(String),
