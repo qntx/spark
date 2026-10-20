@@ -1,4 +1,5 @@
 import type { SigningTarget } from "../core/bitcoin/sighash.ts";
+import type { LightningAddressStatement } from "../core/lightning-address.ts";
 import type { SparkNetwork } from "../core/network.ts";
 
 /**
@@ -95,6 +96,9 @@ export type FrostAggregateJob = {
  * - `token-transaction`: `partialTransaction` is a serialized `spark_token.PartialTokenTransaction`;
  *   the digest is its V3 protoreflecthash, signed with BIP-340 (upstream tokenSignatures:
  *   SCHNORR).
+ * - `lightning-address`: a Breez LNURL-server v2 message authorizing a Lightning Address
+ *   register/unregister on `domain`; the digest is `sha256` of the canonical LF-joined message,
+ *   signed with DER ECDSA.
  */
 export type IdentityStatement =
   | { readonly kind: "so-challenge"; readonly challenge: Uint8Array }
@@ -131,7 +135,8 @@ export type IdentityStatement =
       readonly kind: "token-transaction";
       /** Serialized `spark_token.PartialTokenTransaction`. */
       readonly partialTransaction: Uint8Array;
-    };
+    }
+  | LightningAddressStatement;
 
 /** A signing operator the signer builds per-operator packages for. */
 export type SparkOperator = {

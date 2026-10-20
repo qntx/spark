@@ -15,6 +15,10 @@ import {
 } from "../core/hashing/statements.ts";
 import { hashPartialTokenTransaction } from "../core/hashing/token.ts";
 import { protoInvoiceToPlain } from "../core/invoice.ts";
+import {
+  lightningAddressMessage,
+  lightningAddressMessageDigest,
+} from "../core/lightning-address.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SparkInputError } from "../errors/index.ts";
 import { ChallengeSchema } from "../proto/gen/spark_authn_pb.ts";
@@ -117,6 +121,12 @@ export function statementDigest(
     return {
       digest: hashSparkInvoice(invoice, context.identityPublicKey, context.network),
       format: "schnorr",
+    };
+  }
+  if (statement.kind === "lightning-address") {
+    return {
+      digest: lightningAddressMessageDigest(lightningAddressMessage(statement)),
+      format: "der",
     };
   }
   if (statement.kind === "token-transaction") {
