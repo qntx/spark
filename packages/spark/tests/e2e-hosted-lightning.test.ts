@@ -100,10 +100,12 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     const balanceB = await clientB.balance();
     console.log("B balance:", balanceB);
 
-    // B returns its whole balance to A so the account stays reusable.
+    // B returns what it received to A so the account stays reusable. The send stays
+    // bounded: a whole-balance send selects every leaf, and a long-lived account
+    // accumulates more leaves than one signing round allows.
     const sentBack = await clientB.transfers.send({
       receiver: identityA,
-      amountSats: balanceB,
+      amountSats: balanceB - balanceB0,
     });
     console.log("B sent back:", sentBack.id, sentBack.status);
     const reclaimed = await claimPendingUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
@@ -111,7 +113,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     const balanceAFinal = await clientA.balance();
     console.log("A balance final:", balanceAFinal);
     // A is out the two lightning fees; the invoiced amounts came back with B's return.
-    expect(balanceAFinal).toBe(balanceA0 + balanceB0 - paid1.feeSats - paid2.feeSats);
+    expect(balanceAFinal).toBe(balanceA0 - paid1.feeSats - paid2.feeSats);
 
     clientA.close();
     clientB.close();
