@@ -4,6 +4,7 @@ export { tokenBalances } from "./model.ts";
 export {
   buildTransferPartial,
   broadcastPartialTokenTransaction,
+  MAX_TOKEN_OUTPUTS_TX,
   selectTokenOutputs,
 } from "./transfer.ts";
 export type { TokenNetworkParams } from "./transfer.ts";

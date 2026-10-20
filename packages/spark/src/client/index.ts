@@ -98,6 +98,15 @@ export type SparkClient = {
       readonly amount: bigint;
       readonly receiver: string | Uint8Array;
     }) => Promise<string>;
+    /**
+     * Merges this identity's available outputs for `tokenIdentifier` into a single self-owned
+     * output (upstream `optimizeTokenOutputs`): smallest-first, at most 500 inputs per transaction,
+     * on demand — no change output is created. Returns `undefined` when fewer than two available
+     * outputs exist; call again to keep merging when more than 500 were owned.
+     */
+    readonly consolidate: (options: {
+      readonly tokenIdentifier: string;
+    }) => Promise<{ readonly transactionHash: string } | undefined>;
   };
   readonly invoices: {
     /**
