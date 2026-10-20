@@ -28,10 +28,8 @@ const config: UserConfig = defineConfig({
         find: /^@qntx\/spark$/,
         replacement: path.resolve("../../packages/spark/src/index.ts"),
       },
-      {
-        find: /^@qntx\/spark-wasm$/,
-        replacement: path.resolve("../../packages/spark-wasm/src/load.ts"),
-      },
+      // No alias for @qntx/spark-wasm: tests resolve its built dist so the default loader's
+      // bundled spark.wasm path resolution works exactly as in production.
     ],
     include: ["tests/**/*.test.ts"],
   },

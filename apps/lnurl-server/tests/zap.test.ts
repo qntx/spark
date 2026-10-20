@@ -179,7 +179,67 @@ describe("buildZapReceipt", () => {
     expect(validation.valid).toBe(true);
   });
 
-  test("drops non-ws relays and caps at 10", () => {
+  test("keeps public wss relays, including custom ports and public IP literals", () => {
+    const accepted = [
+      "wss://relay.example",
+      "wss://relay.example:7777/path",
+      "wss://8.8.8.8",
+      "wss://172.32.0.1", // just outside 172.16/12
+      "wss://100.128.0.1", // just outside 100.64/10
+      "wss://198.20.0.1", // just outside 198.18/15
+      "wss://223.255.255.255", // just below 224/4
+    ];
+    const zapJson = zapRequestJson([
+      ["p", TARGET],
+      ["relays", ...accepted],
+    ]);
+    const { relays } = buildZapReceipt({
+      zapRequestJson: zapJson,
+      invoice: "lnbcrt1...",
+      preimageHex: "ee".repeat(32),
+      keys: RECEIPT_KEYS,
+      now: NOW,
+    });
+    expect(relays).toStrictEqual(accepted);
+  });
+
+  test.each([
+    ["ws scheme", "ws://relay.example"],
+    ["http scheme", "http://relay.example"],
+    ["not a URL", "not a relay"],
+    ["localhost", "wss://localhost"],
+    ["*.localhost", "wss://foo.localhost"],
+    ["localhost with a trailing dot", "wss://localhost."],
+    ["IPv6 loopback", "wss://[::1]"],
+    ["IPv6 link-local", "wss://[fe80::1]"],
+    ["0.0.0.0/8", "wss://0.12.34.56"],
+    ["10/8", "wss://10.0.0.1"],
+    ["100.64/10", "wss://100.64.0.1"],
+    ["127/8", "wss://127.0.0.1"],
+    ["integer-form loopback", "wss://2130706433"],
+    ["short-form loopback", "wss://127.1"],
+    ["169.254/16", "wss://169.254.0.1"],
+    ["172.16/12", "wss://172.16.0.1"],
+    ["192.168/16", "wss://192.168.1.1"],
+    ["198.18/15", "wss://198.19.255.1"],
+    ["224/4 multicast", "wss://224.0.0.1"],
+    ["240/4 reserved", "wss://255.255.255.255"],
+  ])("drops the relay: %s", (_name, url) => {
+    const zapJson = zapRequestJson([
+      ["p", TARGET],
+      ["relays", url],
+    ]);
+    const { relays } = buildZapReceipt({
+      zapRequestJson: zapJson,
+      invoice: "lnbcrt1...",
+      preimageHex: "ee".repeat(32),
+      keys: RECEIPT_KEYS,
+      now: NOW,
+    });
+    expect(relays).toStrictEqual([]);
+  });
+
+  test("caps accepted relays at 10", () => {
     const many = Array.from({ length: 14 }, (_, i) => `wss://r${i}.example`);
     const zapJson = zapRequestJson([
       ["p", TARGET],
@@ -194,7 +254,7 @@ describe("buildZapReceipt", () => {
     });
     expect(relays).toHaveLength(10);
     expect(relays[0]).toBe("wss://good.example");
-    expect(relays.every((r) => r.startsWith("ws"))).toBe(true);
+    expect(relays.every((r) => r.startsWith("wss://"))).toBe(true);
   });
 });
 
