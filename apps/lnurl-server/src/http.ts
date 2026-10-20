@@ -4,11 +4,12 @@
 
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 
 import type { LightningAddressServer } from "@qntx/spark/server";
 
-/** Register/unregister JSON bodies are small; anything bigger is rejected up front. */
+/** Register/unregister JSON bodies are small; anything bigger is rejected before it is read. */
 export const MAX_BODY_BYTES = 16_384;
 
 async function respond(result: Promise<{ status: number; body: unknown }>): Promise<Response> {
@@ -17,20 +18,14 @@ async function respond(result: Promise<{ status: number; body: unknown }>): Prom
   return Response.json(body, { status });
 }
 
-type JsonBody =
-  | { readonly ok: true; readonly body: unknown }
-  | { readonly ok: false; readonly status: 400 | 413 };
+type JsonBody = { readonly ok: true; readonly body: unknown } | { readonly ok: false };
 
-/** Parses the request JSON bounded by {@link MAX_BODY_BYTES}; reports 413/400 on bad input. */
+/** Parses the request JSON — the bodyLimit middleware has already bounded the size. */
 async function readJsonBody(c: Context): Promise<JsonBody> {
-  const text = await c.req.text();
-  if (Buffer.byteLength(text) > MAX_BODY_BYTES) {
-    return { ok: false, status: 413 };
-  }
   try {
-    return { ok: true, body: JSON.parse(text) as unknown };
+    return { ok: true, body: (await c.req.json()) as unknown };
   } catch {
-    return { ok: false, status: 400 };
+    return { ok: false };
   }
 }
 
@@ -56,12 +51,20 @@ export function createLnurlApp(server: LightningAddressServer): Hono {
 
   app.use("*", cors({ origin: "*", allowMethods: ["GET", "POST", "DELETE", "OPTIONS"] }));
 
-  // Body size cap for the write routes (register/unregister carry small signed statements).
+  // Body size cap for the write routes (register/unregister carry small signed statements) —
+  // enforced before the body is buffered, not after.
+  app.use(
+    "/lnurlpay/:pubkey",
+    bodyLimit({
+      maxSize: MAX_BODY_BYTES,
+      onError: (c) => c.json({ status: "ERROR", reason: "body too large" }, 413),
+    }),
+  );
+
   app.post("/lnurlpay/:pubkey", async (c) => {
     const body = await readJsonBody(c);
     if (!body.ok) {
-      const reason = body.status === 413 ? "body too large" : "invalid JSON body";
-      return c.json({ status: "ERROR", reason }, body.status);
+      return c.json({ status: "ERROR", reason: "invalid JSON body" }, 400);
     }
     return respond(server.register(c.req.param("pubkey"), body.body));
   });
@@ -69,8 +72,7 @@ export function createLnurlApp(server: LightningAddressServer): Hono {
   app.delete("/lnurlpay/:pubkey", async (c) => {
     const body = await readJsonBody(c);
     if (!body.ok) {
-      const reason = body.status === 413 ? "body too large" : "invalid JSON body";
-      return c.json({ status: "ERROR", reason }, body.status);
+      return c.json({ status: "ERROR", reason: "invalid JSON body" }, 400);
     }
     return respond(server.unregister(c.req.param("pubkey"), body.body));
   });

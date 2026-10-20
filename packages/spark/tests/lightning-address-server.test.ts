@@ -108,6 +108,7 @@ type CreateInvoiceCall = {
   amountSats: number;
   descriptionHash?: Uint8Array;
   receiver?: string | Uint8Array;
+  expirySecs?: number;
 };
 
 function fakeClient(options?: {
@@ -157,8 +158,17 @@ function fakeClient(options?: {
   return { calls, statusCalls, client };
 }
 
-function serverWith(client: LightningAddressServerClient, zap?: object) {
-  const store = createMemoryLightningAddressStore();
+function serverWith(
+  client: LightningAddressServerClient,
+  zap?: object,
+  overrides?: {
+    readonly invoiceExpirySecs?: number;
+    readonly maxPendingInvoicesPerUser?: number;
+    readonly maxPendingInvoices?: number;
+    readonly settleBatch?: number;
+  },
+) {
+  const store = createMemoryLightningAddressStore(() => NOW_MS);
   const server = createLightningAddressServer({
     client,
     domain: DOMAIN,
@@ -168,6 +178,7 @@ function serverWith(client: LightningAddressServerClient, zap?: object) {
     commentAllowed: 255,
     zap: zap === undefined ? undefined : (zap as never),
     now: () => NOW_MS,
+    ...overrides,
   });
   return { server, store };
 }
@@ -425,6 +436,53 @@ describe("invoice", () => {
     expect(record?.comment).toBe("tip");
   });
 
+  test("requests the configured invoice expiry — 3600 by default", async () => {
+    const { client, calls } = fakeClient();
+    const { server: custom } = serverWith(client, undefined, { invoiceExpirySecs: 600 });
+    await registerAlice(custom);
+    await custom.invoice("alice", { amount: 1000 });
+    const { server: defaults } = serverWith(client);
+    await registerAlice(defaults, PUBKEY_HEX_B, SECRET_B, "bob");
+    await defaults.invoice("bob", { amount: 1000 });
+    expect(calls.map((call) => call.expirySecs)).toStrictEqual([600, 3600]);
+  });
+
+  test("rejects invoices past the per-user and global pending caps", async () => {
+    const perUser = serverWith(fakeClient().client, undefined, {
+      maxPendingInvoicesPerUser: 1,
+    });
+    await registerAlice(perUser.server);
+    await perUser.server.invoice("alice", { amount: 1000 }); // fills the quota
+    const second = await perUser.server.invoice("alice", { amount: 2000 });
+    expect(second.body).toStrictEqual({ status: "ERROR", reason: "too many pending invoices" });
+
+    // The same row also fills a global cap of 1 — even for another payee.
+    const global = serverWith(fakeClient().client, undefined, { maxPendingInvoices: 1 });
+    await registerAlice(global.server);
+    await global.server.invoice("alice", { amount: 1000 });
+    await global.server.register(PUBKEY_HEX_B, registerBody("bob", SECRET_B, NOW_SECS + 1));
+    const other = await global.server.invoice("bob", { amount: 1000 });
+    expect(other.body).toStrictEqual({ status: "ERROR", reason: "too many pending invoices" });
+    // Expired rows never count toward the cap — the error is alice's pending invoice alone.
+    await global.store.putInvoice({
+      paymentHash: "dd".repeat(32),
+      requestId: "req-old",
+      name: "bob",
+      pubkeyHex: PUBKEY_HEX_B,
+      invoice: "lnbcrt-old",
+      expiresAtMs: NOW_MS - 1,
+    } satisfies LightningAddressInvoice);
+    // Settling alice's invoice frees the quota.
+    const settled = await global.store.settleInvoice(
+      bytesToHex(sha256(utf8ToBytes("hash-1"))),
+      "cc".repeat(32),
+    );
+    expect(settled).toBeDefined();
+    const freed = await global.server.invoice("bob", { amount: 1000 });
+    expect((freed.body as { status?: string }).status).not.toBe("ERROR");
+    expect((freed.body as { pr?: string }).pr).toBeDefined();
+  });
+
   test("a nostr zap request replaces the metadata in the description hash", async () => {
     const { client, calls } = fakeClient();
     const nostr = `{"kind":9734,"content":"zap"}`;
@@ -505,8 +563,24 @@ describe("verify + settlePending", () => {
     expect(settled[0]!.paymentHash).toBe(bytesToHex(sha256(preimage)));
 
     // req-2 stays pending — the next round retries it.
-    const pending = await store.pendingInvoices(NOW_MS);
+    const pending = await store.pendingInvoices(NOW_MS, 10);
     expect(pending.map((i) => i.requestId)).toStrictEqual(["req-2"]);
+  });
+
+  test("settlePending bounds a round and rotates least-recently-checked first", async () => {
+    const { client, statusCalls } = fakeClient(); // nothing settles
+    const { server } = serverWith(client, undefined, { settleBatch: 2 });
+    await registerAlice(server);
+    await server.invoice("alice", { amount: 1000 }); // req-1
+    await server.invoice("alice", { amount: 2000 }); // req-2
+    await server.invoice("alice", { amount: 3000 }); // req-3
+
+    // Round 1: insertion order — every record is unchecked.
+    await server.settlePending();
+    expect(statusCalls).toStrictEqual(["req-1", "req-2"]);
+    // Round 2: the never-checked req-3 goes first, then the oldest check.
+    await server.settlePending();
+    expect(statusCalls).toStrictEqual(["req-1", "req-2", "req-3", "req-1"]);
   });
 
   test("verify lowercases the hash and rejects malformed input", async () => {
@@ -526,5 +600,93 @@ describe("verify + settlePending", () => {
       status: "ERROR",
       reason: "Not found",
     });
+  });
+});
+
+describe("memory store", () => {
+  function invoice(overrides: Partial<LightningAddressInvoice> = {}): LightningAddressInvoice {
+    return {
+      paymentHash: "ab".repeat(32),
+      requestId: "req-1",
+      name: "alice",
+      pubkeyHex: PUBKEY_HEX_A,
+      invoice: "lnbcrt1...",
+      expiresAtMs: NOW_MS + 60_000,
+      ...overrides,
+    };
+  }
+
+  test("countPendingInvoices scopes by pubkey and ignores settled and expired rows", async () => {
+    const store = createMemoryLightningAddressStore();
+    await store.putInvoice(invoice());
+    await store.putInvoice(
+      invoice({ paymentHash: "11".repeat(32), requestId: "req-2", pubkeyHex: PUBKEY_HEX_B }),
+    );
+    await store.putInvoice(
+      invoice({ paymentHash: "22".repeat(32), requestId: "req-3", expiresAtMs: NOW_MS - 1 }),
+    );
+    await store.putInvoice(
+      invoice({ paymentHash: "33".repeat(32), requestId: "req-4", preimageHex: "cc".repeat(32) }),
+    );
+    await expect(store.countPendingInvoices(NOW_MS)).resolves.toBe(2);
+    await expect(store.countPendingInvoices(NOW_MS, PUBKEY_HEX_A)).resolves.toBe(1);
+    await expect(store.countPendingInvoices(NOW_MS, PUBKEY_HEX_B)).resolves.toBe(1);
+  });
+
+  test("pendingInvoices caps the batch and rotates least-recently-checked first", async () => {
+    const store = createMemoryLightningAddressStore();
+    await store.putInvoice(invoice({ requestId: "req-1" }));
+    await store.putInvoice(
+      invoice({ paymentHash: "11".repeat(32), requestId: "req-2", expiresAtMs: NOW_MS + 120_000 }),
+    );
+    await store.putInvoice(
+      invoice({ paymentHash: "22".repeat(32), requestId: "req-3", expiresAtMs: NOW_MS + 180_000 }),
+    );
+    const first = await store.pendingInvoices(NOW_MS, 2);
+    expect(first.map((i) => i.requestId)).toStrictEqual(["req-1", "req-2"]);
+    await store.markChecked("ab".repeat(32), NOW_MS + 1);
+    await store.markChecked("11".repeat(32), NOW_MS + 2);
+    const next = await store.pendingInvoices(NOW_MS + 2, 2);
+    expect(next.map((i) => i.requestId)).toStrictEqual(["req-3", "req-1"]);
+  });
+
+  test("pruneInvoices drops expired unsettled rows and settled rows past retention", async () => {
+    const store = createMemoryLightningAddressStore();
+    const retention = 30 * 24 * 3600 * 1000;
+    await store.putInvoice(invoice({ requestId: "req-1", expiresAtMs: NOW_MS - 1 })); // expired
+    await store.putInvoice(
+      invoice({
+        paymentHash: "11".repeat(32),
+        requestId: "req-2",
+        expiresAtMs: NOW_MS - retention - 1,
+        preimageHex: "cc".repeat(32),
+      }),
+    ); // settled long ago
+    await store.putInvoice(
+      invoice({
+        paymentHash: "22".repeat(32),
+        requestId: "req-3",
+        expiresAtMs: NOW_MS - 1,
+        preimageHex: "cc".repeat(32),
+      }),
+    ); // settled, inside retention
+    await store.putInvoice(
+      invoice({ paymentHash: "33".repeat(32), requestId: "req-4", expiresAtMs: NOW_MS + 60_000 }),
+    ); // live
+    await expect(store.pruneInvoices(NOW_MS, retention)).resolves.toBe(2);
+    await expect(store.invoiceByPaymentHash("ab".repeat(32))).resolves.toBeUndefined();
+    await expect(store.invoiceByPaymentHash("11".repeat(32))).resolves.toBeUndefined();
+    await expect(store.invoiceByPaymentHash("22".repeat(32))).resolves.toBeDefined();
+    await expect(store.invoiceByPaymentHash("33".repeat(32))).resolves.toBeDefined();
+  });
+
+  test("claimStatement prunes expired claims — a statement may be re-signed and reused", async () => {
+    let now = 1000;
+    const store = createMemoryLightningAddressStore(() => now);
+    await expect(store.claimStatement("s1", 2000)).resolves.toBe(true);
+    await expect(store.claimStatement("s1", 2000)).resolves.toBe(false);
+    now = 2500;
+    await expect(store.claimStatement("s1", 4000)).resolves.toBe(true);
+    await expect(store.claimStatement("s1", 4000)).resolves.toBe(false);
   });
 });

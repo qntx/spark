@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   pubkey TEXT NOT NULL,
   invoice TEXT NOT NULL,
   expires_at_ms INTEGER NOT NULL,
+  last_checked_at_ms INTEGER NOT NULL DEFAULT 0,
   zap_request TEXT,
   comment TEXT,
   preimage_hex TEXT
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS zap_receipts (
   relays_json TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   published INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT
+  last_error TEXT,
+  updated_at_ms INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -91,6 +93,7 @@ function invoiceOf(row: Record<string, unknown>): LightningAddressInvoice {
     pubkeyHex: text(row["pubkey"]),
     invoice: text(row["invoice"]),
     expiresAtMs: int(row["expires_at_ms"]),
+    lastCheckedAtMs: int(row["last_checked_at_ms"]),
     ...(zapRequest === undefined ? {} : { zapRequest }),
     ...(comment === undefined ? {} : { comment }),
     ...(preimageHex === undefined ? {} : { preimageHex }),
@@ -104,11 +107,23 @@ export type LnurlStore = LightningAddressStore & {
     eventJson: string,
     relays: ReadonlyArray<string>,
   ) => Promise<void>;
-  /** Unpublished receipts below the attempt cap. */
-  readonly pendingZapReceipts: (maxAttempts: number) => Promise<ReadonlyArray<ZapReceiptRecord>>;
+  /** Unpublished receipts below the attempt cap — at most `limit`, oldest attempt first. */
+  readonly pendingZapReceipts: (
+    maxAttempts: number,
+    limit: number,
+  ) => Promise<ReadonlyArray<ZapReceiptRecord>>;
   readonly markZapReceiptPublished: (paymentHash: string) => Promise<void>;
   readonly recordZapReceiptFailure: (paymentHash: string, error: string) => Promise<void>;
   readonly zapReceipt: (paymentHash: string) => Promise<ZapReceiptRecord | undefined>;
+  /**
+   * Deletes receipts published more than `publishedRetentionMs` ago and unpublished ones that
+   * exhausted their attempts. Returns the number of rows removed.
+   */
+  readonly pruneZapReceipts: (
+    nowMs: number,
+    publishedRetentionMs: number,
+    maxAttempts: number,
+  ) => Promise<number>;
   readonly close: () => void;
 };
 
@@ -186,8 +201,9 @@ export function createLnurlStore(path: string, now: () => number = Date.now): Ln
       await Promise.resolve();
       db.prepare(
         `INSERT OR REPLACE INTO invoices
-         (payment_hash, request_id, name, pubkey, invoice, expires_at_ms, zap_request, comment)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (payment_hash, request_id, name, pubkey, invoice, expires_at_ms,
+          zap_request, comment, preimage_hex)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         invoice.paymentHash,
         invoice.requestId,
@@ -197,6 +213,7 @@ export function createLnurlStore(path: string, now: () => number = Date.now): Ln
         invoice.expiresAtMs,
         invoice.zapRequest ?? null,
         invoice.comment ?? null,
+        invoice.preimageHex ?? null,
       );
     },
 
@@ -208,12 +225,55 @@ export function createLnurlStore(path: string, now: () => number = Date.now): Ln
       return row === undefined ? undefined : invoiceOf(row);
     },
 
-    pendingInvoices: async (nowMs) => {
+    pendingInvoices: async (nowMs, limit) => {
       await Promise.resolve();
       const rows = db
-        .prepare(`SELECT * FROM invoices WHERE preimage_hex IS NULL AND expires_at_ms > ?`)
-        .all(nowMs) as Array<Record<string, unknown>>;
+        .prepare(
+          `SELECT * FROM invoices WHERE preimage_hex IS NULL AND expires_at_ms > ?
+           ORDER BY last_checked_at_ms ASC, expires_at_ms ASC LIMIT ?`,
+        )
+        .all(nowMs, limit) as Array<Record<string, unknown>>;
       return rows.map(invoiceOf);
+    },
+
+    markChecked: async (hashHex, nowMs) => {
+      await Promise.resolve();
+      db.prepare(`UPDATE invoices SET last_checked_at_ms = ? WHERE payment_hash = ?`).run(
+        nowMs,
+        hashHex,
+      );
+    },
+
+    countPendingInvoices: async (nowMs, pubkeyHex) => {
+      await Promise.resolve();
+      const row = (
+        pubkeyHex === undefined
+          ? db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM invoices
+                 WHERE preimage_hex IS NULL AND expires_at_ms > ?`,
+              )
+              .get(nowMs)
+          : db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM invoices
+                 WHERE preimage_hex IS NULL AND expires_at_ms > ? AND pubkey = ?`,
+              )
+              .get(nowMs, pubkeyHex)
+      ) as Record<string, unknown> | undefined;
+      return int(row?.["n"]);
+    },
+
+    pruneInvoices: async (nowMs, settledRetentionMs) => {
+      await Promise.resolve();
+      const { changes } = db
+        .prepare(
+          `DELETE FROM invoices
+           WHERE (preimage_hex IS NULL AND expires_at_ms <= ?)
+              OR (preimage_hex IS NOT NULL AND expires_at_ms <= ?)`,
+        )
+        .run(nowMs, nowMs - settledRetentionMs);
+      return Number(changes);
     },
 
     settleInvoice: async (hashHex, preimageHex) => {
@@ -231,29 +291,48 @@ export function createLnurlStore(path: string, now: () => number = Date.now): Ln
     putZapReceipt: async (paymentHash, eventJson, relays) => {
       await Promise.resolve();
       db.prepare(
-        `INSERT OR REPLACE INTO zap_receipts (payment_hash, event_json, relays_json)
-         VALUES (?, ?, ?)`,
-      ).run(paymentHash, eventJson, JSON.stringify(relays));
+        `INSERT OR REPLACE INTO zap_receipts
+         (payment_hash, event_json, relays_json, updated_at_ms)
+         VALUES (?, ?, ?, ?)`,
+      ).run(paymentHash, eventJson, JSON.stringify(relays), now());
     },
 
-    pendingZapReceipts: async (maxAttempts) => {
+    pendingZapReceipts: async (maxAttempts, limit) => {
       await Promise.resolve();
       const rows = db
-        .prepare(`SELECT * FROM zap_receipts WHERE published = 0 AND attempts < ?`)
-        .all(maxAttempts) as Array<Record<string, unknown>>;
+        .prepare(
+          `SELECT * FROM zap_receipts WHERE published = 0 AND attempts < ?
+           ORDER BY updated_at_ms ASC LIMIT ?`,
+        )
+        .all(maxAttempts, limit) as Array<Record<string, unknown>>;
       return rows.map((row) => zapReceiptOf(row));
     },
 
     markZapReceiptPublished: async (paymentHash) => {
       await Promise.resolve();
-      db.prepare(`UPDATE zap_receipts SET published = 1 WHERE payment_hash = ?`).run(paymentHash);
+      db.prepare(
+        `UPDATE zap_receipts SET published = 1, updated_at_ms = ? WHERE payment_hash = ?`,
+      ).run(now(), paymentHash);
     },
 
     recordZapReceiptFailure: async (paymentHash, error) => {
       await Promise.resolve();
       db.prepare(
-        `UPDATE zap_receipts SET attempts = attempts + 1, last_error = ? WHERE payment_hash = ?`,
-      ).run(error.slice(0, 512), paymentHash);
+        `UPDATE zap_receipts
+         SET attempts = attempts + 1, last_error = ?, updated_at_ms = ?
+         WHERE payment_hash = ?`,
+      ).run(error.slice(0, 512), now(), paymentHash);
+    },
+
+    pruneZapReceipts: async (nowMs, publishedRetentionMs, maxAttempts) => {
+      await Promise.resolve();
+      const { changes } = db
+        .prepare(
+          `DELETE FROM zap_receipts
+           WHERE (published = 1 AND updated_at_ms <= ?) OR attempts >= ?`,
+        )
+        .run(nowMs - publishedRetentionMs, maxAttempts);
+      return Number(changes);
     },
 
     zapReceipt: async (paymentHash) => {

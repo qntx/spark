@@ -30,6 +30,12 @@ export const MAX_NOSTR_EVENT_SIZE = 32_768;
 export const MAX_NOSTR_RELAYS = 10;
 /** Receipt-publish retries across poll rounds before the receipt is dropped. */
 export const ZAP_RECEIPT_MAX_ATTEMPTS = 5;
+/** Receipts fetched for publishing per round — the rest waits for the next round. */
+export const ZAP_RECEIPT_BATCH = 50;
+/** Concurrent publishes inside a round — keeps one round's fan-out bounded. */
+const ZAP_PUBLISH_CHUNK = 10;
+/** Published receipts are kept this long for idempotent re-checks, then pruned. */
+export const ZAP_RECEIPT_RETENTION_MS: number = 7 * 24 * 3600 * 1000;
 
 function fail(reason: string): never {
   throw new Error(`invalid nostr event: ${reason}`);
@@ -115,7 +121,7 @@ function isPublicIpv4(host: string): boolean | undefined {
   if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/u.test(part))) {
     return undefined;
   }
-  const [a = 0, b = 0] = parts.map(Number);
+  const [a = 0, b = 0, c = 0] = parts.map(Number);
   if (a === 0 || a === 10 || a === 127 || a >= 224) {
     return false;
   }
@@ -131,7 +137,20 @@ function isPublicIpv4(host: string): boolean | undefined {
   if (a === 192 && b === 168) {
     return false;
   }
+  // IETF protocol assignments + documentation ranges — never real relays.
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) {
+    return false;
+  }
+  if (a === 192 && b === 88 && c === 99) {
+    return false;
+  }
   if (a === 198 && b >= 18 && b <= 19) {
+    return false;
+  }
+  if (a === 198 && b === 51 && c === 100) {
+    return false;
+  }
+  if (a === 203 && b === 0 && c === 113) {
     return false;
   }
   return true;
@@ -151,6 +170,11 @@ function isAcceptedRelayUrl(url: string): boolean {
     return false;
   }
   if (parsed.protocol !== "wss:") {
+    return false;
+  }
+  // Relay ports are 443 only: an arbitrary-port URL is a blind TCP probe of public hosts.
+  // (The parser normalizes an explicit :443 of a special scheme away, so "" is the good case.)
+  if (parsed.port !== "" && parsed.port !== "443") {
     return false;
   }
   const host = parsed.hostname.toLowerCase().replace(/\.$/u, "");
@@ -225,6 +249,8 @@ export async function publishZapReceipts(options: {
   readonly pool: Pool;
   readonly settled: ReadonlyArray<LightningAddressInvoice>;
   readonly publishTimeoutMs?: number;
+  /** Receipts published per round; default {@link ZAP_RECEIPT_BATCH}. */
+  readonly batch?: number;
   readonly now?: number;
   readonly log?: (message: string) => void;
 }): Promise<void> {
@@ -256,45 +282,52 @@ export async function publishZapReceipts(options: {
     }),
   );
 
-  const pending = await store.pendingZapReceipts(ZAP_RECEIPT_MAX_ATTEMPTS);
-  await Promise.all(
-    pending.map(async (receipt) => {
-      if (receipt.relays.length === 0) {
-        await store.recordZapReceiptFailure(receipt.paymentHash, "no relays in zap request");
-        return;
-      }
-      let raw: unknown;
-      try {
-        raw = JSON.parse(receipt.eventJson);
-      } catch {
-        await store.recordZapReceiptFailure(receipt.paymentHash, "stored event is not JSON");
-        return;
-      }
-      if (!validateSignedEvent(raw)) {
-        await store.recordZapReceiptFailure(receipt.paymentHash, "stored event malformed");
-        return;
-      }
-      try {
-        const results = await pool.publish(receipt.relays, raw, {
-          timeoutMs: options.publishTimeoutMs ?? 10_000,
-        });
-        const ok = results.filter((r) => r.status === "ok").length;
-        if (ok > 0) {
-          await store.markZapReceiptPublished(receipt.paymentHash);
-          log(
-            `zap receipt ${receipt.paymentHash} published to ${ok}/${receipt.relays.length} relays`,
-          );
-        } else {
-          const detail = results
-            .map((r) =>
-              r.status === "failed" ? `${r.url}: ${r.error.message}` : `${r.url}: ${r.status}`,
-            )
-            .join("; ");
-          await store.recordZapReceiptFailure(receipt.paymentHash, detail || "no relay accepted");
-        }
-      } catch (error) {
-        await store.recordZapReceiptFailure(receipt.paymentHash, String(error));
-      }
-    }),
+  const pending = await store.pendingZapReceipts(
+    ZAP_RECEIPT_MAX_ATTEMPTS,
+    options.batch ?? ZAP_RECEIPT_BATCH,
   );
+  for (let start = 0; start < pending.length; start += ZAP_PUBLISH_CHUNK) {
+    const chunk = pending.slice(start, start + ZAP_PUBLISH_CHUNK);
+    // oxlint-disable-next-line no-await-in-loop -- chunks are sequential to bound concurrency
+    await Promise.all(
+      chunk.map(async (receipt) => {
+        if (receipt.relays.length === 0) {
+          await store.recordZapReceiptFailure(receipt.paymentHash, "no relays in zap request");
+          return;
+        }
+        let raw: unknown;
+        try {
+          raw = JSON.parse(receipt.eventJson);
+        } catch {
+          await store.recordZapReceiptFailure(receipt.paymentHash, "stored event is not JSON");
+          return;
+        }
+        if (!validateSignedEvent(raw)) {
+          await store.recordZapReceiptFailure(receipt.paymentHash, "stored event malformed");
+          return;
+        }
+        try {
+          const results = await pool.publish(receipt.relays, raw, {
+            timeoutMs: options.publishTimeoutMs ?? 10_000,
+          });
+          const ok = results.filter((r) => r.status === "ok").length;
+          if (ok > 0) {
+            await store.markZapReceiptPublished(receipt.paymentHash);
+            log(
+              `zap receipt ${receipt.paymentHash} published to ${ok}/${receipt.relays.length} relays`,
+            );
+          } else {
+            const detail = results
+              .map((r) =>
+                r.status === "failed" ? `${r.url}: ${r.error.message}` : `${r.url}: ${r.status}`,
+              )
+              .join("; ");
+            await store.recordZapReceiptFailure(receipt.paymentHash, detail || "no relay accepted");
+          }
+        } catch (error) {
+          await store.recordZapReceiptFailure(receipt.paymentHash, String(error));
+        }
+      }),
+    );
+  }
 }

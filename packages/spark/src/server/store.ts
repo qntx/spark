@@ -22,6 +22,8 @@ export type LightningAddressInvoice = {
   /** The encoded BOLT-11 invoice handed to the payer. */
   readonly invoice: string;
   readonly expiresAtMs: number;
+  /** Last `settlePending` status check — the pending queue is served least-recently-checked first. */
+  readonly lastCheckedAtMs?: number;
   /** The raw zap-request event JSON (NIP-57), when the payer sent one. */
   readonly zapRequest?: string;
   readonly comment?: string;
@@ -50,16 +52,36 @@ export type LightningAddressStore = {
   readonly claimStatement: (hashHex: string, expiresAtMs: number) => Promise<boolean>;
   readonly putInvoice: (invoice: LightningAddressInvoice) => Promise<void>;
   readonly invoiceByPaymentHash: (hashHex: string) => Promise<LightningAddressInvoice | undefined>;
-  /** Unsettled invoices whose expiry has not passed at `nowMs`. */
-  readonly pendingInvoices: (nowMs: number) => Promise<ReadonlyArray<LightningAddressInvoice>>;
+  /**
+   * Unsettled invoices whose expiry has not passed at `nowMs` — at most `limit`, ordered
+   * least-recently-checked first so a bounded `settlePending` round rotates fairly.
+   */
+  readonly pendingInvoices: (
+    nowMs: number,
+    limit: number,
+  ) => Promise<ReadonlyArray<LightningAddressInvoice>>;
+  /** Records that `hashHex` was status-checked at `nowMs`; feeds the {@link pendingInvoices} order. */
+  readonly markChecked: (hashHex: string, nowMs: number) => Promise<void>;
+  /** Unsettled, unexpired invoice count at `nowMs` — scoped to `pubkeyHex` when given. */
+  readonly countPendingInvoices: (nowMs: number, pubkeyHex?: string) => Promise<number>;
+  /**
+   * Deletes expired unsettled invoices and settled invoices whose expiry passed more than
+   * `settledRetentionMs` ago. Returns the number of rows removed.
+   */
+  readonly pruneInvoices: (nowMs: number, settledRetentionMs: number) => Promise<number>;
   readonly settleInvoice: (
     hashHex: string,
     preimageHex: string,
   ) => Promise<LightningAddressInvoice | undefined>;
 };
 
-/** In-memory {@link LightningAddressStore} — a reference implementation and the test store. */
-export function createMemoryLightningAddressStore(): LightningAddressStore {
+/**
+ * In-memory {@link LightningAddressStore} — a reference implementation and the test store. `now` is
+ * injectable so statement claims can prune expired entries deterministically.
+ */
+export function createMemoryLightningAddressStore(
+  now: () => number = Date.now,
+): LightningAddressStore {
   const byName = new Map<string, LightningAddressUser>();
   const byPubkey = new Map<string, LightningAddressUser>();
   const claimed = new Map<string, number>();
@@ -99,6 +121,12 @@ export function createMemoryLightningAddressStore(): LightningAddressStore {
     },
     claimStatement: async (hashHex, expiresAtMs) => {
       await Promise.resolve();
+      const nowMs = now();
+      for (const [hash, expiry] of claimed) {
+        if (expiry <= nowMs) {
+          claimed.delete(hash);
+        }
+      }
       if (claimed.has(hashHex)) {
         return false;
       }
@@ -113,11 +141,51 @@ export function createMemoryLightningAddressStore(): LightningAddressStore {
       await Promise.resolve();
       return invoices.get(hashHex);
     },
-    pendingInvoices: async (nowMs) => {
+    pendingInvoices: async (nowMs, limit) => {
       await Promise.resolve();
-      return [...invoices.values()].filter(
-        (invoice) => invoice.preimageHex === undefined && invoice.expiresAtMs > nowMs,
-      );
+      return [...invoices.values()]
+        .filter((invoice) => invoice.preimageHex === undefined && invoice.expiresAtMs > nowMs)
+        .sort(
+          (a, b) =>
+            (a.lastCheckedAtMs ?? 0) - (b.lastCheckedAtMs ?? 0) || a.expiresAtMs - b.expiresAtMs,
+        )
+        .slice(0, limit);
+    },
+    markChecked: async (hashHex, nowMs) => {
+      await Promise.resolve();
+      const invoice = invoices.get(hashHex);
+      if (invoice !== undefined) {
+        invoices.set(hashHex, { ...invoice, lastCheckedAtMs: nowMs });
+      }
+    },
+    countPendingInvoices: async (nowMs, pubkeyHex) => {
+      await Promise.resolve();
+      let count = 0;
+      for (const invoice of invoices.values()) {
+        if (
+          invoice.preimageHex === undefined &&
+          invoice.expiresAtMs > nowMs &&
+          (pubkeyHex === undefined || invoice.pubkeyHex === pubkeyHex)
+        ) {
+          count += 1;
+        }
+      }
+      return count;
+    },
+    pruneInvoices: async (nowMs, settledRetentionMs) => {
+      await Promise.resolve();
+      let removed = 0;
+      for (const [hash, invoice] of invoices) {
+        const settled = invoice.preimageHex !== undefined;
+        if (
+          (!settled && invoice.expiresAtMs <= nowMs) ||
+          (settled && invoice.expiresAtMs <= nowMs - settledRetentionMs)
+        ) {
+          invoices.delete(hash);
+          removed += 1;
+        }
+      }
+      return removed;
     },
     settleInvoice: async (hashHex, preimageHex) => {
       await Promise.resolve();

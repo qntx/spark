@@ -179,10 +179,10 @@ describe("buildZapReceipt", () => {
     expect(validation.valid).toBe(true);
   });
 
-  test("keeps public wss relays, including custom ports and public IP literals", () => {
+  test("keeps public wss relays on port 443, explicit or implied", () => {
     const accepted = [
       "wss://relay.example",
-      "wss://relay.example:7777/path",
+      "wss://relay.example:443/path",
       "wss://8.8.8.8",
       "wss://172.32.0.1", // just outside 172.16/12
       "wss://100.128.0.1", // just outside 100.64/10
@@ -212,6 +212,8 @@ describe("buildZapReceipt", () => {
     ["localhost with a trailing dot", "wss://localhost."],
     ["IPv6 loopback", "wss://[::1]"],
     ["IPv6 link-local", "wss://[fe80::1]"],
+    ["non-443 port", "wss://relay.example:7777"],
+    ["non-443 port on a literal", "wss://8.8.8.8:53"],
     ["0.0.0.0/8", "wss://0.12.34.56"],
     ["10/8", "wss://10.0.0.1"],
     ["100.64/10", "wss://100.64.0.1"],
@@ -221,7 +223,12 @@ describe("buildZapReceipt", () => {
     ["169.254/16", "wss://169.254.0.1"],
     ["172.16/12", "wss://172.16.0.1"],
     ["192.168/16", "wss://192.168.1.1"],
+    ["192.0.0/24 IETF", "wss://192.0.0.1"],
+    ["192.0.2/24 TEST-NET-1", "wss://192.0.2.1"],
+    ["192.88.99/24 6to4 relay", "wss://192.88.99.1"],
     ["198.18/15", "wss://198.19.255.1"],
+    ["198.51.100/24 TEST-NET-2", "wss://198.51.100.1"],
+    ["203.0.113/24 TEST-NET-3", "wss://203.0.113.1"],
     ["224/4 multicast", "wss://224.0.0.1"],
     ["240/4 reserved", "wss://255.255.255.255"],
   ])("drops the relay: %s", (_name, url) => {
