@@ -51,3 +51,58 @@ export async function lnurlGetJson(
   }
   return parsed;
 }
+
+/**
+ * One JSON request with a body (POST/DELETE) against an LNURL endpoint. Same error vocabulary as
+ * {@link lnurlGetJson}; a 2xx response with an empty body returns `undefined`, and request bodies
+ * never echo into error messages — the server's response text is sanitized before it is embedded.
+ */
+export async function lnurlSendJson(
+  url: string,
+  fetch: typeof globalThis.fetch,
+  options: { readonly method: string; readonly body: JsonObject },
+): Promise<JsonObject | undefined> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: options.method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options.body),
+    });
+  } catch (error) {
+    throw new SparkRequestError("lnurl request failed", { cause: error });
+  }
+  const text = await response.text().catch(() => "");
+  if (!response.ok) {
+    const detail = serverErrorText(text);
+    throw new SparkRequestError(
+      `lnurl request failed with status ${response.status}${detail === "" ? "" : `: ${detail}`}`,
+      { code: `http_${response.status}` },
+    );
+  }
+  if (text === "") {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new SparkRequestError("lnurl response: body is not valid JSON", {
+      code: "unexpected_response",
+      cause: error,
+    });
+  }
+  if (!isJsonObject(parsed)) {
+    throw new SparkRequestError("lnurl response: body is not an object", {
+      code: "unexpected_response",
+    });
+  }
+  if (parsed["status"] === "ERROR") {
+    const { reason } = parsed;
+    throw new SparkRequestError(
+      `lnurl error: ${typeof reason === "string" ? serverErrorText(reason) : "no reason given"}`,
+      { code: "lnurl_error" },
+    );
+  }
+  return parsed;
+}
