@@ -3,10 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
+import { Transaction } from "@scure/btc-signer";
 import { Agent, fetch as undiciFetch } from "undici";
 
 import { createSparkClient } from "../../src/client/index.ts";
+import { getTimelockFromSequence } from "../../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../../src/core/network.ts";
+import type { SparkExitChain } from "../../src/exit/store.ts";
 import { buildCpfpChild, createMemorySparkStore } from "../../src/index.ts";
 import { createSparkSigner, sparkAccountKey } from "../../src/signer/index.ts";
 import type { SparkTransfer } from "../../src/transfer/index.ts";
@@ -61,6 +64,10 @@ export function localFetch() {
     undiciFetch(input, { ...init, dispatcher: agent });
 }
 
+// generatetoaddress batches can stall past the default 300s undici header timeout while
+// the operators' chain watchers hammer bitcoind on every fresh block.
+const BITCOIND_AGENT = new Agent({ headersTimeout: 600_000, bodyTimeout: 600_000 });
+
 async function bitcoinRpcRaw(
   method: string,
   params: ReadonlyArray<unknown>,
@@ -69,13 +76,14 @@ async function bitcoinRpcRaw(
   const credentials = url.username === "" ? "" : `Basic ${btoa(`${url.username}:${url.password}`)}`;
   url.username = "";
   url.password = "";
-  const response = await fetch(url, {
+  const response = await undiciFetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       ...(credentials === "" ? {} : { authorization: credentials }),
     },
     body: JSON.stringify({ jsonrpc: "1.0", id: "e2e", method, params }),
+    dispatcher: BITCOIND_AGENT,
   });
   return (await response.json()) as {
     result: unknown;
@@ -377,4 +385,148 @@ export async function mineUntilConfirmations(txid: string, target: number): Prom
   }
   await mine(Math.min(target - confs, 200));
   return mineUntilConfirmations(txid, target);
+}
+
+/** Confirmations for `txid`, or -1 while bitcoind has never seen the transaction. */
+export async function knownConfirmations(txid: string): Promise<number> {
+  try {
+    return await confirmations(txid);
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Mines `batch` blocks per round until `txid` confirms — the SO's chain watcher only acts on a new
+ * block, so waiting for a watchtower broadcast means mining. Throws after `rounds` rounds.
+ */
+export async function awaitWatchtowerBroadcast(
+  txid: string,
+  batch: number,
+  rounds: number,
+): Promise<void> {
+  if ((await knownConfirmations(txid)) >= 1) {
+    return;
+  }
+  if (rounds <= 0) {
+    throw new Error(`${txid} was never broadcast`);
+  }
+  await mine(batch);
+  return awaitWatchtowerBroadcast(txid, batch, rounds - 1);
+}
+
+export type LocalTestWallet = LocalWallet & { readonly identity: Uint8Array };
+
+/** `localWallet` plus the identity public key, the form two-wallet tests pass around. */
+export async function localTestWallet(seed: Uint8Array): Promise<LocalTestWallet> {
+  const wallet = await localWallet(seed);
+  return { ...wallet, identity: await wallet.signer.identityPublicKey() };
+}
+
+export function required<T>(value: T | undefined, what: string): T {
+  if (value === undefined) {
+    throw new Error(what);
+  }
+  return value;
+}
+
+/** The BIP-68 timelock (blocks) on a leaf's current refund transaction. */
+export function refundTimelock(leaf: { refundTx: Uint8Array }): number {
+  const { sequence } = Transaction.fromRaw(leaf.refundTx, {
+    allowUnknownOutputs: true,
+  }).getInput(0);
+  if (sequence === undefined) {
+    throw new Error("refund tx has no sequence");
+  }
+  return getTimelockFromSequence(sequence);
+}
+
+/** Sends `amountSats` and waits for the receiver to claim and report the leaf. */
+export async function transferWholeLeaf(
+  from: LocalTestWallet,
+  to: LocalTestWallet,
+  amountSats: number,
+): Promise<SparkLeaf> {
+  await from.client.transfers.send({ receiver: to.identity, amountSats });
+  const claimed = await claimPendingUntil(to.client, Date.now() + CLAIM_DEADLINE_MS);
+  const leaf = required(claimed[0], "receiver claimed nothing");
+  await leavesUntil(to.client, Date.now() + CLAIM_DEADLINE_MS);
+  return leaf;
+}
+
+export type PingPongResult = {
+  readonly holder: LocalTestWallet;
+  readonly leaf: SparkLeaf;
+  readonly renewals: number;
+};
+
+/**
+ * Ping-pongs `amountSats` between two wallets until the leaf's refund timelock has reset `needed`
+ * times — each reset is a zero-timelock renewal (a split node plus a fresh leaf). `refundBelow`
+ * keeps sending afterwards until the timelock walks down to it (fewer blocks to mine in tests); the
+ * next send past ~100 renews again, so stay well above 100. Throws if `maxSends` runs out.
+ */
+export async function pingPongUntilRenewed(
+  from: LocalTestWallet,
+  to: LocalTestWallet,
+  leaf: SparkLeaf,
+  options: {
+    readonly needed: number;
+    readonly amountSats: number;
+    readonly maxSends?: number;
+    readonly refundBelow?: number;
+  },
+): Promise<PingPongResult> {
+  const { needed, amountSats, maxSends = 60, refundBelow } = options;
+  let holder = from;
+  let other = to;
+  let previousTimelock = refundTimelock(leaf);
+  let renewals = 0;
+  let current = leaf;
+  for (let i = 1; i <= maxSends; i++) {
+    const settled =
+      renewals >= needed && (refundBelow === undefined || previousTimelock <= refundBelow);
+    if (settled) {
+      return { holder, leaf: current, renewals };
+    }
+    // oxlint-disable-next-line no-await-in-loop -- sends must stay sequential
+    current = await transferWholeLeaf(holder, other, amountSats);
+    [holder, other] = [other, holder];
+    const timelock = refundTimelock(current);
+    if (timelock > previousTimelock) {
+      renewals += 1;
+      console.log(`send ${i}: renewed (${renewals}), refund timelock ${timelock}`);
+    }
+    previousTimelock = timelock;
+  }
+  throw new Error(`only ${renewals}/${needed} renewals after ${maxSends} sends`);
+}
+
+/** The stored exit chain for `leafId`. */
+export function storedExitChain(
+  chains: ReadonlyArray<SparkExitChain>,
+  leafId: string,
+): SparkExitChain {
+  const chain = chains.find((entry) => entry.leafId === leafId);
+  if (chain === undefined) {
+    throw new Error(`no exit chain stored for ${leafId}`);
+  }
+  return chain;
+}
+
+/** The exit chain's parent and grandparent — the two nodes above the leaf. */
+export function chainAncestors(chain: SparkExitChain): {
+  readonly parent: SparkExitChain["nodes"][number];
+  readonly grandparent: SparkExitChain["nodes"][number];
+} {
+  const parent = required(chain.nodes.at(-2), "exit chain is missing the parent node");
+  const grandparent = required(chain.nodes.at(-3), "exit chain is missing the grandparent node");
+  return { parent, grandparent };
+}
+
+/** A fresh bitcoind-wallet address and its scriptPubKey — a sweep destination the test controls. */
+export async function destinationFor(): Promise<{ address: string; script: Uint8Array }> {
+  const address = (await bitcoinRpc("getnewaddress", [])) as string;
+  const info = (await bitcoinRpc("getaddressinfo", [address])) as { scriptPubKey: string };
+  return { address, script: hexToBytes(info.scriptPubKey) };
 }

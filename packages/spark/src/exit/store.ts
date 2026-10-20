@@ -3,7 +3,14 @@
 // the chain is captured the moment the leaf is claimed or synced, before the
 // exit is ever needed.
 
-/** Every pre-signed transaction needed to exit one leaf unilaterally. */
+/**
+ * Every pre-signed transaction needed to exit one leaf unilaterally. The `directTx`,
+ * `directRefundTx` and `directFromCpfpRefundTx` fields are witness-stripped templates — the SO's
+ * DirectTransactionResponseInterceptor drops the witness from every `direct_*` transaction field it
+ * serves. Their txids still match the signed copies, so they can recognise the watchtower's
+ * broadcast on chain and feed `sweepRefund`, but the wallet can never broadcast them: the
+ * signatures exist only server-side.
+ */
 export type SparkExitChain = {
   readonly leafId: string;
   /** Root → leaf. */

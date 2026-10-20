@@ -3,97 +3,26 @@ import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
 import type { createSparkClient } from "../src/client/index.ts";
-import { getTimelockFromSequence, txId } from "../src/core/bitcoin/index.ts";
-import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
+import { txId } from "../src/core/bitcoin/index.ts";
 import type { WatchtowerExitedLeaf } from "../src/exit/watchtower.ts";
-import type { SparkLeaf } from "../src/tree/index.ts";
 import {
   bitcoinRpc,
+  chainAncestors,
   CLAIM_DEADLINE_MS,
-  claimPendingUntil,
   claimUntilAccepted,
+  destinationFor,
   generateBlockWith,
   leavesUntil,
-  localWallet,
+  localTestWallet,
   mine,
+  pingPongUntilRenewed,
+  refundTimelock,
+  required,
+  storedExitChain,
 } from "./support/local.ts";
 
 const SEND_SATS = 100_000;
-// 18 sends walk the refund timelock 2000 -> 200, the 19th renews. Twice that, plus slack.
-const MAX_SENDS = 60;
 const RENEWALS_REQUIRED = 2;
-
-function refundTimelock(leaf: { refundTx: Uint8Array }): number {
-  const { sequence } = Transaction.fromRaw(leaf.refundTx, {
-    allowUnknownOutputs: true,
-  }).getInput(0);
-  if (sequence === undefined) {
-    throw new Error("refund tx has no sequence");
-  }
-  return getTimelockFromSequence(sequence);
-}
-
-function required<T>(value: T | undefined, what: string): T {
-  if (value === undefined) {
-    throw new Error(what);
-  }
-  return value;
-}
-
-type Wallet = {
-  client: ReturnType<typeof createSparkClient>;
-  store: SparkStore;
-  identity: Uint8Array;
-};
-
-async function transferWholeLeaf(from: Wallet, to: Wallet): Promise<SparkLeaf> {
-  await from.client.transfers.send({ receiver: to.identity, amountSats: SEND_SATS });
-  const claimed = await claimPendingUntil(to.client, Date.now() + CLAIM_DEADLINE_MS);
-  const leaf = required(claimed[0], "receiver claimed nothing");
-  await leavesUntil(to.client, Date.now() + CLAIM_DEADLINE_MS);
-  return leaf;
-}
-
-type PingPongResult = {
-  holder: Wallet;
-  leaf: SparkLeaf;
-  renewals: number;
-};
-
-/** Ping-pong the whole leaf until it has renewed `needed` times (or `MAX_SENDS` runs out). */
-async function pingPongUntilRenewed(
-  holder: Wallet,
-  other: Wallet,
-  leaf: SparkLeaf,
-  needed: number,
-): Promise<PingPongResult> {
-  let previousTimelock = refundTimelock(leaf);
-  let renewals = 0;
-  let current = leaf;
-  for (let i = 1; renewals < needed && i <= MAX_SENDS; i++) {
-    // oxlint-disable-next-line no-await-in-loop -- sends must stay sequential
-    current = await transferWholeLeaf(holder, other);
-    [holder, other] = [other, holder];
-    const timelock = refundTimelock(current);
-    if (timelock > previousTimelock) {
-      renewals += 1;
-      console.log(`send ${i}: renewed (${renewals}), refund timelock ${timelock}`);
-    }
-    previousTimelock = timelock;
-  }
-  return { holder, leaf: current, renewals };
-}
-
-/** The exit chain's parent and grandparent — the nodes above the leaf, root first. */
-function chainAncestors(chains: ReadonlyArray<SparkExitChain>, leafId: string) {
-  const chain = chains.find((entry) => entry.leafId === leafId);
-  if (chain === undefined || chain.nodes.length < 3) {
-    throw new Error(`exit chain for ${leafId} has ${chain?.nodes.length ?? 0} nodes`);
-  }
-  const parent = required(chain.nodes.at(-2), "exit chain is missing the parent node");
-  const grandparent = required(chain.nodes.at(-3), "exit chain is missing the grandparent node");
-  return { parent, grandparent };
-}
 
 /** Polls the watchtower-exited listing for `leafId`, driving the chain watcher with fresh blocks. */
 async function watchtowerExitedUntil(
@@ -114,26 +43,12 @@ async function watchtowerExitedUntil(
   throw new Error("leaf never reached a watchtower-exited status");
 }
 
-async function destinationFor(): Promise<{ address: string; script: Uint8Array }> {
-  const address = (await bitcoinRpc("getnewaddress", [])) as string;
-  const info = (await bitcoinRpc("getaddressinfo", [address])) as { scriptPubKey: string };
-  return { address, script: hexToBytes(info.scriptPubKey) };
-}
-
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO watchtower exit", () => {
   test("watchtower exit strands the leaf; recovery re-signs the stranded output", async () => {
-    const { signer: signerA, store: storeA, client: clientA } = await localWallet(randomBytes(32));
-    const { signer: signerB, store: storeB, client: clientB } = await localWallet(randomBytes(32));
-    const walletA: Wallet = {
-      client: clientA,
-      store: storeA,
-      identity: await signerA.identityPublicKey(),
-    };
-    const walletB: Wallet = {
-      client: clientB,
-      store: storeB,
-      identity: await signerB.identityPublicKey(),
-    };
+    const walletA = await localTestWallet(randomBytes(32));
+    const walletB = await localTestWallet(randomBytes(32));
+    const { client: clientA, signer: signerA } = walletA;
+    const { client: clientB, signer: signerB } = walletB;
 
     const address = await clientA.deposits.newAddress();
     const depositTxid = (await bitcoinRpc("sendtoaddress", [address, 0.001])) as string;
@@ -148,18 +63,18 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO watchtower exi
     const leafId = deposited.id;
     console.log("deposited leaf:", leafId, "refund timelock", refundTimelock(deposited));
 
-    const { holder, leaf, renewals } = await pingPongUntilRenewed(
-      walletA,
-      walletB,
-      deposited,
-      RENEWALS_REQUIRED,
-    );
+    const { holder, leaf, renewals } = await pingPongUntilRenewed(walletA, walletB, deposited, {
+      needed: RENEWALS_REQUIRED,
+      amountSats: SEND_SATS,
+    });
     expect(renewals).toBe(RENEWALS_REQUIRED);
     expect(leaf.id).toBe(leafId);
 
     // Confirming the grandparent's node tx — zero-fee, so it must be mined directly —
     // tells the watchtower an exit is underway below it.
-    const { parent, grandparent } = chainAncestors(await holder.store.exitChains(), leafId);
+    const { parent, grandparent } = chainAncestors(
+      storedExitChain(await holder.store.exitChains(), leafId),
+    );
     const parentDirectTx = required(parent.directTx, "parent direct tx missing from exit chain");
     const parentDirectTxid = txId(parentDirectTx);
     console.log(
