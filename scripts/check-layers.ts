@@ -124,7 +124,18 @@ const LAYERS: Record<string, ReadonlyArray<string>> = {
   tokens: [...BASE],
   invoice: ["transfer", "tokens", ...BASE],
   lnurl: ["core", "errors"],
-  client: ["tree", "transfer", "lightning", "deposit", "exit", "tokens", "invoice", ...BASE],
+  settings: ["proto", "errors"],
+  client: [
+    "tree",
+    "transfer",
+    "lightning",
+    "deposit",
+    "exit",
+    "tokens",
+    "invoice",
+    "settings",
+    ...BASE,
+  ],
   server: ["client", "lnurl", "core", "errors"],
 };
 

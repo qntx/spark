@@ -22,6 +22,7 @@ import type {
   LightningSendStatus,
   LightningSendStatusRequest,
 } from "../lightning/index.ts";
+import type { SparkWalletSettings } from "../settings/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
 import type { SparkTokenBalance, SparkTokenOutput } from "../tokens/index.ts";
@@ -33,6 +34,7 @@ import { createDeposits } from "./deposits.ts";
 import type { StaticDepositClaimResult } from "./deposits.ts";
 import { createInvoices } from "./invoices.ts";
 import { createLightning } from "./lightning.ts";
+import { createWalletSettings } from "./settings.ts";
 import { createTokens } from "./tokens.ts";
 import { createTransfers } from "./transfers.ts";
 import { createWithdrawals } from "./withdrawals.ts";
@@ -143,6 +145,15 @@ export type SparkClient = {
     readonly status: (
       invoices: ReadonlyArray<string>,
     ) => Promise<ReadonlyArray<SparkInvoiceStatus>>;
+  };
+  /**
+   * This wallet's coordinator settings. `setPrivate(true)` restricts node and transfer reads to
+   * this identity's own session on every operator; `get` reports `privateEnabled: false` for a
+   * wallet that never stored a setting.
+   */
+  readonly walletSettings: {
+    readonly get: () => Promise<SparkWalletSettings>;
+    readonly setPrivate: (enabled: boolean) => Promise<SparkWalletSettings>;
   };
   /** SSP leaves-swap fee quote in sats. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
@@ -481,6 +492,7 @@ export function createSparkClientWith(
     invoices: createInvoices(context),
     swapFeeEstimate: async (amountSats) => context.sspClient.swapFeeEstimate(amountSats),
     lightning: createLightning(context),
+    walletSettings: createWalletSettings(context),
     deposits: createDeposits(context),
     withdrawals: createWithdrawals(context),
     events,
