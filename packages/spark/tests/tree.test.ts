@@ -14,6 +14,7 @@ import {
   operatorsDisagree,
   ownsLeaf,
   selectExact,
+  selectExactMany,
   selectLeaves,
 } from "../src/tree/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
@@ -95,36 +96,76 @@ test("selectExact ignores non-AVAILABLE leaves", () => {
   expect(selectExact(leaves, 50)?.map((leaf) => leaf.id)).toStrictEqual(["b"]);
 });
 
+test("selectExactMany assigns disjoint groups, smallest amount first", () => {
+  // 10 has no single leaf: greedy descending takes 8 then 2, so the ascending pass must leave
+  // a fitting pair — processing 10 first would consume both 8-sat leaves and starve the 8.
+  const leaves = [
+    selectLeaf("a", 8),
+    selectLeaf("b", 8),
+    selectLeaf("c", 16),
+    selectLeaf("d", 8),
+    selectLeaf("e", 2),
+  ];
+  const groups = selectExactMany(leaves, [8, 10]);
+  expect(groups?.map((group) => group.map((leaf) => leaf.id))).toStrictEqual([["a"], ["b", "e"]]);
+});
+
+test("selectExactMany returns groups in the order amounts listed them", () => {
+  const leaves = [selectLeaf("a", 2), selectLeaf("b", 3)];
+  const groups = selectExactMany(leaves, [3, 2]);
+  expect(groups?.map((group) => group.map((leaf) => leaf.id))).toStrictEqual([["b"], ["a"]]);
+});
+
+test("selectExactMany fails when any amount cannot be matched exactly", () => {
+  const leaves = [selectLeaf("a", 8), selectLeaf("b", 8)];
+  expect(selectExactMany(leaves, [8, 9])).toBeUndefined();
+  // Overlapping need: only one 8-sat leaf exists.
+  expect(selectExactMany(leaves, [8])).toBeDefined();
+  expect(selectExactMany([selectLeaf("a", 8)], [8, 8])).toBeUndefined();
+});
+
 test("selectLeaves returns exact selections unchanged", () => {
   const leaves = [selectLeaf("a", 8), selectLeaf("b", 8)];
-  const selection = selectLeaves(leaves, 16);
-  expect(selection.kind).toBe("exact");
-  expect(selection.leaves.map((leaf) => leaf.id)).toStrictEqual(["a", "b"]);
+  const selection = selectLeaves(leaves, [16]);
+  expect(selection).toStrictEqual({ kind: "exact", groups: [[leaves[0], leaves[1]]] });
 });
 
 test("selectLeaves picks the smallest single leaf covering the amount", () => {
   const leaves = [selectLeaf("a", 10), selectLeaf("b", 64), selectLeaf("c", 100)];
-  const selection = selectLeaves(leaves, 40);
+  const selection = selectLeaves(leaves, [40]);
   expect(selection).toStrictEqual({ kind: "swap", leaves: [leaves[1]] });
 });
 
 test("selectLeaves accumulates descending when no single leaf covers the amount", () => {
   const leaves = [selectLeaf("a", 20), selectLeaf("b", 15)];
-  const selection = selectLeaves(leaves, 25);
-  expect(selection.kind).toBe("swap");
-  expect(selection.leaves.map((leaf) => leaf.id)).toStrictEqual(["a", "b"]);
+  const selection = selectLeaves(leaves, [25]);
+  expect(selection).toStrictEqual({
+    kind: "swap",
+    leaves: [leaves[0], leaves[1]],
+  });
+});
+
+test("selectLeaves swaps for the total when only some amounts match exactly", () => {
+  // 7 matches exactly, 30 does not — the whole set falls back to one swap covering 37.
+  const leaves = [selectLeaf("a", 7), selectLeaf("b", 40)];
+  const selection = selectLeaves(leaves, [7, 30]);
+  expect(selection).toStrictEqual({ kind: "swap", leaves: [leaves[1]] });
 });
 
 test("selectLeaves rejects an insufficient AVAILABLE balance", () => {
   const leaves = [selectLeaf("a", 10), selectLeaf("b", 5, "CREATING")];
-  expect(() => selectLeaves(leaves, 20)).toThrow(/insufficient balance/);
+  expect(() => selectLeaves(leaves, [20])).toThrow(/insufficient balance/);
 });
 
 test("selectLeaves rejects non-positive amounts", () => {
   const leaves = [selectLeaf("a", 10)];
-  expect(() => selectLeaves(leaves, 0)).toThrow(/positive safe integer/);
-  expect(() => selectLeaves(leaves, -5)).toThrow(/positive safe integer/);
-  expect(() => selectLeaves(leaves, 1.5)).toThrow(/positive safe integer/);
+  expect(() => selectLeaves(leaves, [0])).toThrow(/positive safe integer/);
+  expect(() => selectLeaves(leaves, [-5])).toThrow(/positive safe integer/);
+  expect(() => selectLeaves(leaves, [1.5])).toThrow(/positive safe integer/);
+});
+
+test("selectLeaves rejects an empty amounts list", () => {
+  expect(() => selectLeaves([selectLeaf("a", 10)], [])).toThrow(/must not be empty/);
 });
 
 const VERIFY_KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(9), true);

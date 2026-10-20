@@ -19,7 +19,7 @@ import {
   transferPackageDigest,
 } from "../src/core/hashing/statements.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
-import { SparkRequestError } from "../src/errors/index.ts";
+import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import { SignatureScheme, SignatureSchema } from "../src/proto/gen/common_pb.ts";
@@ -57,6 +57,7 @@ import type {
   InitiateSwapPrimaryTransferRequest,
   QueryNodesRequest,
   StartTransferRequest,
+  StartTransferV3Request,
   Transfer,
   TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
@@ -64,7 +65,13 @@ import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
-import { mapTransfer, swapLeaves } from "../src/transfer/index.ts";
+import {
+  assertCommittedTransfer,
+  mapTransfer,
+  sendTransfer,
+  swapLeaves,
+} from "../src/transfer/index.ts";
+import type { SparkTransfer } from "../src/transfer/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
 
@@ -198,6 +205,7 @@ type SparkImpl = Partial<{
   query_pending_transfers: (req: unknown) => unknown;
   get_signing_commitments: (req: GetSigningCommitmentsRequest) => unknown;
   start_transfer_v2: (req: StartTransferRequest) => unknown;
+  start_transfer_v3: (req: StartTransferV3Request) => unknown;
   claim_transfer: (req: ClaimTransferRequest) => unknown;
   query_transfers_by_id: (req: unknown) => unknown;
   initiate_swap_primary_transfer: (req: InitiateSwapPrimaryTransferRequest) => unknown;
@@ -295,6 +303,14 @@ function nodesResponse(nodes: Array<ReturnType<typeof create<typeof TreeNodeSche
     nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
     offset: 0n,
   });
+}
+
+/** `query_transfers_by_id` answering with the queued responses in order, then empty. */
+function byIdQueue(responses: ReadonlyArray<ReadonlyArray<Transfer>>) {
+  const queue = responses.map((transfers) =>
+    create(QueryTransfersResponseSchema, { transfers: [...transfers] }),
+  );
+  return () => queue.shift() ?? create(QueryTransfersResponseSchema);
 }
 
 describe("transfers.send", () => {
@@ -1954,6 +1970,461 @@ describe("transfers.swap", () => {
     // The swap input and the sent leaf chains are gone; the change leaf's chain stays.
     const chains = await store.exitChains();
     expect(chains.map((chain) => chain.leafId)).toStrictEqual([CHANGE_LEAF_ID]);
+    signer.dispose();
+  });
+});
+
+const MULTI_LEAF_A = "01989abc-def0-7abc-89ab-0000000000b1";
+const MULTI_LEAF_B = "01989abc-def0-7abc-89ab-0000000000c2";
+const RECEIVER_B_SECRET = new Uint8Array(32).fill(0xb1);
+const RECEIVER_C_SECRET = new Uint8Array(32).fill(0xc2);
+
+/** A fabricated leaf plus the `query_nodes` TreeNode the wallet would see for it. */
+async function fabricatedNode(signer: SparkSigner, leafId: string, valueSats: bigint) {
+  const identity = await signer.identityPublicKey();
+  const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId }]);
+  const { leaf } = fabricateLeaf({
+    leafId,
+    signingPublicKey: required(leafKey, "leaf public key"),
+    ownerIdentityPublicKey: identity,
+    valueSats,
+  });
+  const node = create(TreeNodeSchema, {
+    id: leaf.id,
+    treeId: leaf.treeId,
+    value: valueSats,
+    nodeTx: leaf.nodeTx,
+    refundTx: leaf.refundTx,
+    vout: 0,
+    verifyingPublicKey: leaf.verifyingPublicKey,
+    ownerIdentityPublicKey: identity,
+    ownerSigningPublicKey: leaf.ownerSigningPublicKey,
+    signingKeyshare: {
+      ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+      threshold: THRESHOLD,
+      publicKey: leaf.signingKeyshare.publicKey,
+      publicShares: {},
+    },
+    status: "AVAILABLE",
+    network: Network.REGTEST,
+    treenodeStatus: TreeNodeStatus.AVAILABLE,
+  });
+  return { leaf, node };
+}
+
+describe("transfers.sendMany", () => {
+  test("routes a two-receiver send through start_transfer_v3 with a full receiver map", async () => {
+    const signer = await testSigner();
+    const a = await fabricatedNode(signer, MULTI_LEAF_A, 60_000n);
+    const b = await fabricatedNode(signer, MULTI_LEAF_B, 40_000n);
+    const receiverB = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const receiverC = secp256k1.getPublicKey(RECEIVER_C_SECRET, true);
+
+    let v3Req: StartTransferV3Request | undefined;
+    let v2Called = false;
+    const client = makeClient(signer, {
+      query_nodes: () => nodesResponse([a.node, b.node]),
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * req.nodeIds.length),
+        }),
+      start_transfer_v2: () => {
+        v2Called = true;
+        return create(StartTransferResponseSchema);
+      },
+      start_transfer_v3: (req) => {
+        v3Req = req;
+        return create(StartTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            senderIdentityPublicKey: required(req.senderPackages[0], "sender package")
+              .ownerIdentityPublicKey,
+            status: TransferStatus.SENDER_INITIATED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            totalValue: 100_000n,
+            receivers: [
+              create(TransferReceiverSchema, {
+                id: "r-b",
+                identityPublicKey: receiverB,
+                amountSats: 60_000n,
+                status: TransferReceiverStatus.INITIATED,
+              }),
+              create(TransferReceiverSchema, {
+                id: "r-c",
+                identityPublicKey: receiverC,
+                amountSats: 40_000n,
+                status: TransferReceiverStatus.INITIATED,
+              }),
+            ],
+          }),
+        });
+      },
+    });
+
+    const sent = await client.transfers.sendMany({
+      receivers: [
+        { receiver: receiverB, amountSats: 60_000 },
+        { receiver: receiverC, amountSats: 40_000 },
+      ],
+    });
+    expect(v2Called).toBe(false);
+    const req = required(v3Req, "start_transfer_v3 request");
+    const senderPackage = required(req.senderPackages[0], "sender package");
+    const pkg = required(senderPackage.transferPackage, "transfer package");
+
+    const receiverMap = senderPackage.receiverIdentityPublicKeys;
+    expect(Object.keys(receiverMap).toSorted()).toStrictEqual(
+      [MULTI_LEAF_A, MULTI_LEAF_B].toSorted(),
+    );
+    expect(receiverMap[MULTI_LEAF_A]).toStrictEqual(receiverB);
+    expect(receiverMap[MULTI_LEAF_B]).toStrictEqual(receiverC);
+
+    // Every signing job's leaf id is covered by the receiver map.
+    const jobLeafIds = [
+      ...pkg.leavesToSend,
+      ...pkg.directLeavesToSend,
+      ...pkg.directFromCpfpLeavesToSend,
+    ].map((job) => job.leafId);
+    for (const leafId of jobLeafIds) {
+      expect(receiverMap[leafId]).toBeDefined();
+    }
+
+    // Each leaf's refund pays that leaf's own receiver.
+    const expectedA = createDecrementedTimelockRefundTxs({
+      nodeTx: a.leaf.nodeTx,
+      sequence: 2000,
+      receivingPublicKey: receiverB,
+      network: "regtest",
+    });
+    const expectedB = createDecrementedTimelockRefundTxs({
+      nodeTx: b.leaf.nodeTx,
+      sequence: 2000,
+      receivingPublicKey: receiverC,
+      network: "regtest",
+    });
+    const cpfpByLeafId = new Map(pkg.leavesToSend.map((job) => [job.leafId, job.rawTx]));
+    expect(bytesToHex(required(cpfpByLeafId.get(MULTI_LEAF_A), "cpfp job a"))).toBe(
+      bytesToHex(expectedA.cpfpRefund.txBytes),
+    );
+    expect(bytesToHex(required(cpfpByLeafId.get(MULTI_LEAF_B), "cpfp job b"))).toBe(
+      bytesToHex(expectedB.cpfpRefund.txBytes),
+    );
+    expect(sent.receivers.map((receiver) => receiver.amountSats)).toStrictEqual([60_000, 40_000]);
+    signer.dispose();
+  });
+
+  test("rejects duplicate receivers after address decoding", async () => {
+    const signer = await testSigner();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const client = makeClient(signer, {});
+    await expect(
+      client.transfers.sendMany({
+        receivers: [
+          { receiver, amountSats: 100 },
+          { receiver: new Uint8Array(receiver), amountSats: 200 },
+        ],
+      }),
+    ).rejects.toThrow("duplicate receiver");
+    signer.dispose();
+  });
+
+  test("rejects empty receiver lists and non-positive amounts", async () => {
+    const signer = await testSigner();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const client = makeClient(signer, {});
+    await expect(client.transfers.sendMany({ receivers: [] })).rejects.toThrow(SparkInputError);
+    await expect(
+      client.transfers.sendMany({ receivers: [{ receiver, amountSats: 0 }] }),
+    ).rejects.toThrow(/positive safe integer/);
+    await expect(
+      client.transfers.sendMany({
+        receivers: [
+          { receiver, amountSats: 1 },
+          {
+            receiver: secp256k1.getPublicKey(RECEIVER_C_SECRET, true),
+            amountSats: Number.MAX_SAFE_INTEGER,
+          },
+        ],
+      }),
+    ).rejects.toThrow(/safe integer range/);
+    signer.dispose();
+  });
+
+  test("sendTransfer rejects an invoice on a multi-receiver transfer and reused leaf ids", async () => {
+    const signer = await testSigner();
+    const a = await fabricatedNode(signer, MULTI_LEAF_A, 60_000n);
+    const receiverB = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const receiverC = secp256k1.getPublicKey(RECEIVER_C_SECRET, true);
+    // The rejections fire before any RPC, so the spark client is never touched.
+    const coordinator = {
+      spark: {} as never,
+      signer,
+      network: "regtest" as const,
+      operators: OPERATORS,
+      threshold: THRESHOLD,
+    };
+    const allocations = [
+      { receiverIdentityPublicKey: receiverB, leaves: [a.leaf] },
+      { receiverIdentityPublicKey: receiverC, leaves: [a.leaf] },
+    ];
+    await expect(
+      sendTransfer({ ...coordinator, transferId: TRANSFER_ID, allocations }),
+    ).rejects.toThrow(/appears twice/);
+    await expect(
+      sendTransfer({
+        ...coordinator,
+        transferId: TRANSFER_ID,
+        allocations: [
+          { receiverIdentityPublicKey: receiverB, leaves: [a.leaf] },
+          { receiverIdentityPublicKey: receiverC, leaves: [a.leaf, { ...a.leaf, id: "other" }] },
+        ],
+        sparkInvoice: "sparkrt1test",
+      }),
+    ).rejects.toThrow(/cannot carry an invoice/);
+    await expect(
+      sendTransfer({ ...coordinator, transferId: TRANSFER_ID, allocations: [] }),
+    ).rejects.toThrow(/must not be empty/);
+    signer.dispose();
+  });
+});
+
+describe("committed-transfer predicate", () => {
+  const keyA = secp256k1.getPublicKey(new Uint8Array(32).fill(0xa1), true);
+  const keyB = secp256k1.getPublicKey(new Uint8Array(32).fill(0xa2), true);
+  const keyC = secp256k1.getPublicKey(new Uint8Array(32).fill(0xa3), true);
+
+  function transfer(overrides: Partial<SparkTransfer>): SparkTransfer {
+    return {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: keyA,
+      receiverIdentityPublicKey: keyB,
+      receivers: [],
+      status: "SENDER_INITIATED",
+      type: "TRANSFER",
+      network: "regtest",
+      totalValueSats: 100,
+      leaves: [],
+      ...overrides,
+    };
+  }
+
+  const expectation = {
+    type: TransferType.TRANSFER,
+    senderIdentityPublicKey: keyA,
+    receiverIdentityPublicKeys: [keyB],
+  };
+
+  test("accepts the exact receiver set and rejects supersets and missing receivers", () => {
+    const receiver = (key: Uint8Array, amountSats = 0) => ({
+      id: `r-${key[0]}`,
+      identityPublicKey: key,
+      amountSats,
+      status: "TRANSFER_RECEIVER_STATUS_INITIATED",
+    });
+    assertCommittedTransfer(transfer({}), expectation, "test");
+    assertCommittedTransfer(transfer({ receivers: [receiver(keyB)] }), expectation, "test");
+    // An extra receiver, or a different receiver entirely, fails closed.
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({ receivers: [receiver(keyB), receiver(keyC)] }),
+        expectation,
+        "test",
+      ),
+    ).toThrow(/not ours/);
+    expect(() =>
+      assertCommittedTransfer(transfer({ receivers: [receiver(keyC)] }), expectation, "test"),
+    ).toThrow(/not ours/);
+    // Two expected receivers cannot be satisfied by the empty-receivers fallback.
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({}),
+        { ...expectation, receiverIdentityPublicKeys: [keyB, keyC] },
+        "test",
+      ),
+    ).toThrow(/not ours/);
+  });
+
+  test("checks per-receiver amounts and the total when expectations carry them", () => {
+    const receiver = (key: Uint8Array, amountSats: number) => ({
+      id: `r-${key[0]}`,
+      identityPublicKey: key,
+      amountSats,
+      status: "TRANSFER_RECEIVER_STATUS_INITIATED",
+    });
+    const expected = {
+      ...expectation,
+      receiverIdentityPublicKeys: [keyB, keyC],
+      receiverAmountsSats: [
+        { receiverIdentityPublicKey: keyB, amountSats: 60 },
+        { receiverIdentityPublicKey: keyC, amountSats: 40 },
+      ],
+    };
+    const matching = transfer({
+      receivers: [receiver(keyC, 40), receiver(keyB, 60)],
+      totalValueSats: 100,
+    });
+    assertCommittedTransfer(matching, expected, "test");
+    // A swapped amount fails the per-receiver check.
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({
+          receivers: [receiver(keyC, 60), receiver(keyB, 40)],
+          totalValueSats: 100,
+        }),
+        expected,
+        "test",
+      ),
+    ).toThrow(/not ours/);
+    // Matching edges but a different total fails.
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({
+          receivers: [receiver(keyB, 60), receiver(keyC, 40)],
+          totalValueSats: 99,
+        }),
+        expected,
+        "test",
+      ),
+    ).toThrow(/not ours/);
+  });
+
+  test("rejects duplicate receiver edges and binds a single edge by the total", () => {
+    const receiver = (key: Uint8Array, amountSats = 0) => ({
+      id: `r-${key[0]}`,
+      identityPublicKey: key,
+      amountSats,
+      status: "TRANSFER_RECEIVER_STATUS_INITIATED",
+    });
+    // [B, B] against expected {B, C}: equal length but B is duplicated and C missing.
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({ receivers: [receiver(keyB), receiver(keyB)] }),
+        { ...expectation, receiverIdentityPublicKeys: [keyB, keyC] },
+        "test",
+      ),
+    ).toThrow(/not ours/);
+    // A single edge may leave amountSats unset; totalValueSats carries the amount check.
+    const singleExpected = {
+      ...expectation,
+      receiverAmountsSats: [{ receiverIdentityPublicKey: keyB, amountSats: 100 }],
+    };
+    assertCommittedTransfer(
+      transfer({ receivers: [receiver(keyB)], totalValueSats: 100 }),
+      singleExpected,
+      "test",
+    );
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({ receivers: [receiver(keyB)], totalValueSats: 99 }),
+        singleExpected,
+        "test",
+      ),
+    ).toThrow(/not ours/);
+  });
+});
+
+describe("send idempotent retries", () => {
+  test("a committed transfer under the caller's transfer id returns without touching leaves", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const committed = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: identity,
+      receiverIdentityPublicKey: receiver,
+      status: TransferStatus.SENDER_INITIATED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: 60_000n,
+      receivers: [
+        create(TransferReceiverSchema, {
+          id: "r-b",
+          identityPublicKey: receiver,
+          amountSats: 60_000n,
+          status: TransferReceiverStatus.INITIATED,
+        }),
+      ],
+    });
+    let nodeQueries = 0;
+    const client = makeClient(signer, {
+      query_nodes: () => {
+        nodeQueries += 1;
+        return nodesResponse([]);
+      },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [committed] }),
+      start_transfer_v2: () => {
+        throw new Error("start_transfer_v2 must not run when the probe hits");
+      },
+    });
+    const sent = await client.transfers.send({
+      receiver,
+      amountSats: 60_000,
+      transferId: TRANSFER_ID,
+    });
+    expect(sent.id).toBe(TRANSFER_ID);
+    // The probe hit short-circuits before leaf selection — query_nodes never ran.
+    expect(nodeQueries).toBe(0);
+    signer.dispose();
+  });
+
+  test("a committed transfer under different terms rejects the reused id", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const foreign = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: identity,
+      receiverIdentityPublicKey: secp256k1.getPublicKey(RECEIVER_C_SECRET, true),
+      status: TransferStatus.SENDER_INITIATED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: 60_000n,
+    });
+    const client = makeClient(signer, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [foreign] }),
+      start_transfer_v2: () => {
+        throw new Error("start_transfer_v2 must not run on a mismatched probe");
+      },
+    });
+    await expect(
+      client.transfers.send({ receiver, amountSats: 60_000, transferId: TRANSFER_ID }),
+    ).rejects.toThrow(/committed transfer is not ours/);
+    signer.dispose();
+  });
+
+  test("a lost start_transfer response recovers the committed transfer", async () => {
+    const signer = await testSigner();
+    const a = await fabricatedNode(signer, MULTI_LEAF_A, 60_000n);
+    const identity = await signer.identityPublicKey();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const committed = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: identity,
+      receiverIdentityPublicKey: receiver,
+      status: TransferStatus.SENDER_INITIATED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: 60_000n,
+    });
+    // First probe (before the send) misses; the post-failure probe finds the committed transfer.
+    const client = makeClient(signer, {
+      query_nodes: () => nodesResponse([a.node]),
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * req.nodeIds.length),
+        }),
+      query_transfers_by_id: byIdQueue([[], [committed]]),
+      start_transfer_v2: () => {
+        throw new SparkRequestError("start response lost", { code: "unavailable" });
+      },
+    });
+    const sent = await client.transfers.send({
+      receiver,
+      amountSats: 60_000,
+      transferId: TRANSFER_ID,
+    });
+    expect(sent.id).toBe(TRANSFER_ID);
     signer.dispose();
   });
 });

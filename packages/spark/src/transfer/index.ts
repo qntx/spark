@@ -6,6 +6,15 @@ export type {
   SparkTransferReceiver,
   TransferCoordinator,
 } from "./model.ts";
-export { queryAllTransfers, queryPendingTransfers, queryTransfersByIds } from "./query.ts";
-export { sendTransfer } from "./send.ts";
+export {
+  assertCommittedTransfer,
+  queryAllTransfers,
+  queryCommittedTransfer,
+  queryPendingTransfers,
+  queryTransferById,
+  queryTransfersByIds,
+} from "./query.ts";
+export type { CommittedTransferExpectation } from "./query.ts";
+export { prepareTransferPackage, sendTransfer } from "./send.ts";
+export type { SendAllocation, SendLeafInput } from "./send.ts";
 export { swapLeaves } from "./swap.ts";

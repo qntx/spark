@@ -832,8 +832,13 @@ describe("prepareTransfer", () => {
 
     const prepared = await signer.prepareTransfer({
       transferId: TRANSFER_ID,
-      receiverIdentityPublicKey: receiverPublicKey,
-      leaves: [{ leafId, key: { type: "leaf", leafId } }],
+      leaves: [
+        {
+          leafId,
+          key: { type: "leaf", leafId },
+          receiverIdentityPublicKey: receiverPublicKey,
+        },
+      ],
       operators,
       threshold: 2,
     });
@@ -889,13 +894,52 @@ describe("prepareTransfer", () => {
     signer.dispose();
   });
 
+  test("each leaf's secret cipher opens only under its own receiver's key", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const crypto = await backend();
+    const leafIds = [
+      "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c",
+      "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+    ];
+    const receiverSecrets = [0x0f00dn, 0xabcd1234n];
+    const receiverPublicKeys = receiverSecrets.map((secret) =>
+      Point.BASE.multiply(secret).toBytes(true),
+    );
+    const operators = [101n, 202n, 303n].map((secret, i) => testOperator(i, secret));
+
+    const prepared = await signer.prepareTransfer({
+      transferId: TRANSFER_ID,
+      leaves: leafIds.map((leafId, index) => ({
+        leafId,
+        key: { type: "leaf" as const, leafId },
+        receiverIdentityPublicKey: receiverPublicKeys[index]!,
+      })),
+      operators,
+      threshold: 2,
+    });
+    expect(prepared.leaves).toHaveLength(2);
+
+    for (const [index, leaf] of prepared.leaves.entries()) {
+      const opened = crypto.eciesDecrypt(be32(receiverSecrets[index]!), leaf.secretCipher);
+      expect(bytesToHex(Point.BASE.multiply(Fn.fromBytes(opened)).toBytes(true))).toBe(
+        bytesToHex(leaf.newPublicKey),
+      );
+      opened.fill(0);
+    }
+    // The other receiver's key cannot open leaf 0's cipher.
+    expect(() =>
+      crypto.eciesDecrypt(be32(receiverSecrets[1]!), prepared.leaves[0]!.secretCipher),
+    ).toThrow(SparkCryptoError);
+    signer.dispose();
+  });
+
   test("rejects empty leaves and operators", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
     const operators = [testOperator(0, 101n)];
+    const receiver = Point.BASE.toBytes(true);
     await expect(
       signer.prepareTransfer({
         transferId: TRANSFER_ID,
-        receiverIdentityPublicKey: Point.BASE.toBytes(true),
         leaves: [],
         operators,
         threshold: 1,
@@ -904,9 +948,34 @@ describe("prepareTransfer", () => {
     await expect(
       signer.prepareTransfer({
         transferId: TRANSFER_ID,
-        receiverIdentityPublicKey: Point.BASE.toBytes(true),
-        leaves: [{ leafId: "x", key: { type: "leaf", leafId: "x" } }],
+        leaves: [
+          {
+            leafId: "x",
+            key: { type: "leaf", leafId: "x" },
+            receiverIdentityPublicKey: receiver,
+          },
+        ],
         operators: [],
+        threshold: 1,
+      }),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("rejects a malformed per-leaf receiver identity key", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const leafId = "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c";
+    await expect(
+      signer.prepareTransfer({
+        transferId: TRANSFER_ID,
+        leaves: [
+          {
+            leafId,
+            key: { type: "leaf", leafId },
+            receiverIdentityPublicKey: new Uint8Array(32),
+          },
+        ],
+        operators: [testOperator(0, 101n)],
         threshold: 1,
       }),
     ).rejects.toThrow(SparkInputError);

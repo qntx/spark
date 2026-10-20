@@ -1,8 +1,8 @@
-import { SparkInputError } from "../errors/index.ts";
+import { SparkError, SparkInputError } from "../errors/index.ts";
 import type { SparkLeaf } from "./index.ts";
 
 export type LeafSelection =
-  | { readonly kind: "exact"; readonly leaves: SparkLeaf[] }
+  | { readonly kind: "exact"; readonly groups: SparkLeaf[][] }
   | { readonly kind: "swap"; readonly leaves: SparkLeaf[] };
 
 // 64-bit-safe power-of-two check (a JS `&` would truncate to 32 bits).
@@ -75,17 +75,61 @@ export function selectExact(
 }
 
 /**
- * Picks the leaves a spend uses: an exact combination when one exists, otherwise the inputs to a
- * leaves swap — the smallest single leaf covering the amount, else value-descending accumulation
- * until the total covers it. Insufficient AVAILABLE balance throws.
+ * Disjoint exact combinations, one per amount (upstream `selectLeaves` semantics): amounts are
+ * matched smallest-first over the remaining AVAILABLE leaves, so a small target cannot be starved
+ * by a large one taking its exact leaf first. Returns the groups in the order `amounts` listed
+ * them, or undefined when any amount cannot be matched exactly.
  */
-export function selectLeaves(leaves: ReadonlyArray<SparkLeaf>, amountSats: number): LeafSelection {
-  if (!Number.isSafeInteger(amountSats) || amountSats <= 0) {
-    throw new SparkInputError("send: amountSats must be a positive safe integer");
+export function selectExactMany(
+  leaves: ReadonlyArray<SparkLeaf>,
+  amounts: ReadonlyArray<number>,
+): SparkLeaf[][] | undefined {
+  let remaining = available(leaves);
+  const groups: Array<SparkLeaf[] | undefined> = Array.from({ length: amounts.length });
+  const byAscending = amounts.map((amount, index) => ({ amount, index }));
+  byAscending.sort((a, b) => a.amount - b.amount);
+  for (const { amount, index } of byAscending) {
+    const group = selectExact(remaining, amount);
+    if (group === undefined) {
+      return undefined;
+    }
+    groups[index] = group;
+    const used = new Set(group.map((leaf) => leaf.id));
+    remaining = remaining.filter((leaf) => !used.has(leaf.id));
   }
-  const exact = selectExact(leaves, amountSats);
+  return groups.map((group) => {
+    if (group === undefined) {
+      throw new SparkError("selectExactMany: internal grouping failure");
+    }
+    return group;
+  });
+}
+
+/**
+ * Picks the leaves a spend uses: one exact combination per amount when they all exist, otherwise
+ * the inputs to a leaves swap covering their total — the smallest single leaf covering it, else
+ * value-descending accumulation until the inputs do. Insufficient AVAILABLE balance throws.
+ */
+export function selectLeaves(
+  leaves: ReadonlyArray<SparkLeaf>,
+  amounts: ReadonlyArray<number>,
+): LeafSelection {
+  if (amounts.length === 0) {
+    throw new SparkInputError("send: amounts must not be empty");
+  }
+  let amountSats = 0;
+  for (const amount of amounts) {
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      throw new SparkInputError("send: amountSats must be a positive safe integer");
+    }
+    amountSats += amount;
+    if (!Number.isSafeInteger(amountSats)) {
+      throw new SparkInputError("send: amountSats sum exceeds the safe integer range");
+    }
+  }
+  const exact = selectExactMany(leaves, amounts);
   if (exact !== undefined) {
-    return { kind: "exact", leaves: exact };
+    return { kind: "exact", groups: exact };
   }
   const candidates = available(leaves);
   let total = 0;

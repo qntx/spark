@@ -144,13 +144,17 @@ export type SparkOperator = {
 
 /**
  * PrepareTransfer input: every leaf gets a fresh random recipient key; the operator-visible tweak
- * is `old − new` (mod n) split by VSS and encrypted per operator.
+ * is `old − new` (mod n) split by VSS and encrypted per operator. Each leaf's `secret_cipher` is
+ * sealed to that leaf's own receiver identity key, so one transfer can pay several receivers.
  */
 export type PrepareTransferRequest = {
   readonly transferId: string;
-  /** 33-byte compressed identity public key the per-leaf `secret_cipher` is encrypted to. */
-  readonly receiverIdentityPublicKey: Uint8Array;
-  readonly leaves: ReadonlyArray<{ readonly leafId: string; readonly key: SparkLeafKey }>;
+  readonly leaves: ReadonlyArray<{
+    readonly leafId: string;
+    readonly key: SparkLeafKey;
+    /** 33-byte compressed identity public key the leaf's `secret_cipher` is encrypted to. */
+    readonly receiverIdentityPublicKey: Uint8Array;
+  }>;
   readonly operators: ReadonlyArray<SparkOperator>;
   readonly threshold: number;
 };

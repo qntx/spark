@@ -17,10 +17,16 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
   const { coordinatorConnection, signer, network, config, store } = context;
   // All spendable leaves withdraw everything; an amount selects exactly (swapping if needed).
   // Either way every leaf is renewed before it leaves the wallet.
-  const selectExitLeaves = async (amountSats?: number) =>
-    amountSats === undefined
-      ? renewStaleLeaves(context, await context.leaves())
-      : selectSendLeaves(context, amountSats);
+  const selectExitLeaves = async (amountSats?: number) => {
+    if (amountSats === undefined) {
+      return renewStaleLeaves(context, await context.leaves());
+    }
+    const [group] = await selectSendLeaves(context, [amountSats]);
+    if (group === undefined) {
+      throw new SparkInputError("coop exit: leaf selection returned no group");
+    }
+    return group;
+  };
   return {
     quoteCooperativeExit: async (options) =>
       quoteCooperativeExit(

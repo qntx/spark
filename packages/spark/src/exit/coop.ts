@@ -292,8 +292,10 @@ export async function cooperativeExit(
     operators: deps.operators,
     threshold: deps.threshold,
     transferId,
-    leaves,
-    receiverIdentityPublicKey: sspIdentityPublicKey,
+    leaves: leaves.map((leaf) => ({
+      leaf,
+      receiverIdentityPublicKey: sspIdentityPublicKey,
+    })),
     buildRefunds: (entry, sequence) => {
       const index = indexByLeafId.get(entry.leaf.id);
       const connectorPrevout = index === undefined ? undefined : connectorPrevouts[index];
@@ -364,7 +366,7 @@ export async function cooperativeExit(
       transferId,
       type: TransferType.COOPERATIVE_EXIT,
       senderIdentityPublicKey: identityPublicKey,
-      receiverIdentityPublicKey: sspIdentityPublicKey,
+      receiverIdentityPublicKeys: [sspIdentityPublicKey],
     });
     if (recovered === undefined) {
       throw error;
@@ -376,7 +378,7 @@ export async function cooperativeExit(
     {
       type: TransferType.COOPERATIVE_EXIT,
       senderIdentityPublicKey: identityPublicKey,
-      receiverIdentityPublicKey: sspIdentityPublicKey,
+      receiverIdentityPublicKeys: [sspIdentityPublicKey],
     },
     "coop exit",
   );

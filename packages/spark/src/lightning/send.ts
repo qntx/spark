@@ -16,7 +16,11 @@ import {
 } from "../proto/gen/spark_pb.ts";
 import { mapTransfer } from "../transfer/model.ts";
 import type { SparkTransfer } from "../transfer/model.ts";
-import { assertCommittedTransfer, queryCommittedTransfer } from "../transfer/query.ts";
+import {
+  assertCommittedTransfer,
+  queryCommittedTransfer,
+  queryTransferById,
+} from "../transfer/query.ts";
 import { prepareTransferPackage } from "../transfer/send.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import type { LightningDeps } from "./types.ts";
@@ -104,106 +108,126 @@ export async function payLightningInvoice(
   const isZeroAmount = decoded.amountMsat === undefined;
   const transferId = options.transferId ?? uuidv7(deps.random, deps.now);
 
-  // The SSP charges the fee separately; only amountless invoices take an amount for the estimate.
-  const feeSats = await ssp.lightningSendFeeEstimate(
-    invoice,
-    isZeroAmount ? amountSats : undefined,
-  );
-  if (feeSats > options.maxFeeSats) {
-    throw new SparkInputError(
-      `lightning pay: fee estimate ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
-    );
-  }
-
-  const leaves = await deps.selectLeaves(amountSats + feeSats);
   const identityPublicKey = await signer.identityPublicKey();
+  const expected = {
+    type: TransferType.PREIMAGE_SWAP,
+    senderIdentityPublicKey: identityPublicKey,
+    receiverIdentityPublicKeys: [sspIdentityPublicKey],
+  } as const;
 
-  // Hash-locked to the SSP (preimage path) and sequence-locked back to us (refund path);
-  // sequences decrement from each leaf's current refund sequence per the HTLC offsets.
-  const transferPackage = await prepareTransferPackage({
-    spark,
-    signer,
-    network,
-    operators: deps.operators,
-    threshold: deps.threshold,
-    transferId,
-    leaves,
-    receiverIdentityPublicKey: sspIdentityPublicKey,
-    buildRefunds: (entry, sequence) => {
-      const { nextSequence, nextDirectSequence } = getNextHTLCTransactionSequence(sequence);
-      const refunds = createRefundTxsForLightning({
-        nodeTx: entry.leaf.nodeTx,
-        directNodeTx: entry.leaf.directTx,
-        vout: 0,
-        sequence: nextSequence,
-        directSequence: nextDirectSequence,
-        paymentHash: decoded.paymentHash,
-        hashLockDestinationPublicKey: sspIdentityPublicKey,
-        sequenceLockDestinationPublicKey: identityPublicKey,
-      });
-      return {
-        refunds: {
-          cpfpRefund: refunds.cpfpRefundTx,
-          directRefund: refunds.directRefundTx,
-          directFromCpfpRefund: refunds.directFromCpfpRefundTx,
-        },
-      };
-    },
-  });
-
-  const transferRequest = create(StartTransferRequestSchema, {
-    transferId,
-    ownerIdentityPublicKey: identityPublicKey,
-    receiverIdentityPublicKey: sspIdentityPublicKey,
-    transferPackage,
-    expiryTime: timestampFromDate(new Date(deps.now() + LIGHTNING_TRANSFER_EXPIRY_MS)),
-  });
-
-  let transfer: SparkTransfer;
-  try {
-    const response = await spark.initiate_preimage_swap_v3(
-      {
-        paymentHash: decoded.paymentHash,
-        invoiceAmount: {
-          invoiceAmountProof: { bolt11Invoice: invoice },
-          valueSats: BigInt(amountSats),
-        },
-        reason: InitiatePreimageSwapRequest_Reason.SEND,
-        receiverIdentityPublicKey: sspIdentityPublicKey,
-        feeSats: BigInt(feeSats),
-        transferRequest,
-      },
-      { headers: { "x-idempotency-key": transferId } },
-    );
-    if (response.transfer === undefined) {
-      throw new SparkError("lightning pay: preimage swap returned no transfer");
-    }
-    transfer = mapTransfer(response.transfer);
-  } catch (error) {
-    // The swap can commit server-side and still lose its response. The committed transfer is the
-    // only sound test — a retry must continue with it rather than fail or double-pay.
-    const recovered = await queryCommittedTransfer({
-      spark,
-      network,
-      transferId,
-      type: TransferType.PREIMAGE_SWAP,
-      senderIdentityPublicKey: identityPublicKey,
-      receiverIdentityPublicKey: sspIdentityPublicKey,
-    });
-    if (recovered === undefined) {
-      throw error;
-    }
-    transfer = recovered;
+  // A caller-supplied id is the idempotency handle: a committed swap under it means this call is
+  // a retry — skip the fee estimate, leaf selection and package building, and continue with the
+  // post-commit steps. A committed swap under different terms fails rather than riding along on
+  // the reused id.
+  let transfer: SparkTransfer | undefined;
+  if (options.transferId !== undefined) {
+    transfer = await queryTransferById({ spark, network, transferId });
   }
-  assertCommittedTransfer(
-    transfer,
-    {
-      type: TransferType.PREIMAGE_SWAP,
-      senderIdentityPublicKey: identityPublicKey,
+
+  let feeSats: number;
+  if (transfer === undefined) {
+    // The SSP charges the fee separately; only amountless invoices take an amount for it.
+    feeSats = await ssp.lightningSendFeeEstimate(invoice, isZeroAmount ? amountSats : undefined);
+    if (feeSats > options.maxFeeSats) {
+      throw new SparkInputError(
+        `lightning pay: fee estimate ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
+      );
+    }
+  } else {
+    assertCommittedTransfer(transfer, expected, "lightning pay");
+    // The swap commits amount + fee as the transfer total; the committed total is the fee source.
+    feeSats = transfer.totalValueSats - amountSats;
+    if (feeSats < 0 || feeSats > options.maxFeeSats) {
+      throw new SparkInputError(
+        `lightning pay: committed transfer fee ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
+      );
+    }
+  }
+
+  /** Selects `amount + fee` of leaves, wraps their refunds in HTLCs and commits the swap. */
+  async function initiatePreimageSwap(): Promise<SparkTransfer> {
+    const leaves = await deps.selectLeaves(amountSats + feeSats);
+
+    // Hash-locked to the SSP (preimage path) and sequence-locked back to us (refund path);
+    // sequences decrement from each leaf's current refund sequence per the HTLC offsets.
+    const transferPackage = await prepareTransferPackage({
+      spark,
+      signer,
+      network,
+      operators: deps.operators,
+      threshold: deps.threshold,
+      transferId,
+      leaves: leaves.map((leaf) => ({
+        leaf,
+        receiverIdentityPublicKey: sspIdentityPublicKey,
+      })),
+      buildRefunds: (entry, sequence) => {
+        const { nextSequence, nextDirectSequence } = getNextHTLCTransactionSequence(sequence);
+        const refunds = createRefundTxsForLightning({
+          nodeTx: entry.leaf.nodeTx,
+          directNodeTx: entry.leaf.directTx,
+          vout: 0,
+          sequence: nextSequence,
+          directSequence: nextDirectSequence,
+          paymentHash: decoded.paymentHash,
+          hashLockDestinationPublicKey: sspIdentityPublicKey,
+          sequenceLockDestinationPublicKey: identityPublicKey,
+        });
+        return {
+          refunds: {
+            cpfpRefund: refunds.cpfpRefundTx,
+            directRefund: refunds.directRefundTx,
+            directFromCpfpRefund: refunds.directFromCpfpRefundTx,
+          },
+        };
+      },
+    });
+
+    const transferRequest = create(StartTransferRequestSchema, {
+      transferId,
+      ownerIdentityPublicKey: identityPublicKey,
       receiverIdentityPublicKey: sspIdentityPublicKey,
-    },
-    "lightning pay",
-  );
+      transferPackage,
+      expiryTime: timestampFromDate(new Date(deps.now() + LIGHTNING_TRANSFER_EXPIRY_MS)),
+    });
+
+    try {
+      const response = await spark.initiate_preimage_swap_v3(
+        {
+          paymentHash: decoded.paymentHash,
+          invoiceAmount: {
+            invoiceAmountProof: { bolt11Invoice: invoice },
+            valueSats: BigInt(amountSats),
+          },
+          reason: InitiatePreimageSwapRequest_Reason.SEND,
+          receiverIdentityPublicKey: sspIdentityPublicKey,
+          feeSats: BigInt(feeSats),
+          transferRequest,
+        },
+        { headers: { "x-idempotency-key": transferId } },
+      );
+      if (response.transfer === undefined) {
+        throw new SparkError("lightning pay: preimage swap returned no transfer");
+      }
+      return mapTransfer(response.transfer);
+    } catch (error) {
+      // The swap can commit server-side and still lose its response. The committed transfer is
+      // the only sound test — a retry must continue with it rather than fail or double-pay.
+      const recovered = await queryCommittedTransfer({
+        spark,
+        network,
+        transferId,
+        ...expected,
+      });
+      if (recovered === undefined) {
+        throw error;
+      }
+      return recovered;
+    }
+  }
+
+  transfer ??= await initiatePreimageSwap();
+  assertCommittedTransfer(transfer, expected, "lightning pay");
 
   // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
   // failure on the SSP call below. The returned transfer — not the locally selected list —

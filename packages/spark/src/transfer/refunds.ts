@@ -50,10 +50,10 @@ function refundTxSequence(refundTxBytes: Uint8Array, context: string): number {
  * refund spends more than one input, the extra prevout that input commits to (the coop-exit
  * connector output appended as input 1 of every refund).
  */
-export function refundJobGroups(
-  leaves: ReadonlyArray<RefundJobLeaf>,
+export function refundJobGroups<T extends RefundJobLeaf>(
+  leaves: ReadonlyArray<T>,
   buildRefunds: (
-    entry: RefundJobLeaf,
+    entry: T,
     sequence: number,
   ) => {
     refunds: RefundTxTrio;

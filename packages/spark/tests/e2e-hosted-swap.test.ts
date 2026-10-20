@@ -32,13 +32,13 @@ function pickSingleLeafSwap(
 ): number | undefined {
   const total = totalSats(leaves);
   for (let candidate = 1; candidate <= Math.min(preferredCapSats, total); candidate++) {
-    const selection = selectLeaves(leaves, candidate);
+    const selection = selectLeaves(leaves, [candidate]);
     if (selection.kind === "swap" && selection.leaves.length === 1) {
       return candidate;
     }
   }
   for (let candidate = preferredCapSats + 1; candidate < total; candidate++) {
-    const selection = selectLeaves(leaves, candidate);
+    const selection = selectLeaves(leaves, [candidate]);
     if (selection.kind === "swap" && selection.leaves.length === 1) {
       return candidate;
     }
@@ -57,7 +57,7 @@ function pickMultiLeafSwap(leaves: ReadonlyArray<SparkLeaf>): number | undefined
     largest = Math.max(largest, leaf.valueSats);
   }
   for (let candidate = largest + 1; candidate < total; candidate++) {
-    if (selectLeaves(leaves, candidate).kind === "swap") {
+    if (selectLeaves(leaves, [candidate]).kind === "swap") {
       return candidate;
     }
   }

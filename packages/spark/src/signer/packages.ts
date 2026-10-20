@@ -114,7 +114,6 @@ export function prepareTransferPackage(
     throw new SparkInputError("leaves: must not be empty");
   }
   checkOperators(request.operators);
-  requireLength(request.receiverIdentityPublicKey, PUBLIC_KEY_LENGTH, "receiverIdentityPublicKey");
   const secrets: Uint8Array[] = [];
   const plaintexts: Uint8Array[] = [];
   try {
@@ -125,15 +124,12 @@ export function prepareTransferPackage(
     }
     const leaves: PreparedTransferLeaf[] = [];
     for (const leaf of request.leaves) {
+      requireLength(leaf.receiverIdentityPublicKey, PUBLIC_KEY_LENGTH, "receiverIdentityPublicKey");
       const oldPrivateKey = keys.resolve(leaf.key);
       const newPrivateKey = randomScalar(random);
       secrets.push(oldPrivateKey, newPrivateKey);
       const secretCipher = backendCall(() =>
-        crypto.eciesEncrypt(
-          request.receiverIdentityPublicKey,
-          newPrivateKey,
-          randomBytes(random, 32),
-        ),
+        crypto.eciesEncrypt(leaf.receiverIdentityPublicKey, newPrivateKey, randomBytes(random, 32)),
       );
       const signature = ecdsaSign(
         sendLeafSigningDigest(leaf.leafId, request.transferId, secretCipher),
