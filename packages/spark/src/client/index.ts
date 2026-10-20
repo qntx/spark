@@ -132,6 +132,12 @@ export type SparkClient = {
      * Sends exactly `amount` of the bech32m token to `receiver` (a spark address string or a
      * 33-byte identity public key) via `broadcast_transaction`; returns the hex final transaction
      * hash. Change returns to the sender.
+     *
+     * A lost broadcast response is recovered automatically: the identical partial re-broadcasts
+     * once (the SO dedups by partial hash), then the committed transaction is probed by the spent
+     * input ids. If a call still fails, check `tokens.outputs()` before retrying — the error names
+     * the input output ids, and a retry whose selected outputs are no longer available would pick
+     * different ones and pay again.
      */
     readonly transfer: (transferOptions: {
       readonly tokenIdentifier: string;
@@ -143,6 +149,9 @@ export type SparkClient = {
      * output (upstream `optimizeTokenOutputs`): smallest-first, at most 500 inputs per transaction,
      * on demand — no change output is created. Returns `undefined` when fewer than two available
      * outputs exist; call again to keep merging when more than 500 were owned.
+     *
+     * Shares `transfer`'s lost-response recovery; if a call still fails, check `tokens.outputs()`
+     * before retrying — the error names the input output ids.
      */
     readonly consolidate: (options: {
       readonly tokenIdentifier: string;
