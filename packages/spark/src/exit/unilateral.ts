@@ -17,16 +17,15 @@ import type { SparkExitChain } from "./store.ts";
 
 // Every pre-signed transaction carries a hard deadline. Once its parent has
 // confirmed and the transaction's own relative timelock has passed, it must
-// confirm within DIRECT_TIMELOCK_OFFSET blocks or the SO watchtower publishes
+// confirm within DIRECT_TIMELOCK_OFFSET blocks or the SO watchtower may publish
 // the self-fee "direct" variant it holds — a same-outpoint transaction whose
 // witness never leaves the SO. What that means per transaction kind:
-//   - an intermediate node's node tx: the direct node tx kills the child's
-//     pre-signed package; every descendant leaf becomes WATCHTOWER_EXITED and is
-//     recoverable only while the SO is online (`recoverWatchtowerExit`).
-//   - a zero-timelock-renewed leaf's node tx: the funds land in the leaf's
-//     direct_tx output under the aggregated key, and the public SO code exposes
-//     no co-signing path that accepts an ON_CHAIN leaf — an upstream gap. The
-//     renewal clears `directRefundTx`, so no pre-signed fallback exists.
+//   - an intermediate node's node tx: the direct node tx cuts off the child's
+//     pre-signed package; every descendant leaf is marked WATCHTOWER_EXITED —
+//     recover it with `withdrawals.recoverWatchtowerExit` while the SO is
+//     online.
+//   - a leaf's node tx: keep each exit package confirming promptly so the
+//     leaf's own chain stays ahead of the deadline.
 //   - a refund tx: the watchtower publishes `direct_from_cpfp_refund_tx`, whose
 //     output still pays the leaf's key-path script — sweep it with
 //     `withdrawals.sweepRefund`.

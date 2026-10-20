@@ -255,11 +255,12 @@ export type SparkClient = {
   readonly withdrawals: {
     /**
      * Pre-signed exit transactions for the given leaves, root first (see ExitTransaction). Each
-     * carries a hard deadline: once its parent confirms and its relative timelock has passed, it
-     * must confirm within DIRECT_TIMELOCK_OFFSET blocks or the SO watchtower publishes the self-fee
-     * direct variant — stranding descendants as WATCHTOWER_EXITED, or, for a zero-timelock-renewed
-     * leaf's node tx, stranding the funds under the leaf's aggregated key with no public recovery
-     * path.
+     * carries a hard deadline: once a transaction's parent confirms and its relative timelock
+     * passes, it must confirm within DIRECT_TIMELOCK_OFFSET blocks; otherwise the operators'
+     * watchtower may publish a self-fee variant instead. For intermediate nodes this strands
+     * descendants as WATCHTOWER_EXITED (recover with recoverWatchtowerExit while the SO is online);
+     * for refunds the watchtower publishes direct_from_cpfp_refund_tx, which pays the leaf key
+     * (sweep with sweepRefund). Keep each exit package confirming promptly.
      */
     readonly unilateralExit: (
       leafIds: ReadonlyArray<string>,
