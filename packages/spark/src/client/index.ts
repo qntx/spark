@@ -72,6 +72,10 @@ export type SparkClient = {
      * identity public key) via `start_transfer_v2` — selecting exact leaves, or swapping with the
      * SSP first when no exact combination exists. Pass the same `transferId` to retry a call whose
      * response was lost.
+     *
+     * Once the transfer commits (sender key tweaked) it stays claimable indefinitely: the sender
+     * cannot cancel it and its expiry does not return it — the pre-claim refund already pays the
+     * receiver's identity key.
      */
     readonly send: (sendOptions: {
       readonly receiver: string | Uint8Array;
@@ -82,7 +86,8 @@ export type SparkClient = {
      * Sends to several receivers in one `start_transfer_v3` — one exact leaf group per entry, or a
      * single SSP swap minting every amount. `receiver` accepts the same shapes as `send` (invoice
      * addresses are rejected); duplicate receivers are rejected. `transferId` has the same retry
-     * semantics as `send`.
+     * semantics as `send`. Committed transfers share `send`'s claimability: no sender cancel, no
+     * expiry return.
      */
     readonly sendMany: (sendOptions: {
       readonly receivers: ReadonlyArray<{
@@ -93,7 +98,11 @@ export type SparkClient = {
     }) => Promise<SparkTransfer>;
     /** Verifies and claims a pending transfer addressed to this identity; returns the new leaves. */
     readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;
-    /** Claims every pending incoming transfer; returns all new leaves. */
+    /**
+     * Claims every pending incoming transfer; returns all new leaves. A committed transfer stays
+     * claimable indefinitely — the sender cannot cancel it and its expiry does not return it, so a
+     * receiver may stay offline across the sender's expiry and claim later.
+     */
     readonly claimPending: () => Promise<ReadonlyArray<SparkLeaf>>;
   };
   readonly tokens: {
@@ -352,6 +361,11 @@ export type SparkInvoiceStatus = {
 export type SparkClientOptions = {
   readonly network: SparkNetwork;
   readonly signer: SparkSigner;
+  /**
+   * On React Native inject a streaming fetch (`expo/fetch`, the global from Expo SDK 56): RN's
+   * XHR-based fetch (e.g. with `EXPO_PUBLIC_USE_RN_FETCH=1`) has no streaming body, so `events()`
+   * cannot work with it.
+   */
   readonly fetch: typeof globalThis.fetch;
   /** Exit-chain persistence; defaults to an in-memory store. */
   readonly store?: SparkStore;
