@@ -131,7 +131,7 @@ function prevout0(txBytes: Uint8Array, context: string): { script: Uint8Array; a
 /**
  * `coop_exit_fee_quote` for the leaves an exit would use: every spendable leaf when `amountSats` is
  * omitted, otherwise the exact-amount selection (which may swap). `selectLeaves` is the client's
- * shared selection path; an empty selection is rejected before the SSP call.
+ * shared selection path under `leafLock`; an empty selection is rejected before the SSP call.
  */
 export async function quoteCooperativeExit(
   deps: Pick<CoopExitDeps, "ssp" | "network"> & {
@@ -201,10 +201,17 @@ async function completeWithRetries(
  * ids were sent. On a lost `cooperative_exit_v2` response the transfer id doubles as the recovery
  * key; once the transfer commits, the old refund txs are deleted before the completion request so
  * an SSP failure cannot leave them usable.
+ *
+ * `spendLeaves` hands `use` the selected leaves (all spendable ones when `amountSats` is undefined)
+ * and keeps the client's leaf lock held until `use` resolves — selection, SSP quote, commit and
+ * chain cleanup inside `use` cannot interleave with another spend.
  */
 export async function cooperativeExit(
   deps: CoopExitDeps & {
-    readonly selectLeaves: (amountSats?: number) => Promise<ReadonlyArray<SparkLeaf>>;
+    readonly spendLeaves: <T>(
+      amountSats: number | undefined,
+      use: (leaves: ReadonlyArray<SparkLeaf>) => Promise<T>,
+    ) => Promise<T>;
     readonly deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
   },
   options: {
@@ -223,178 +230,183 @@ export async function cooperativeExit(
     throw new SparkInputError("coop exit: maxFeeSats must be a non-negative integer");
   }
 
-  const leaves = await deps.selectLeaves(options.amountSats);
-  if (leaves.length === 0) {
-    throw new SparkInputError("coop exit: no leaves to withdraw");
-  }
-  const leafIds = leaves.map((leaf) => leaf.id);
-  const totalSats = leaves.reduce((sum, leaf) => sum + leaf.valueSats, 0);
-
-  const quote = await ssp.coopExitFeeQuote(leafIds, options.address);
-  const feeSats = {
-    FAST: quote.fees.fast,
-    MEDIUM: quote.fees.medium,
-    SLOW: quote.fees.slow,
-  }[options.speed];
-  if (feeSats > options.maxFeeSats) {
-    throw new SparkInputError(
-      `coop exit: quoted fee ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
-    );
-  }
-  if (feeSats >= totalSats) {
-    throw new SparkInputError(`coop exit: quoted fee ${feeSats} leaves no payout`);
-  }
-  const payoutSats = totalSats - feeSats;
-
-  const transferId = options.transferId ?? uuidv7(deps.random, deps.now);
-  const request = await ssp.requestCoopExit({
-    leafIds,
-    withdrawalAddress: options.address,
-    exitSpeed: options.speed,
-    withdrawAll: true,
-    userOutboundTransferExternalId: transferId,
-  });
-
-  // The payout tx must be the one the SSP claims it is and must pay out what the quote implied.
-  validateCoopExitPayoutTransaction({
-    rawCoopExitTransaction: request.rawCoopExitTransaction,
-    expectedCoopExitTxid: request.coopExitTxid,
-    expectedPayoutAddress: options.address,
-    expectedPayoutAmountSats: payoutSats,
-    network,
-  });
-
-  const exitTxidInternal = hexToBytes(request.coopExitTxid).reverse();
-  validateConnectorTxBindsToCoopExitTxid(request.rawConnectorTransaction, exitTxidInternal);
-  // btc-signer inputs carry display-order txid bytes (it reverses on serialize).
-  const connectorTxidDisplay = txId(request.rawConnectorTransaction);
-
-  const connectorTx = parseTransaction(request.rawConnectorTransaction);
-  if (connectorTx.outputsLength !== leaves.length + 1) {
-    throw new SparkError(
-      `coop exit: connector tx has ${connectorTx.outputsLength} outputs, expected ${leaves.length} + anchor`,
-    );
-  }
-  const connectorPrevouts = leaves.map((leaf, i) => {
-    const output = connectorTx.getOutput(i);
-    if (output.script === undefined || output.amount === undefined) {
-      throw new SparkError(`coop exit: connector tx output ${i} for leaf ${leaf.id} is missing`);
+  // Selection through the committed transfer's chain deletion is one critical section under the
+  // client's leaf lock — the quote, payout request and commit cannot interleave with other spends.
+  const completed = await deps.spendLeaves(options.amountSats, async (leaves) => {
+    if (leaves.length === 0) {
+      throw new SparkInputError("coop exit: no leaves to withdraw");
     }
-    return { script: output.script, amount: u64ToSats(output.amount, "coop exit connector") };
-  });
-  const indexByLeafId = new Map(leaves.map((leaf, i) => [leaf.id, i]));
+    const leafIds = leaves.map((leaf) => leaf.id);
+    const totalSats = leaves.reduce((sum, leaf) => sum + leaf.valueSats, 0);
 
-  const identityPublicKey = await signer.identityPublicKey();
-  const transferPackage = await prepareTransferPackage({
-    spark,
-    signer,
-    network,
-    operators: deps.operators,
-    threshold: deps.threshold,
-    transferId,
-    leaves: leaves.map((leaf) => ({
-      leaf,
-      receiverIdentityPublicKey: sspIdentityPublicKey,
-    })),
-    buildRefunds: (entry, sequence) => {
-      const index = indexByLeafId.get(entry.leaf.id);
-      const connectorPrevout = index === undefined ? undefined : connectorPrevouts[index];
-      if (index === undefined || connectorPrevout === undefined) {
-        throw new SparkError("coop exit: refund leaf is outside the connector mapping");
-      }
-      const txs = createConnectorRefundTxs({
-        nodeTx: entry.leaf.nodeTx,
-        directNodeTx: entry.leaf.directTx,
-        sequence,
-        receivingPublicKey: sspIdentityPublicKey,
-        network,
-        connectorInput: { txid: hexToBytes(connectorTxidDisplay), index },
-      });
-      const job = (
-        txBytes: Uint8Array,
-        firstPrevout: { readonly script: Uint8Array; readonly amount: number },
-      ) => ({
-        txBytes,
-        sighash: taprootKeySpendSighash({
-          transaction: txBytes,
-          inputIndex: 0,
-          prevouts: [firstPrevout, connectorPrevout],
-        }),
-      });
-      const nodePrevout = prevout0(entry.leaf.nodeTx, `leaf ${entry.leaf.id} node tx`);
-      const refunds: RefundTxTrio = {
-        cpfpRefund: job(txs.cpfpRefundTx, nodePrevout),
-        directFromCpfpRefund: job(txs.directFromCpfpRefundTx, nodePrevout),
-        directRefund:
-          txs.directRefundTx === undefined || entry.leaf.directTx === undefined
-            ? undefined
-            : job(
-                txs.directRefundTx,
-                prevout0(entry.leaf.directTx, `leaf ${entry.leaf.id} direct node tx`),
-              ),
-      };
-      return { refunds, extraPrevout: connectorPrevout };
-    },
-  });
+    const quote = await ssp.coopExitFeeQuote(leafIds, options.address);
+    const feeSats = {
+      FAST: quote.fees.fast,
+      MEDIUM: quote.fees.medium,
+      SLOW: quote.fees.slow,
+    }[options.speed];
+    if (feeSats > options.maxFeeSats) {
+      throw new SparkInputError(
+        `coop exit: quoted fee ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
+      );
+    }
+    if (feeSats >= totalSats) {
+      throw new SparkInputError(`coop exit: quoted fee ${feeSats} leaves no payout`);
+    }
+    const payoutSats = totalSats - feeSats;
 
-  const transferRequest = create(StartTransferRequestSchema, {
-    transferId,
-    ownerIdentityPublicKey: identityPublicKey,
-    receiverIdentityPublicKey: sspIdentityPublicKey,
-    transferPackage,
-    expiryTime: timestampFromDate(new Date(deps.now() + COOP_EXIT_TRANSFER_EXPIRY_MS[network])),
-  });
-
-  let transfer: SparkTransfer;
-  try {
-    const response = await spark.cooperative_exit_v2({
-      transfer: transferRequest,
-      exitId: uuidv7(deps.random, deps.now),
-      exitTxid: exitTxidInternal,
-      connectorTx: request.rawConnectorTransaction,
+    const transferId = options.transferId ?? uuidv7(deps.random, deps.now);
+    const request = await ssp.requestCoopExit({
+      leafIds,
+      withdrawalAddress: options.address,
+      exitSpeed: options.speed,
+      withdrawAll: true,
+      userOutboundTransferExternalId: transferId,
     });
-    if (response.transfer === undefined) {
-      throw new SparkError("coop exit: cooperative_exit_v2 returned no transfer");
-    }
-    transfer = mapTransfer(response.transfer);
-  } catch (error) {
-    // The exit can commit server-side and still lose its response. The committed transfer is the
-    // only sound test — a retry must continue with it rather than fail or commit the leaves twice.
-    const recovered = await queryCommittedTransfer({
-      spark,
+
+    // The payout tx must be the one the SSP claims it is and must pay out what the quote implied.
+    validateCoopExitPayoutTransaction({
+      rawCoopExitTransaction: request.rawCoopExitTransaction,
+      expectedCoopExitTxid: request.coopExitTxid,
+      expectedPayoutAddress: options.address,
+      expectedPayoutAmountSats: payoutSats,
       network,
-      transferId,
-      type: TransferType.COOPERATIVE_EXIT,
-      senderIdentityPublicKey: identityPublicKey,
-      receiverIdentityPublicKeys: [sspIdentityPublicKey],
     });
-    if (recovered === undefined) {
-      throw error;
+
+    const exitTxidInternal = hexToBytes(request.coopExitTxid).reverse();
+    validateConnectorTxBindsToCoopExitTxid(request.rawConnectorTransaction, exitTxidInternal);
+    // btc-signer inputs carry display-order txid bytes (it reverses on serialize).
+    const connectorTxidDisplay = txId(request.rawConnectorTransaction);
+
+    const connectorTx = parseTransaction(request.rawConnectorTransaction);
+    if (connectorTx.outputsLength !== leaves.length + 1) {
+      throw new SparkError(
+        `coop exit: connector tx has ${connectorTx.outputsLength} outputs, expected ${leaves.length} + anchor`,
+      );
     }
-    transfer = recovered;
-  }
-  assertCommittedTransfer(
-    transfer,
-    {
-      type: TransferType.COOPERATIVE_EXIT,
-      senderIdentityPublicKey: identityPublicKey,
-      receiverIdentityPublicKeys: [sspIdentityPublicKey],
-    },
-    "coop exit",
-  );
+    const connectorPrevouts = leaves.map((leaf, i) => {
+      const output = connectorTx.getOutput(i);
+      if (output.script === undefined || output.amount === undefined) {
+        throw new SparkError(`coop exit: connector tx output ${i} for leaf ${leaf.id} is missing`);
+      }
+      return { script: output.script, amount: u64ToSats(output.amount, "coop exit connector") };
+    });
+    const indexByLeafId = new Map(leaves.map((leaf, i) => [leaf.id, i]));
 
-  // The leaves are committed under connector refunds now, so the old refund txs must not survive
-  // a failure on the completion call. The returned transfer — not the selected list — decides
-  // which leaves left the wallet: on a retry the SO may report the first-attempt leaves.
-  await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
+    const identityPublicKey = await signer.identityPublicKey();
+    const transferPackage = await prepareTransferPackage({
+      spark,
+      signer,
+      network,
+      operators: deps.operators,
+      threshold: deps.threshold,
+      transferId,
+      leaves: leaves.map((leaf) => ({
+        leaf,
+        receiverIdentityPublicKey: sspIdentityPublicKey,
+      })),
+      buildRefunds: (entry, sequence) => {
+        const index = indexByLeafId.get(entry.leaf.id);
+        const connectorPrevout = index === undefined ? undefined : connectorPrevouts[index];
+        if (index === undefined || connectorPrevout === undefined) {
+          throw new SparkError("coop exit: refund leaf is outside the connector mapping");
+        }
+        const txs = createConnectorRefundTxs({
+          nodeTx: entry.leaf.nodeTx,
+          directNodeTx: entry.leaf.directTx,
+          sequence,
+          receivingPublicKey: sspIdentityPublicKey,
+          network,
+          connectorInput: { txid: hexToBytes(connectorTxidDisplay), index },
+        });
+        const job = (
+          txBytes: Uint8Array,
+          firstPrevout: { readonly script: Uint8Array; readonly amount: number },
+        ) => ({
+          txBytes,
+          sighash: taprootKeySpendSighash({
+            transaction: txBytes,
+            inputIndex: 0,
+            prevouts: [firstPrevout, connectorPrevout],
+          }),
+        });
+        const nodePrevout = prevout0(entry.leaf.nodeTx, `leaf ${entry.leaf.id} node tx`);
+        const refunds: RefundTxTrio = {
+          cpfpRefund: job(txs.cpfpRefundTx, nodePrevout),
+          directFromCpfpRefund: job(txs.directFromCpfpRefundTx, nodePrevout),
+          directRefund:
+            txs.directRefundTx === undefined || entry.leaf.directTx === undefined
+              ? undefined
+              : job(
+                  txs.directRefundTx,
+                  prevout0(entry.leaf.directTx, `leaf ${entry.leaf.id} direct node tx`),
+                ),
+        };
+        return { refunds, extraPrevout: connectorPrevout };
+      },
+    });
 
-  const status = await completeWithRetries(deps, request.id, transfer.id);
+    const transferRequest = create(StartTransferRequestSchema, {
+      transferId,
+      ownerIdentityPublicKey: identityPublicKey,
+      receiverIdentityPublicKey: sspIdentityPublicKey,
+      transferPackage,
+      expiryTime: timestampFromDate(new Date(deps.now() + COOP_EXIT_TRANSFER_EXPIRY_MS[network])),
+    });
+
+    let transfer: SparkTransfer;
+    try {
+      const response = await spark.cooperative_exit_v2({
+        transfer: transferRequest,
+        exitId: uuidv7(deps.random, deps.now),
+        exitTxid: exitTxidInternal,
+        connectorTx: request.rawConnectorTransaction,
+      });
+      if (response.transfer === undefined) {
+        throw new SparkError("coop exit: cooperative_exit_v2 returned no transfer");
+      }
+      transfer = mapTransfer(response.transfer);
+    } catch (error) {
+      // The exit can commit server-side and still lose its response. The committed transfer is the
+      // only sound test — a retry must continue with it rather than fail or commit the leaves twice.
+      const recovered = await queryCommittedTransfer({
+        spark,
+        network,
+        transferId,
+        type: TransferType.COOPERATIVE_EXIT,
+        senderIdentityPublicKey: identityPublicKey,
+        receiverIdentityPublicKeys: [sspIdentityPublicKey],
+      });
+      if (recovered === undefined) {
+        throw error;
+      }
+      transfer = recovered;
+    }
+    assertCommittedTransfer(
+      transfer,
+      {
+        type: TransferType.COOPERATIVE_EXIT,
+        senderIdentityPublicKey: identityPublicKey,
+        receiverIdentityPublicKeys: [sspIdentityPublicKey],
+      },
+      "coop exit",
+    );
+
+    // The leaves are committed under connector refunds now, so the old refund txs must not survive
+    // a failure on the completion call. The returned transfer — not the selected list — decides
+    // which leaves left the wallet: on a retry the SO may report the first-attempt leaves.
+    await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
+
+    return { transfer, request, payoutSats, feeSats };
+  });
+
+  const status = await completeWithRetries(deps, completed.request.id, completed.transfer.id);
   return {
-    transferId: transfer.id,
-    requestId: request.id,
-    coopExitTxid: request.coopExitTxid,
-    payoutSats,
-    feeSats,
+    transferId: completed.transfer.id,
+    requestId: completed.request.id,
+    coopExitTxid: completed.request.coopExitTxid,
+    payoutSats: completed.payoutSats,
+    feeSats: completed.feeSats,
     status,
   };
 }

@@ -373,7 +373,9 @@ describe("client.tokens", () => {
 
   function clientWith(impl: {
     query?: (req: { tokenIdentifiers: Uint8Array[] }) => QueryTokenOutputsResponse;
-    broadcast?: (req: BroadcastTransactionRequest) => BroadcastTransactionResponse;
+    broadcast?: (
+      req: BroadcastTransactionRequest,
+    ) => BroadcastTransactionResponse | Promise<BroadcastTransactionResponse>;
   }) {
     return createSparkClientWith(
       {
@@ -414,7 +416,9 @@ describe("client.tokens", () => {
                     $typeName: "spark_token.QueryTokenOutputsResponse",
                     outputsWithPreviousTransactionData: [],
                   },
-                broadcast_transaction: (req) =>
+                broadcast_transaction: (
+                  req,
+                ): BroadcastTransactionResponse | Promise<BroadcastTransactionResponse> =>
                   impl.broadcast?.(req) ?? {
                     $typeName: "spark_token.BroadcastTransactionResponse",
                     commitStatus: CommitStatus.COMMIT_FINALIZED,
@@ -502,6 +506,58 @@ describe("client.tokens", () => {
       receiver: encodeSparkAddress({ network: "regtest", identityPublicKey: RECEIVER }),
     });
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    client.close();
+  });
+
+  test("two concurrent transfers never select the same output", async () => {
+    // Distinct prev-transaction vouts so each row is identifiable in broadcast inputs.
+    const rows = [0, 1, 2, 3].map((vout) => ({
+      ...tokenRow(`o${vout}`, 30n),
+      previousTransactionVout: vout,
+    }));
+    const spent = new Set<string>();
+    const broadcastInputs: string[][] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const client = clientWith({
+      query: () => ({
+        $typeName: "spark_token.QueryTokenOutputsResponse",
+        outputsWithPreviousTransactionData: rows.filter(
+          (row) => !spent.has(String(row.previousTransactionVout)),
+        ),
+      }),
+      broadcast: async (req) => {
+        const partial = req.partialTokenTransaction!;
+        const inputs = spentOutputs(partial).map((output) =>
+          String(output.prevTokenTransactionVout),
+        );
+        broadcastInputs.push(inputs);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 15);
+        });
+        inFlight -= 1;
+        for (const id of inputs) {
+          spent.add(id);
+        }
+        return {
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+          finalTokenTransaction: finalFor(partial),
+        };
+      },
+    });
+    const receiver = encodeSparkAddress({ network: "regtest", identityPublicKey: RECEIVER });
+    const hashes = await Promise.all([
+      client.tokens.transfer({ tokenIdentifier: identifier, amount: 40n, receiver }),
+      client.tokens.transfer({ tokenIdentifier: identifier, amount: 40n, receiver }),
+    ]);
+    expect(hashes.every((hash) => /^[0-9a-f]{64}$/.test(hash))).toBe(true);
+    // Serialized under the token lock: no overlapping broadcasts and disjoint inputs.
+    expect(maxInFlight).toBe(1);
+    expect(broadcastInputs).toHaveLength(2);
+    expect(new Set(broadcastInputs.flat()).size).toBe(4);
     client.close();
   });
 

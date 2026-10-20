@@ -670,26 +670,37 @@ async function sendDeps(overrides: {
   sendRequests: SspLightningSendRequest[];
   feeEstimates: Array<{ invoice: string; amountSats?: number }>;
   deleted: string[][];
+  /** The amount each `spendLeaves` call selected for (`amountSats + feeSats`). */
+  spendAmounts: number[];
+  /** Timeline of `use`-scope and post-commit events for ordering assertions. */
+  events: string[];
 }> {
   const signer = await testSigner();
   const identityPublicKey = await signer.identityPublicKey();
   const deleted = overrides.deleted ?? [];
+  const events: string[] = [];
   const { spark, calls } = fakeSpark({
-    initiate_preimage_swap_v3:
-      overrides.initiate ??
-      ((input) => {
-        const transferId = String(
-          (input["transferRequest"] as Record<string, unknown>)["transferId"],
-        );
-        return {
-          transfer: transferProto({
-            id: transferId,
-            sender: identityPublicKey,
-            receiver: SSP_IDENTITY,
-            leaves: overrides.transferLeaves ?? overrides.leaves,
-          }),
-        };
-      }),
+    initiate_preimage_swap_v3: (
+      input: Record<string, unknown>,
+    ): Promise<{ transfer?: Transfer }> | { transfer?: Transfer } => {
+      events.push("initiate");
+      const initiate =
+        overrides.initiate ??
+        (() => {
+          const transferId = String(
+            (input["transferRequest"] as Record<string, unknown>)["transferId"],
+          );
+          return {
+            transfer: transferProto({
+              id: transferId,
+              sender: identityPublicKey,
+              receiver: SSP_IDENTITY,
+              leaves: overrides.transferLeaves ?? overrides.leaves,
+            }),
+          };
+        });
+      return initiate(input);
+    },
     query_transfers_by_id: () => {
       const recovered =
         typeof overrides.recoveredTransfer === "function"
@@ -700,15 +711,28 @@ async function sendDeps(overrides: {
   });
   const { ssp, sendRequests, feeEstimates } = fakeSsp({
     lightningSendFeeEstimate: () => overrides.feeSats ?? 7,
-    requestLightningSend:
-      overrides.requestLightningSend ??
-      (() => ({ id: "send-req-1", status: "LIGHTNING_PAYMENT_INITIATED" })),
+    requestLightningSend: (req) => {
+      events.push("send");
+      const respond =
+        overrides.requestLightningSend ??
+        (() => ({ id: "send-req-1", status: "LIGHTNING_PAYMENT_INITIATED" }));
+      return respond(req);
+    },
   });
   const deps = await lightningDeps({ ssp, spark });
+  const spendAmounts: number[] = [];
   return {
     deps: {
       ...deps,
-      selectLeaves: async () => Promise.resolve(overrides.leaves),
+      spendLeaves: async <T>(
+        amountSats: number,
+        use: (leaves: ReadonlyArray<SparkLeaf>) => Promise<T>,
+      ): Promise<T> => {
+        spendAmounts.push(amountSats);
+        const result = await use(overrides.leaves);
+        events.push("use-resolved");
+        return result;
+      },
       deleteExitChains: async (leafIds) => {
         deleted.push([...leafIds]);
         return Promise.resolve();
@@ -718,6 +742,8 @@ async function sendDeps(overrides: {
     sendRequests,
     feeEstimates,
     deleted,
+    spendAmounts,
+    events,
   };
 }
 
@@ -731,7 +757,9 @@ describe("payLightningInvoice", () => {
       amountMsat: 1_000_000n,
       timestamp: Math.floor(NOW_MS / 1000) - 60,
     });
-    const { deps, calls, sendRequests, deleted } = await sendDeps({ leaves: [leaf] });
+    const { deps, calls, sendRequests, deleted, spendAmounts, events } = await sendDeps({
+      leaves: [leaf],
+    });
     const payment = await payLightningInvoice(deps, { invoice, maxFeeSats: 200 });
 
     const initiate = required(
@@ -788,6 +816,10 @@ describe("payLightningInvoice", () => {
     expect(sendRequest.userOutboundTransferExternalId).toBe(payment.transferId);
     expect(sendRequest).not.toHaveProperty("idempotencyKey");
     expect(deleted).toStrictEqual([["leaf-1"]]);
+    // The preimage swap committed inside `use` (under the client's lock); the SSP send request
+    // runs only after `use` resolved — and selection covered amount + fee.
+    expect(spendAmounts).toStrictEqual([1007]);
+    expect(events).toStrictEqual(["initiate", "use-resolved", "send"]);
     expect(payment.requestId).toBe("send-req-1");
     expect(payment.amountSats).toBe(1000);
     expect(payment.feeSats).toBe(7);

@@ -8,7 +8,10 @@ import {
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
 
-/** Select-owned-outputs → partial → broadcast path shared by `tokens.transfer` and `invoices.pay`. */
+/**
+ * Select-owned-outputs → partial → broadcast path shared by `tokens.transfer` and `invoices.pay`.
+ * The whole sequence runs under `tokenLock` so two transfers cannot select the same outputs.
+ */
 export async function sendTokens(
   context: ClientContext,
   options: {
@@ -18,35 +21,37 @@ export async function sendTokens(
     readonly invoiceAttachments?: ReadonlyArray<string>;
   },
 ): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
-  const { coordinatorConnection, signer, network, operators, config, now } = context;
-  const owned = await queryTokenOutputs({
-    token: coordinatorConnection.token,
-    ownerPublicKey: await signer.identityPublicKey(),
-    network,
-    tokenIdentifiers: [options.tokenIdentifier],
-  });
-  const selected = selectTokenOutputs(owned, options.amount);
-  const partial = buildTransferPartial({
-    selectedOutputs: selected,
-    receiverPublicKey: options.receiver,
-    tokenIdentifier: options.tokenIdentifier,
-    amount: options.amount,
-    senderPublicKey: await signer.identityPublicKey(),
-    network,
-    operators,
-    tokens: config.tokens,
-    now,
-    ...(options.invoiceAttachments === undefined
-      ? {}
-      : { invoiceAttachments: options.invoiceAttachments }),
-  });
-  return broadcastPartialTokenTransaction({
-    token: coordinatorConnection.token,
-    signer,
-    partial,
-    network,
-    operators,
-    tokens: config.tokens,
+  return context.tokenLock.run(async () => {
+    const { coordinatorConnection, signer, network, operators, config, now } = context;
+    const owned = await queryTokenOutputs({
+      token: coordinatorConnection.token,
+      ownerPublicKey: await signer.identityPublicKey(),
+      network,
+      tokenIdentifiers: [options.tokenIdentifier],
+    });
+    const selected = selectTokenOutputs(owned, options.amount);
+    const partial = buildTransferPartial({
+      selectedOutputs: selected,
+      receiverPublicKey: options.receiver,
+      tokenIdentifier: options.tokenIdentifier,
+      amount: options.amount,
+      senderPublicKey: await signer.identityPublicKey(),
+      network,
+      operators,
+      tokens: config.tokens,
+      now,
+      ...(options.invoiceAttachments === undefined
+        ? {}
+        : { invoiceAttachments: options.invoiceAttachments }),
+    });
+    return broadcastPartialTokenTransaction({
+      token: coordinatorConnection.token,
+      signer,
+      partial,
+      network,
+      operators,
+      tokens: config.tokens,
+    });
   });
 }
 

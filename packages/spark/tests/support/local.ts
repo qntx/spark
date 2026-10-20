@@ -186,6 +186,37 @@ export async function leavesUntil(
   return leavesUntil(client, deadline);
 }
 
+/**
+ * Polls `leaves` until at least `count` AVAILABLE leaves are spendable (bounded). A just-claimed
+ * leaf is spendable only once every operator reports it, so sends must wait for the full count.
+ */
+export async function leavesUntilCount(
+  client: ReturnType<typeof createSparkClient>,
+  count: number,
+  deadline: number,
+): Promise<ReadonlyArray<SparkLeaf>> {
+  const leaves = await client.leaves();
+  if (leaves.length >= count || Date.now() > deadline) {
+    return leaves;
+  }
+  await sleep(3000);
+  return leavesUntilCount(client, count, deadline);
+}
+
+/** Polls `transfers.pending` until at least `count` incoming transfers are visible (bounded). */
+export async function pendingUntilCount(
+  client: ReturnType<typeof createSparkClient>,
+  count: number,
+  deadline: number,
+): Promise<ReadonlyArray<SparkTransfer>> {
+  const pending = await client.transfers.pending();
+  if (pending.length >= count || Date.now() > deadline) {
+    return pending;
+  }
+  await sleep(3000);
+  return pendingUntilCount(client, count, deadline);
+}
+
 /** Polls `claim` until the SO accepts the deposit (bounded). */
 export async function claimUntilAccepted(
   client: ReturnType<typeof createSparkClient>,

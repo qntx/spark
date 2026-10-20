@@ -1,5 +1,7 @@
 import type { OperatorConnection } from "../connection/index.ts";
 import { decodeSparkAddress, verifySparkAddressSignature } from "../core/address.ts";
+import { createMutex } from "../core/mutex.ts";
+import type { Mutex } from "../core/mutex.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
 import { decodeTokenIdentifier } from "../core/token-identifier.ts";
 import type { DepositCoordinator } from "../deposit/index.ts";
@@ -31,7 +33,19 @@ export type ClientContext = {
   readonly transferCoordinator: TransferCoordinator;
   readonly depositCoordinator: DepositCoordinator;
   readonly sspClient: ReturnType<typeof createSspClient>;
+  /**
+   * Serializes every leaf-list mutation: selection through commit and exit-chain bookkeeping run
+   * under it so two spends cannot pick the same leaves. Helpers taking part in a spend document
+   * "caller holds leafLock" and never acquire it themselves.
+   */
+  readonly leafLock: Mutex;
+  /** Serializes token output selection against broadcast, the same way leafLock does for sats. */
+  readonly tokenLock: Mutex;
+  /** Refreshes and stores the exit chains of `leaves`. Caller holds `leafLock`. */
   readonly storeChainsFor: (leaves: ReadonlyArray<SparkLeaf>) => Promise<void>;
+  /** The unlocked leaf sync — caller holds `leafLock`. */
+  readonly syncLeaves: () => Promise<ReadonlyArray<SparkLeaf>>;
+  /** `syncLeaves` under `leafLock` — the public read path. */
   readonly leaves: () => Promise<ReadonlyArray<SparkLeaf>>;
   readonly receiverIdentityKey: (receiver: string | Uint8Array) => Uint8Array;
   readonly tokenIdentifierForNetwork: (text: string) => Uint8Array;
@@ -40,10 +54,18 @@ export type ClientContext = {
 export function createClientContext(
   parts: Omit<
     ClientContext,
-    "storeChainsFor" | "leaves" | "receiverIdentityKey" | "tokenIdentifierForNetwork"
+    | "leafLock"
+    | "tokenLock"
+    | "storeChainsFor"
+    | "syncLeaves"
+    | "leaves"
+    | "receiverIdentityKey"
+    | "tokenIdentifierForNetwork"
   >,
 ): ClientContext {
   const { coordinatorConnection, otherConnections, signer, network, store } = parts;
+  const leafLock = createMutex();
+  const tokenLock = createMutex();
 
   const storeChainsFor = async (forLeaves: ReadonlyArray<SparkLeaf>): Promise<void> =>
     store.putExitChains(
@@ -61,7 +83,7 @@ export function createClientContext(
   // identically by every operator — breez-spark-sdk refresh_leaves @956ff90. An owned leaf one
   // operator does not report is withheld from the result but keeps its stored chain, so a
   // lagging operator cannot make a just-claimed leaf look gone.
-  const leaves = async (): Promise<ReadonlyArray<SparkLeaf>> => {
+  const syncLeaves = async (): Promise<ReadonlyArray<SparkLeaf>> => {
     const ownerIdentityPublicKey = await signer.identityPublicKey();
     const [coordinatorLeaves, ...operatorLeafLists] = await Promise.all([
       queryLeaves({
@@ -177,8 +199,11 @@ export function createClientContext(
 
   return {
     ...parts,
+    leafLock,
+    tokenLock,
     storeChainsFor,
-    leaves,
+    syncLeaves,
+    leaves: async () => leafLock.run(syncLeaves),
     receiverIdentityKey,
     tokenIdentifierForNetwork,
   };

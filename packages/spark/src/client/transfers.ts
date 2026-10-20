@@ -75,7 +75,9 @@ export async function sendSats(
   const transferId = options.transferId ?? uuidv7(random, now);
 
   // Retry path: the id is already committed — resume on it. A present-but-mismatched transfer
-  // means the id was reused with different terms and must not ride along.
+  // means the id was reused with different terms and must not ride along. The probe stays outside
+  // the leaf lock: it only reads. The committed transfer's chain deletion needs no lock either —
+  // a leaves() sync only re-stores chains for leaves it just queried, and these are gone.
   if (options.transferId !== undefined) {
     const found = await queryTransferById({ spark, network, transferId });
     if (found !== undefined) {
@@ -85,49 +87,53 @@ export async function sendSats(
     }
   }
 
-  const groups = await selectSendLeaves(
-    context,
-    options.receivers.map((receiver) => receiver.amountSats),
-  );
-  const allocations = options.receivers.map((receiver, index) => {
-    const leaves = groups[index];
-    if (leaves === undefined) {
-      throw new SparkError("send: leaf selection returned fewer groups than requested");
-    }
-    return { receiverIdentityPublicKey: receiver.receiverIdentityPublicKey, leaves };
-  });
+  // Selection (including any swap or renewal) through the committed transfer's chain cleanup is
+  // one critical section: a concurrent spend sees the spent leaves gone from its own sync.
+  return context.leafLock.run(async () => {
+    const groups = await selectSendLeaves(
+      context,
+      options.receivers.map((receiver) => receiver.amountSats),
+    );
+    const allocations = options.receivers.map((receiver, index) => {
+      const leaves = groups[index];
+      if (leaves === undefined) {
+        throw new SparkError("send: leaf selection returned fewer groups than requested");
+      }
+      return { receiverIdentityPublicKey: receiver.receiverIdentityPublicKey, leaves };
+    });
 
-  let sent: SparkTransfer;
-  try {
-    sent = await sendTransfer({
-      ...context.transferCoordinator,
-      transferId,
-      allocations,
-      ...(options.sparkInvoice === undefined ? {} : { sparkInvoice: options.sparkInvoice }),
-    });
-  } catch (error) {
-    // The transfer can commit server-side and still lose its response — pick the committed one
-    // up instead of failing or double-paying.
-    const recovered = await queryCommittedTransfer({
-      spark,
-      network,
-      transferId,
-      ...expected,
-    });
-    if (recovered === undefined) {
-      throw error;
+    let sent: SparkTransfer;
+    try {
+      sent = await sendTransfer({
+        ...context.transferCoordinator,
+        transferId,
+        allocations,
+        ...(options.sparkInvoice === undefined ? {} : { sparkInvoice: options.sparkInvoice }),
+      });
+    } catch (error) {
+      // The transfer can commit server-side and still lose its response — pick the committed one
+      // up instead of failing or double-paying.
+      const recovered = await queryCommittedTransfer({
+        spark,
+        network,
+        transferId,
+        ...expected,
+      });
+      if (recovered === undefined) {
+        throw error;
+      }
+      sent = recovered;
     }
-    sent = recovered;
-  }
-  // The returned transfer — not the locally selected list — decides which leaves left the wallet:
-  // on a retry the SO may report the first-attempt leaves. Responses echoing no leaves fall back
-  // to the selection (the send path always commits the leaves it built the package over).
-  const spentLeafIds =
-    sent.leaves.length > 0
-      ? sent.leaves.map((transferLeaf) => transferLeaf.leaf.id)
-      : allocations.flatMap((allocation) => allocation.leaves.map((leaf) => leaf.id));
-  await store.deleteExitChains(spentLeafIds);
-  return sent;
+    // The returned transfer — not the locally selected list — decides which leaves left the wallet:
+    // on a retry the SO may report the first-attempt leaves. Responses echoing no leaves fall back
+    // to the selection (the send path always commits the leaves it built the package over).
+    const spentLeafIds =
+      sent.leaves.length > 0
+        ? sent.leaves.map((transferLeaf) => transferLeaf.leaf.id)
+        : allocations.flatMap((allocation) => allocation.leaves.map((leaf) => leaf.id));
+    await store.deleteExitChains(spentLeafIds);
+    return sent;
+  });
 }
 
 export function createTransfers(context: ClientContext): SparkClient["transfers"] {
@@ -166,11 +172,12 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
         })),
         ...(sendOptions.transferId === undefined ? {} : { transferId: sendOptions.transferId }),
       }),
-    claim: async (transfer) => {
-      const claimed = await claimTransfer({ ...context.transferCoordinator, transfer });
-      await context.storeChainsFor(claimed);
-      return claimed;
-    },
+    claim: async (transfer) =>
+      context.leafLock.run(async () => {
+        const claimed = await claimTransfer({ ...context.transferCoordinator, transfer });
+        await context.storeChainsFor(claimed);
+        return claimed;
+      }),
     claimPending: async () => {
       const pending = await queryPendingTransfers({
         spark,
@@ -182,11 +189,14 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
         if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
           continue;
         }
+        // Each claim plus its chain store is one critical section, so a concurrent leaves() sync
+        // cannot observe and delete a half-stored claim.
         // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order; each consumes signer nonces
-        const leaves = await claimTransfer({ ...context.transferCoordinator, transfer });
-        // Persist each claim's chains before the next, so a later failure loses nothing.
-        // oxlint-disable-next-line no-await-in-loop
-        await context.storeChainsFor(leaves);
+        const leaves = await context.leafLock.run(async () => {
+          const claimedLeaves = await claimTransfer({ ...context.transferCoordinator, transfer });
+          await context.storeChainsFor(claimedLeaves);
+          return claimedLeaves;
+        });
         claimed.push(...leaves);
       }
       return claimed;

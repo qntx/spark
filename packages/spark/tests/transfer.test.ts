@@ -1208,6 +1208,107 @@ describe("transfers.claim", () => {
     ]);
     receiver.dispose();
   });
+
+  /**
+   * Fakes for the leaves()/claim race: `node1` is always reported, the claimed leaf appears in
+   * query_nodes only once its claim committed (as the real coordinator would report it), and the
+   * store's stale-check read waits a bounded window for a concurrently committing claim to store
+   * its fresh chains first — under the leaf lock the window never matters either way.
+   */
+  async function claimRaceSetup(receiver: SparkSigner, receivedSecret: Uint8Array) {
+    const pending = await pendingTransfer({ receiverSigner: receiver, receivedSecret });
+    const { node: node1 } = await fabricatedNode(receiver, MULTI_LEAF_A, 100_000n);
+    const claimed = await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]);
+    const claimedNode = required(claimed[0]?.leaf, "claimed leaf node");
+    let claimCommitted = false;
+
+    const inner = createMemorySparkStore();
+    let releaseChainWait: () => void = () => undefined;
+    const chainStored = new Promise<void>((resolve) => {
+      releaseChainWait = resolve;
+    });
+    const store: SparkStore = {
+      exitChains: async () => {
+        await Promise.race([
+          chainStored,
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, 150);
+          }),
+        ]);
+        return inner.exitChains();
+      },
+      putExitChains: async (chains) => {
+        await inner.putExitChains(chains);
+        if (chains.some((chain) => chain.leafId === claimedNode.id)) {
+          releaseChainWait();
+        }
+      },
+      deleteExitChains: async (leafIds) => inner.deleteExitChains(leafIds),
+    };
+
+    const impl: SparkImpl = {
+      query_nodes: (req) => {
+        const request = req as QueryNodesRequest;
+        if (request.source.case === "nodeIds") {
+          const nodes: Record<string, typeof node1> = {};
+          for (const id of request.source.value.nodeIds) {
+            if (id === node1.id) {
+              nodes[id] = node1;
+            }
+            if (id === claimedNode.id) {
+              nodes[id] = claimedNode;
+            }
+          }
+          return create(QueryNodesResponseSchema, { nodes, offset: 0n });
+        }
+        const nodes: Record<string, typeof node1> = { [node1.id]: node1 };
+        if (claimCommitted) {
+          nodes[claimedNode.id] = claimedNode;
+        }
+        return create(QueryNodesResponseSchema, { nodes, offset: 0n });
+      },
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * Math.max(req.nodeIds.length, req.nodeIdCount)),
+        }),
+      claim_transfer: (req) => {
+        claimCommitted = true;
+        return create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves: claimed,
+          }),
+        });
+      },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema),
+    };
+    return { pending, node1, inner, store, impl };
+  }
+
+  test("a leaves() sync racing a claim keeps the claimed leaf's fresh exit chain", async () => {
+    const receiver = await testSigner();
+    const { pending, node1, inner, store, impl } = await claimRaceSetup(
+      receiver,
+      new Uint8Array(32).fill(88),
+    );
+    const client = makeClient(receiver, impl, store);
+
+    const [leavesResult, claimedResult] = await Promise.all([
+      client.leaves(),
+      client.transfers.claim(mapTransfer(pending)),
+    ]);
+    expect(claimedResult.map((leaf) => leaf.id)).toContain(LEAF_ID);
+    // Whichever ran first, the claimed leaf's chain must still be there: a sync that queried
+    // before the commit must not delete chains stored after its query.
+    const stored = await inner.exitChains();
+    const storedIds = stored.map((chain) => chain.leafId);
+    expect(storedIds.toSorted()).toStrictEqual([LEAF_ID, node1.id].toSorted());
+    expect(leavesResult.length).toBeGreaterThan(0);
+    receiver.dispose();
+  });
 });
 
 function storedChain(leafId: string): SparkExitChain {
@@ -2425,6 +2526,116 @@ describe("send idempotent retries", () => {
       transferId: TRANSFER_ID,
     });
     expect(sent.id).toBe(TRANSFER_ID);
+    signer.dispose();
+  });
+});
+
+describe("concurrent sends", () => {
+  /**
+   * Fakes for the concurrent-send race: the coordinator stops reporting a leaf once its transfer
+   * committed, `start_transfer_v2` sleeps mid-commit so a lock-free second send would overlap it,
+   * and the leaf ids each call carried are recorded.
+   */
+  function concurrentSendImpl(
+    first: Awaited<ReturnType<typeof fabricatedNode>>,
+    second: Awaited<ReturnType<typeof fabricatedNode>>,
+    sentLeafIds: Set<string>,
+    started: string[][],
+    track: { inFlight: number; maxInFlight: number },
+  ): SparkImpl {
+    const byId = new Map([
+      [first.leaf.id, first.node],
+      [second.leaf.id, second.node],
+    ]);
+    return {
+      query_nodes: (req) => {
+        const request = req as QueryNodesRequest;
+        const nodes: Record<string, typeof first.node> = {};
+        if (request.source.case === "nodeIds") {
+          for (const id of request.source.value.nodeIds) {
+            const node = byId.get(id);
+            if (node !== undefined) {
+              nodes[id] = node;
+            }
+          }
+        } else {
+          for (const [id, node] of byId) {
+            if (!sentLeafIds.has(id)) {
+              nodes[id] = node;
+            }
+          }
+        }
+        return create(QueryNodesResponseSchema, { nodes, offset: 0n });
+      },
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * Math.max(req.nodeIds.length, req.nodeIdCount)),
+        }),
+      start_transfer_v2: async (req) => {
+        const ids = (req.transferPackage?.leavesToSend ?? []).map((job) => job.leafId);
+        started.push(ids);
+        track.inFlight += 1;
+        track.maxInFlight = Math.max(track.maxInFlight, track.inFlight);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 15);
+        });
+        track.inFlight -= 1;
+        for (const id of ids) {
+          sentLeafIds.add(id);
+        }
+        return create(StartTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            senderIdentityPublicKey: req.ownerIdentityPublicKey,
+            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+            status: TransferStatus.SENDER_INITIATED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            totalValue: 100_000n,
+            leaves: ids.map((id) =>
+              create(TransferLeafSchema, {
+                leaf: byId.get(id),
+                transferReceiverId: "r-1",
+              }),
+            ),
+            receivers: [
+              create(TransferReceiverSchema, {
+                id: "r-1",
+                identityPublicKey: req.receiverIdentityPublicKey,
+                amountSats: 100_000n,
+                status: TransferReceiverStatus.KEY_TWEAKED,
+              }),
+            ],
+          }),
+        });
+      },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema),
+    };
+  }
+
+  test("two sends under one client never start a transfer over the same leaf", async () => {
+    const signer = await testSigner();
+    const first = await fabricatedNode(signer, MULTI_LEAF_A, 100_000n);
+    const second = await fabricatedNode(signer, MULTI_LEAF_B, 100_000n);
+    const receiver = secp256k1.getPublicKey(RECEIVER_SECRET, true);
+    const sentLeafIds = new Set<string>();
+    const started: string[][] = [];
+    const track = { inFlight: 0, maxInFlight: 0 };
+    const client = makeClient(
+      signer,
+      concurrentSendImpl(first, second, sentLeafIds, started, track),
+    );
+
+    const [sendA, sendB] = await Promise.all([
+      client.transfers.send({ receiver, amountSats: 100_000 }),
+      client.transfers.send({ receiver, amountSats: 100_000 }),
+    ]);
+    expect(sendA.status).toBe("SENDER_INITIATED");
+    expect(sendB.status).toBe("SENDER_INITIATED");
+    // Serialized under the leaf lock: no overlapping commits and disjoint inputs.
+    expect(track.maxInFlight).toBe(1);
+    expect(started).toHaveLength(2);
+    expect(new Set(started.flat()).size).toBe(2);
     signer.dispose();
   });
 });

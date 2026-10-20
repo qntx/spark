@@ -16,10 +16,10 @@ import { renewStaleLeaves, selectSendLeaves } from "./leaves.ts";
 export function createWithdrawals(context: ClientContext): SparkClient["withdrawals"] {
   const { coordinatorConnection, signer, network, config, store } = context;
   // All spendable leaves withdraw everything; an amount selects exactly (swapping if needed).
-  // Either way every leaf is renewed before it leaves the wallet.
+  // Either way every leaf is renewed before it leaves the wallet. Caller holds `leafLock`.
   const selectExitLeaves = async (amountSats?: number) => {
     if (amountSats === undefined) {
-      return renewStaleLeaves(context, await context.leaves());
+      return renewStaleLeaves(context, await context.syncLeaves());
     }
     const [group] = await selectSendLeaves(context, [amountSats]);
     if (group === undefined) {
@@ -30,7 +30,12 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
   return {
     quoteCooperativeExit: async (options) =>
       quoteCooperativeExit(
-        { ssp: context.sspClient, network, selectLeaves: selectExitLeaves },
+        {
+          ssp: context.sspClient,
+          network,
+          selectLeaves: async (amountSats) =>
+            context.leafLock.run(async () => selectExitLeaves(amountSats)),
+        },
         options,
       ),
     cooperativeExit: async (options) =>
@@ -45,7 +50,8 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
           threshold: config.threshold,
           random: context.random,
           now: context.now,
-          selectLeaves: selectExitLeaves,
+          spendLeaves: async (amountSats, use) =>
+            context.leafLock.run(async () => use(await selectExitLeaves(amountSats))),
           deleteExitChains: async (leafIds) => store.deleteExitChains(leafIds),
           ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
         },
@@ -53,15 +59,16 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
       ),
     cooperativeExitStatus: async (requestId) =>
       cooperativeExitStatus({ ssp: context.sspClient }, requestId),
-    unilateralExit: async (leafIds) => {
-      const { transactions, chains } = await unilateralExitTransactions({
-        spark: coordinatorConnection.spark,
-        network,
-        leafIds,
-      });
-      await store.putExitChains(chains);
-      return transactions;
-    },
+    unilateralExit: async (leafIds) =>
+      context.leafLock.run(async () => {
+        const { transactions, chains } = await unilateralExitTransactions({
+          spark: coordinatorConnection.spark,
+          network,
+          leafIds,
+        });
+        await store.putExitChains(chains);
+        return transactions;
+      }),
     sweepRefund: async ({ leafId, refundTx, destinationScript, feeRateSatPerVbyte }) => {
       const key = { type: "leaf" as const, leafId };
       const [publicKey] = await signer.publicKeys([key]);

@@ -83,11 +83,13 @@ async function claimInboundTransfer(
     }
 
     if (transfer !== undefined) {
-      // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order
-      const leaves = await claimTransfer({ ...context.transferCoordinator, transfer });
-      // oxlint-disable-next-line no-await-in-loop -- persist before returning
-      await context.storeChainsFor(leaves);
-      return leaves;
+      // Claim plus chain store under the leaf lock — a concurrent leaves() sync must not observe
+      // and delete a half-stored claim. Polling and sleeps stay outside the lock.
+      return context.leafLock.run(async () => {
+        const leaves = await claimTransfer({ ...context.transferCoordinator, transfer });
+        await context.storeChainsFor(leaves);
+        return leaves;
+      });
     }
     if (attempt >= CLAIM_TRANSFER_POLLS) {
       return [];
@@ -106,15 +108,16 @@ export function createDeposits(context: ClientContext): SparkClient["deposits"] 
         leafId: uuidv7(random, now),
       }),
     unused: async () => queryUnusedDepositAddresses(context.depositCoordinator),
-    claim: async (claimOptions) => {
-      const leaf = await claimDeposit({
-        ...context.depositCoordinator,
-        transaction: claimOptions.transaction,
-        ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
-      });
-      await context.storeChainsFor([leaf]);
-      return leaf;
-    },
+    claim: async (claimOptions) =>
+      context.leafLock.run(async () => {
+        const leaf = await claimDeposit({
+          ...context.depositCoordinator,
+          transaction: claimOptions.transaction,
+          ...(claimOptions.vout === undefined ? {} : { vout: claimOptions.vout }),
+        });
+        await context.storeChainsFor([leaf]);
+        return leaf;
+      }),
     staticAddress: async () => generateStaticDepositAddress(context.depositCoordinator),
     staticUtxos: async () => queryStaticDepositUtxos(context.depositCoordinator),
     claimStatic: async (claimOptions) => {
