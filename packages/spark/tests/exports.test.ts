@@ -3,6 +3,7 @@ import { expect, test } from "vite-plus/test";
 import * as crypto from "../src/crypto/index.ts";
 import * as root from "../src/index.ts";
 import * as lnurl from "../src/lnurl/index.ts";
+import * as server from "../src/server/index.ts";
 import * as signer from "../src/signer/index.ts";
 
 // Type-only exports cannot be enumerated at runtime; re-exporting each expected
@@ -28,6 +29,10 @@ export type {
   LnurlResolved,
   LnurlSuccessAction,
   LnurlWithdrawRequest,
+  LightningAddressRegistration,
+  LightningAddressSigning,
+  RegisterLightningAddressBody,
+  UnregisterLightningAddressBody,
 } from "../src/lnurl/index.ts";
 export type {
   FrostAggregateJob,
@@ -49,6 +54,15 @@ export type {
   SparkSigner,
   StaticDepositClaimRequest,
 } from "../src/signer/index.ts";
+export type {
+  LightningAddressInvoice,
+  LightningAddressResult,
+  LightningAddressServer,
+  LightningAddressServerClient,
+  LightningAddressStore,
+  LightningAddressUser,
+  LightningAddressZapConfig,
+} from "../src/server/index.ts";
 export type {
   CooperativeExitQuote,
   CooperativeExitResult,
@@ -121,16 +135,28 @@ test("lnurl runtime exports are exactly the LNURL protocol surface", () => {
     "decodeLnurl",
     "decryptSuccessAction",
     "encodeLnurl",
+    "lightningAddressRegisterBody",
+    "lightningAddressUnregisterBody",
     "lightningAddressUrl",
     "lnurlGetJson",
+    "lnurlSendJson",
     "parseLnurlAuth",
     "parseLnurlPayRequest",
     "parseLnurlWithdrawRequest",
     "parseSuccessAction",
+    "registerLightningAddress",
     "requestInvoice",
     "resolveLnurl",
     "submitLnurlAuth",
     "submitWithdraw",
+    "unregisterLightningAddress",
+  ]);
+});
+
+test("server runtime exports are exactly the lightning address server surface", () => {
+  expect(names(server)).toStrictEqual([
+    "createLightningAddressServer",
+    "createMemoryLightningAddressStore",
   ]);
 });
 
