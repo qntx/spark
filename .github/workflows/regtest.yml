@@ -129,16 +129,16 @@ jobs:
         env:
           SPARK_E2E_LOCAL: "1"
         run: bunx vp test --no-file-parallelism tests/e2e-local-exit.test.ts tests/e2e-local-invoices.test.ts tests/e2e-local-renew.test.ts tests/e2e-local-store.test.ts tests/e2e-local-tokens.test.ts tests/e2e-local-transfer.test.ts tests/e2e-local-watchtower-refund.test.ts tests/e2e-local-watchtower.test.ts
-      - name: Stop the local stack
-        if: always()
-        env:
-          SPARK_REF: ${{ github.workspace }}/spark-ref
-        run: bun scripts/spark-local.ts down
       - name: Collect compose logs
         if: failure()
         env:
           SPARK_REF: ${{ github.workspace }}/spark-ref
         run: docker compose -f "$SPARK_REF/docker-compose.yml" -f scripts/spark-local.override.yml -p spark-local logs --no-color > spark-local-logs.txt || true
+      - name: Stop the local stack
+        if: always()
+        env:
+          SPARK_REF: ${{ github.workspace }}/spark-ref
+        run: bun scripts/spark-local.ts down
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
