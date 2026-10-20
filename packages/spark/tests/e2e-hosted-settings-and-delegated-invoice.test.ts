@@ -156,15 +156,17 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       expect(claimed2.length).toBeGreaterThan(0);
       await expect(clientB.balance()).resolves.toBe(balanceB0 + 1000);
 
-      // B returns what it received to C; C then returns its whole balance to A — the wallet
-      // ends out only the two lightning fees.
+      // B returns what it received to C; C then returns its net gain to A — the wallets
+      // end out only the two lightning fees. The send stays bounded: a whole-balance send
+      // selects every leaf, and a long-lived account accumulates more leaves than one
+      // signing round allows.
       const returned = await clientB.transfers.send({ receiver: identityC, amountSats: 1000 });
       console.log("B returned:", returned.id, returned.status);
       await claimPendingUntil(clientC, Date.now() + CLAIM_DEADLINE_MS);
       const balanceCBeforeReturn = await clientC.balance();
       const returnedToA = await clientC.transfers.send({
         receiver: await clientA.identityPublicKey(),
-        amountSats: balanceCBeforeReturn,
+        amountSats: balanceCBeforeReturn - balanceC0,
       });
       console.log("C returned:", returnedToA.id, returnedToA.status);
       await claimPendingUntil(clientA, Date.now() + CLAIM_DEADLINE_MS);
