@@ -18,6 +18,7 @@ import { mapTransfer } from "../transfer/model.ts";
 import type { SparkTransfer } from "../transfer/model.ts";
 import {
   assertCommittedTransfer,
+  assertLiveTransfer,
   queryCommittedTransfer,
   queryTransferById,
 } from "../transfer/query.ts";
@@ -127,6 +128,9 @@ export async function payLightningInvoice(
   let transfer: SparkTransfer | undefined;
   if (options.transferId !== undefined) {
     transfer = await queryTransferById({ spark, network, transferId });
+    if (transfer !== undefined) {
+      assertLiveTransfer(transfer);
+    }
   }
 
   let feeSats: number;

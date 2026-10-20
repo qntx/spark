@@ -29,6 +29,12 @@ import { refundJobGroups } from "./refunds.ts";
  * primary transfer without `expiryTime` — for a v3 primary swap the SO assigns the expiry itself
  * and holds the key tweaks until the counter transfer. The adaptor-added signatures go to the SSP
  * in `request_swap`; the SSP then starts the counter transfer this function claims.
+ *
+ * Fee note: `request_swap` reports no fee before the counter transfer is claimed, and the primary
+ * transfer is committed by then — refusing to claim would strand the funds with the SSP, so the
+ * claim always runs. A non-zero `swapResult.feeSats` is therefore detected only after the claim;
+ * the thrown error states the swap leaves are already ours (the fee was deducted from the claimed
+ * total, not lost).
  */
 export async function swapLeaves(
   options: TransferCoordinator & {

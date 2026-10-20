@@ -103,7 +103,7 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
         // Smallest-first, capped like upstream optimizeTokenOutputs: one transaction merges at
         // most MAX_TOKEN_OUTPUTS_TX inputs, so dust consolidates first.
         const available = owned
-          .filter((output) => output.status !== "pending-outbound")
+          .filter((output) => output.status === "available")
           .sort((a, b) => (a.amount < b.amount ? -1 : a.amount > b.amount ? 1 : 0))
           .slice(0, MAX_TOKEN_OUTPUTS_TX);
         if (available.length <= 1) {

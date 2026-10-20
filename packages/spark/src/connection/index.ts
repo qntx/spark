@@ -80,6 +80,18 @@ const RETRY_MAX_MS = 10_000;
 const EVENT_RECONNECT_BASE_MS = 1000;
 const EVENT_RECONNECT_MAX_MS = 60_000;
 
+/** Overall deadline applied to every unary call without an explicit `timeoutMs`. */
+const DEFAULT_RPC_TIMEOUT_MS = 60_000;
+
+/**
+ * The SO emits a heartbeat event every 5s while a `subscribe_to_events` stream is live (upstream
+ * `streamHeartbeatInterval`); three intervals of silence mean the stream died without closing — the
+ * attempt aborts and the reconnect loop resubscribes. Upstream applies the same 15s bound
+ * unconditionally: even where the heartbeat knob is off, a resubscribe is the cheapest way to
+ * notice a dead connection.
+ */
+const EVENT_IDLE_TIMEOUT_MS = 15_000;
+
 /** Read-only RPCs; only these are eligible for the backoff-retry policy. */
 const IDEMPOTENT_METHODS = new Set([
   "query_nodes",
@@ -310,6 +322,7 @@ export function connectOperator(
         baseUrl: operator.address,
         fetch: deps.fetch,
         useBinaryFormat: true,
+        defaultTimeoutMs: DEFAULT_RPC_TIMEOUT_MS,
         interceptors,
       }));
   const transport = transportFactory([interceptor], operator);
@@ -399,24 +412,61 @@ export function connectOperator(
 /**
  * The coordinator's `subscribe_to_events` stream as an `AsyncIterable` of `SparkEvent`s. On stream
  * failure (or a clean close) it re-authenticates when needed and resubscribes with exponential
- * backoff (1s → 60s, jittered) until `signal` aborts. Implemented as a manual async iterator: every
+ * backoff (1s → 60s, jittered) until `signal` aborts. Each attempt carries no overall deadline —
+ * `timeoutMs: 0` overrides the transport default — but dies on its own when no message (including
+ * the SO's 5s heartbeats) arrives within {@link EVENT_IDLE_TIMEOUT_MS}: the attempt's abort signal
+ * ends `next()` and the reconnect loop resubscribes. Implemented as a manual async iterator: every
  * `next()` pulls once, and reconnect/skip paths recurse so no `await` sits in a loop.
  */
 export function sparkEvents(
   connection: OperatorConnection,
   identityPublicKey: Uint8Array,
   signal?: AbortSignal,
-  deps?: Pick<ConnectionDeps, "sleep" | "random">,
+  deps?: Pick<ConnectionDeps, "sleep" | "random"> & { readonly idleTimeoutMs?: number },
 ): AsyncIterable<SparkEvent> {
   const sleep = deps?.sleep ?? defaultSleep;
+  const idleTimeoutMs = deps?.idleTimeoutMs ?? EVENT_IDLE_TIMEOUT_MS;
   const aborted = () => signal !== undefined && signal.aborted;
 
   let current: AsyncIterator<SubscribeToEventsResponse> | undefined;
   let failures = 0;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let attemptAbort: AbortController | undefined;
+  let onCallerAbort: (() => void) | undefined;
+
+  const clearAttempt = (): void => {
+    current = undefined;
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+    if (onCallerAbort !== undefined) {
+      signal?.removeEventListener("abort", onCallerAbort);
+      onCallerAbort = undefined;
+    }
+    attemptAbort = undefined;
+  };
+
+  /** (Re)arms the idle bound; a fired timer aborts only this attempt's stream. */
+  const armIdle = (): void => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+    }
+    const timer = setTimeout(() => attemptAbort?.abort(), idleTimeoutMs);
+    // Node's Timeout keeps a process alive; a background event stream must not.
+    const rawTimer: unknown = timer;
+    if (typeof rawTimer === "object" && rawTimer !== null && "unref" in rawTimer) {
+      const unref: unknown = rawTimer.unref;
+      if (typeof unref === "function") {
+        Reflect.apply(unref, rawTimer, []);
+      }
+    }
+    idleTimer = timer;
+  };
 
   /** Backoff-then-resubscribe shared by stream errors and clean closes. */
   const resubscribe = async (): Promise<IteratorResult<SparkEvent>> => {
-    current = undefined;
+    clearAttempt();
     const cap = Math.min(EVENT_RECONNECT_BASE_MS * 2 ** failures, EVENT_RECONNECT_MAX_MS);
     failures++;
     const jitter = deps?.random === undefined ? cap / 2 : (cap * (deps.random(1)[0] ?? 0)) / 512;
@@ -426,18 +476,29 @@ export function sparkEvents(
 
   const pull = async (): Promise<IteratorResult<SparkEvent>> => {
     if (aborted()) {
+      clearAttempt();
       return { done: true, value: undefined };
     }
     try {
-      current ??= connection.spark
-        .subscribe_to_events({ identityPublicKey }, signal === undefined ? {} : { signal })
-        [Symbol.asyncIterator]();
+      if (current === undefined) {
+        attemptAbort = new AbortController();
+        onCallerAbort = () => attemptAbort?.abort();
+        signal?.addEventListener("abort", onCallerAbort);
+        if (signal?.aborted === true) {
+          attemptAbort.abort();
+        }
+        current = connection.spark
+          .subscribe_to_events({ identityPublicKey }, { signal: attemptAbort.signal, timeoutMs: 0 })
+          [Symbol.asyncIterator]();
+        armIdle();
+      }
       const item = await current.next();
       // A clean close resubscribes through the same backoff path as a failure: a server that ends
       // streams immediately would otherwise spin the reconnect loop.
       if (item.done === true) {
         return await resubscribe();
       }
+      armIdle();
       const event = mapResponse(item.value.event);
       if (event === undefined) {
         return await pull();
@@ -446,6 +507,7 @@ export function sparkEvents(
       return { done: false, value: event };
     } catch (error) {
       if (aborted()) {
+        clearAttempt();
         return { done: true, value: undefined };
       }
       // Stream iterations arrive already mapped by mapStreamErrors, so the auth check is on

@@ -381,9 +381,12 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO concurrent sen
     const pending = await pendingUntilCount(clientB, 2, Date.now() + CLAIM_DEADLINE_MS);
     expect(pending).toHaveLength(2);
     const claimed = await clientB.transfers.claimPending();
-    expect(claimed.reduce((sum, leaf) => sum + leaf.valueSats, 0)).toBe(100_000);
+    expect(claimed.leaves.reduce((sum, leaf) => sum + leaf.valueSats, 0)).toBe(100_000);
     await expect(clientB.balance()).resolves.toBe(100_000);
-    console.log("B claimed:", claimed.map((leaf) => `${leaf.id}=${leaf.valueSats}`).join(", "));
+    console.log(
+      "B claimed:",
+      claimed.leaves.map((leaf) => `${leaf.id}=${leaf.valueSats}`).join(", "),
+    );
 
     clientA.close();
     clientB.close();

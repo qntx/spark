@@ -224,6 +224,13 @@ test("operatorsDisagree compares the fields a spend commits to", () => {
   expect(operatorsDisagree(leaf, verifyLeaf())).toBe(false);
   expect(operatorsDisagree(leaf, verifyLeaf({ valueSats: 999 }))).toBe(true);
   expect(operatorsDisagree(leaf, verifyLeaf({ status: "CREATING" }))).toBe(true);
+  expect(operatorsDisagree(leaf, verifyLeaf({ vout: 2 }))).toBe(true);
+  expect(
+    operatorsDisagree(
+      leaf,
+      verifyLeaf({ verifyingPublicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(10), true) }),
+    ),
+  ).toBe(true);
   expect(
     operatorsDisagree(leaf, verifyLeaf({ nodeTx: txSpending(new Uint8Array(32).fill(9)) })),
   ).toBe(true);

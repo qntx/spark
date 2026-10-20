@@ -206,6 +206,28 @@ function closingThenLiveEvents(counter: { calls: number }) {
   };
 }
 
+/** First subscription yields one event then goes silent; later ones yield a heartbeat. */
+function silentThenLiveEvents(counter: { calls: number }) {
+  return async function* (_req: unknown, context: HandlerContext) {
+    counter.calls++;
+    if (counter.calls === 1) {
+      yield create(SubscribeToEventsResponseSchema, {
+        event: { case: "connected", value: {} },
+      });
+    }
+    if (counter.calls > 1) {
+      yield create(SubscribeToEventsResponseSchema, {
+        event: { case: "heartbeat", value: {} },
+      });
+    }
+    await new Promise<void>((resolve) => {
+      context.signal.addEventListener("abort", () => {
+        resolve();
+      });
+    });
+  };
+}
+
 function connectTest(
   signer: ReturnType<typeof createTestSigner>,
   routes: Parameters<typeof createRouterTransport>[0],
@@ -461,6 +483,46 @@ test("event stream maps events, reconnects after failure, and stops on abort", a
   abort.abort();
   seen.push(await pull());
   expect(seen).toStrictEqual(["connected", "transfer", "heartbeat", "done"]);
+  expect(streamCalls.calls).toBe(2);
+  expect(sleeps).toHaveLength(1);
+});
+
+test("a silent stream is abandoned at the idle bound and resubscribed", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const calls: AuthCalls = { get_challenge: 0, verify_challenge: 0, signaturesVerified: 0 };
+  const sleeps: number[] = [];
+  const streamCalls = { calls: 0 };
+  const conn = connectTest(
+    signer,
+    (router) => {
+      router.service(SparkAuthnService, authnImpl(calls));
+      router.service(SparkService, {
+        subscribe_to_events: silentThenLiveEvents(streamCalls),
+      });
+    },
+    {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        return Promise.resolve();
+      },
+    },
+  );
+  const abort = new AbortController();
+  const iterator = sparkEvents(conn, await signer.identityPublicKey(), abort.signal, {
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      return Promise.resolve();
+    },
+    random: fixedRandom,
+    idleTimeoutMs: 20,
+  })[Symbol.asyncIterator]();
+  const pull = async () => eventType(await iterator.next());
+  // After "connected" the stream goes silent; ~20ms later the attempt aborts and the reconnect
+  // loop resubscribes — the second subscription's heartbeat is the next event.
+  const seen = [await pull(), await pull()];
+  abort.abort();
+  seen.push(await pull());
+  expect(seen).toStrictEqual(["connected", "heartbeat", "done"]);
   expect(streamCalls.calls).toBe(2);
   expect(sleeps).toHaveLength(1);
 });

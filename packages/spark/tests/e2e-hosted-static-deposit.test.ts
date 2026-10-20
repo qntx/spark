@@ -122,7 +122,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest static 
 
     // If the inbound transfer was not claimable inside claimStatic, this finishes it.
     const pending = await clientA.transfers.claimPending();
-    console.log("claimPending recovered:", pending.length);
+    console.log("claimPending recovered:", pending.leaves.length);
     const balanceA1 = await clientA.balance();
     console.log("A balance after claim:", balanceA1);
     expect(balanceA1).toBeGreaterThan(balanceA0 - EXIT_AMOUNT_SATS);

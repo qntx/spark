@@ -9,7 +9,11 @@ import {
 } from "../src/core/lightning-address.ts";
 import type { LightningAddressStatement } from "../src/core/lightning-address.ts";
 import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
-import { registerLightningAddress, unregisterLightningAddress } from "../src/lnurl/index.ts";
+import {
+  encodeLnurl,
+  registerLightningAddress,
+  unregisterLightningAddress,
+} from "../src/lnurl/index.ts";
 import type { LightningAddressSigning } from "../src/lnurl/index.ts";
 
 const SECRET = hexToBytes(`${"0".repeat(62)}03`);
@@ -62,9 +66,10 @@ function fakeFetch(response: { status: number; body?: string }): {
 describe("registerLightningAddress", () => {
   test("signs the v2 statement and POSTs it to /lnurlpay/{pubkey}", async () => {
     const { signer, statements } = signingStub();
+    const lnurl = encodeLnurl("https://example.com/lnurlp/alice");
     const { fetch, requests } = fakeFetch({
       status: 200,
-      body: JSON.stringify({ lnurl: "lnurl1xxx", lightning_address: "Alice@example.com" }),
+      body: JSON.stringify({ lnurl, lightning_address: "alice@example.com" }),
     });
     const result = await registerLightningAddress({
       fetch,
@@ -75,7 +80,7 @@ describe("registerLightningAddress", () => {
       signer,
       now: () => NOW_MS,
     });
-    expect(result).toStrictEqual({ lnurl: "lnurl1xxx", lightningAddress: "Alice@example.com" });
+    expect(result).toStrictEqual({ lnurl, lightningAddress: "alice@example.com" });
     expect(requests).toHaveLength(1);
     expect(requests[0]!.url).toBe(`https://lnserver.example.com/lnurlpay/${PUBKEY_HEX}`);
     expect(requests[0]!.method).toBe("POST");
@@ -108,6 +113,69 @@ describe("registerLightningAddress", () => {
         { format: "der", prehash: false },
       ),
     ).toBe(true);
+  });
+
+  test("rejects a response naming a different lightning address", async () => {
+    const { signer } = signingStub();
+    const { fetch } = fakeFetch({
+      status: 200,
+      body: JSON.stringify({
+        lnurl: encodeLnurl("https://example.com/lnurlp/alice"),
+        lightning_address: "mallory@example.com",
+      }),
+    });
+    await expect(
+      registerLightningAddress({
+        fetch,
+        serverUrl: "https://lnserver.example.com",
+        domain: "example.com",
+        username: "alice",
+        description: "",
+        signer,
+        now: () => NOW_MS,
+      }),
+    ).rejects.toThrow("lightning_address is not the requested address");
+  });
+
+  test("rejects a response whose lnurl decodes to a different callback", async () => {
+    const { signer } = signingStub();
+    const { fetch } = fakeFetch({
+      status: 200,
+      body: JSON.stringify({
+        lnurl: encodeLnurl("https://evil.example.net/lnurlp/alice"),
+        lightning_address: "alice@example.com",
+      }),
+    });
+    await expect(
+      registerLightningAddress({
+        fetch,
+        serverUrl: "https://lnserver.example.com",
+        domain: "example.com",
+        username: "alice",
+        description: "",
+        signer,
+        now: () => NOW_MS,
+      }),
+    ).rejects.toThrow("lnurl does not point at the requested pay endpoint");
+  });
+
+  test("rejects an undecodable lnurl in the response", async () => {
+    const { signer } = signingStub();
+    const { fetch } = fakeFetch({
+      status: 200,
+      body: JSON.stringify({ lnurl: "lnurl1xxx", lightning_address: "alice@example.com" }),
+    });
+    await expect(
+      registerLightningAddress({
+        fetch,
+        serverUrl: "https://lnserver.example.com",
+        domain: "example.com",
+        username: "alice",
+        description: "",
+        signer,
+        now: () => NOW_MS,
+      }),
+    ).rejects.toThrow("lnurl does not decode");
   });
 
   test("surfaces a non-2xx as http_<status> with sanitized server text", async () => {

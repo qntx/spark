@@ -47,13 +47,16 @@ export function malformedLeafTx(leaf: SparkLeaf): string | undefined {
 /**
  * Whether the coordinator's copy of a leaf and another operator's copy describe different leaves.
  * Compares every field a spend commits to: `valueSats` is the amount the wallet pays or exits the
- * leaf for, so a coordinator reporting it differently is as disqualifying as a different
+ * leaf for, `verifyingPublicKey` is the key signing must reach, and `vout` locates the leaf in
+ * `nodeTx` — a coordinator reporting any of them differently is as disqualifying as a different
  * transaction.
  */
 export function operatorsDisagree(coordinator: SparkLeaf, operator: SparkLeaf): boolean {
   return (
     operator.status !== coordinator.status ||
     operator.valueSats !== coordinator.valueSats ||
+    operator.vout !== coordinator.vout ||
+    !equalBytes(operator.verifyingPublicKey, coordinator.verifyingPublicKey) ||
     !equalBytes(operator.signingKeyshare.publicKey, coordinator.signingKeyshare.publicKey) ||
     !equalBytes(operator.nodeTx, coordinator.nodeTx) ||
     !equalBytes(operator.refundTx, coordinator.refundTx)

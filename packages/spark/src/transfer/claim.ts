@@ -129,6 +129,10 @@ async function recoverCompletedClaim(options: {
  * `sendLeafSigningDigest` and that each `secret_cipher` decrypts (inside the signer) to the key
  * whose public key the leaf was tweaked to, re-signs the refund transactions at their current
  * timelock with the derived `LEAF{leafId}` keys, then submits the `ClaimPackage`.
+ *
+ * The new refunds are rebuilt locally from the sequence the SO reports in each leaf's
+ * `intermediateRefundTx` — a coordinator reporting a wrong sequence only produces a refund the SO
+ * itself rejects, so it can break this claim but not steal or mis-time-lock the leaf.
  */
 export async function claimTransfer(
   options: TransferCoordinator & {

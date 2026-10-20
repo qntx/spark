@@ -413,6 +413,25 @@ test("authenticates then answers a fee estimate with the bearer token", async ()
   expect(requests[2]?.authorization).toBe("Bearer ssp-token-1");
 });
 
+test("a hung request aborts at the request timeout", async () => {
+  let aborted = false;
+  const hangingFetch: typeof globalThis.fetch = async (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new Error("aborted"));
+      });
+    });
+  const client = createSspClient({
+    ...SSP_OPTS,
+    signer: SIGNER,
+    fetch: hangingFetch,
+    requestTimeoutMs: 20,
+  });
+  await expect(client.swapFeeEstimate(100)).rejects.toThrow("ssp request timed out");
+  expect(aborted).toBe(true);
+});
+
 test("re-authenticates once when the session token is rejected", async () => {
   const { fetchImpl, requests } = fakeSsp({ failFirstAuthed: true });
   const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });

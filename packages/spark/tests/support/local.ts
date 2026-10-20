@@ -136,8 +136,8 @@ export async function claimPendingUntil(
   deadline: number,
 ): Promise<ReadonlyArray<SparkLeaf>> {
   const claimed = await client.transfers.claimPending();
-  if (claimed.length > 0 || Date.now() > deadline) {
-    return claimed;
+  if (claimed.leaves.length > 0 || Date.now() > deadline) {
+    return claimed.leaves;
   }
   await sleep(3000);
   return claimPendingUntil(client, deadline);
