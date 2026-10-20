@@ -25,7 +25,12 @@ export type {
 } from "./core/index.ts";
 export type { Bolt11Invoice, Bolt11Network } from "./core/index.ts";
 export { createSparkClient } from "./client/index.ts";
-export type { SparkClient, SparkClientOptions, SparkInvoiceStatus } from "./client/index.ts";
+export type {
+  ClaimPendingResult,
+  SparkClient,
+  SparkClientOptions,
+  SparkInvoiceStatus,
+} from "./client/index.ts";
 export { createSatsInvoice, createTokensInvoice, parseSparkInvoice } from "./invoice/index.ts";
 export type { ParsedSparkInvoice } from "./invoice/index.ts";
 export type { SparkEvent } from "./connection/index.ts";

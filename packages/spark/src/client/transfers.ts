@@ -5,6 +5,7 @@ import { SparkError, SparkInputError } from "../errors/index.ts";
 import { TransferType } from "../proto/gen/spark_pb.ts";
 import {
   assertCommittedTransfer,
+  assertLiveTransfer,
   claimTransfer,
   CLAIMABLE_TRANSFER_STATUSES,
   queryAllTransfers,
@@ -81,6 +82,7 @@ export async function sendSats(
   if (options.transferId !== undefined) {
     const found = await queryTransferById({ spark, network, transferId });
     if (found !== undefined) {
+      assertLiveTransfer(found);
       assertCommittedTransfer(found, expected, "send");
       await store.deleteExitChains(found.leaves.map((leaf) => leaf.leaf.id));
       return found;
@@ -184,22 +186,28 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
         identityPublicKey: await signer.identityPublicKey(),
         network,
       });
-      const claimed: SparkLeaf[] = [];
+      const leaves: SparkLeaf[] = [];
+      const failures: Array<{ transferId: string; error: unknown }> = [];
       for (const transfer of pending) {
         if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
           continue;
         }
         // Each claim plus its chain store is one critical section, so a concurrent leaves() sync
-        // cannot observe and delete a half-stored claim.
-        // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order; each consumes signer nonces
-        const leaves = await context.leafLock.run(async () => {
-          const claimedLeaves = await claimTransfer({ ...context.transferCoordinator, transfer });
-          await context.storeChainsFor(claimedLeaves);
-          return claimedLeaves;
-        });
-        claimed.push(...leaves);
+        // cannot observe and delete a half-stored claim. A claim that fails is reported, not
+        // fatal: one poisoned transfer must not starve every transfer behind it.
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- claims run strictly in order; each consumes signer nonces
+          const claimed = await context.leafLock.run(async () => {
+            const claimedLeaves = await claimTransfer({ ...context.transferCoordinator, transfer });
+            await context.storeChainsFor(claimedLeaves);
+            return claimedLeaves;
+          });
+          leaves.push(...claimed);
+        } catch (error) {
+          failures.push({ transferId: transfer.id, error });
+        }
       }
-      return claimed;
+      return { leaves, failures };
     },
   };
 }

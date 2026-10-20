@@ -2,7 +2,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 
 import type { LightningAddressStatement } from "../core/lightning-address.ts";
 import { SparkRequestError } from "../errors/index.ts";
-import { checkLnurlUrl } from "./codec.ts";
+import { checkLnurlUrl, decodeLnurl } from "./codec.ts";
 import { lnurlSendJson } from "./http.ts";
 import { formatLnurlUrl, parseLnurlUrl } from "./url.ts";
 
@@ -127,6 +127,31 @@ export async function registerLightningAddress(options: {
     throw new SparkRequestError("lnurl register response: missing lnurl or lightning_address", {
       code: "unexpected_response",
     });
+  }
+  // The response must name exactly the claim we signed — anything else means the server is not
+  // reporting this registration.
+  const domain = options.domain.toLowerCase();
+  const username = options.username.toLowerCase();
+  if (lightningAddress !== `${username}@${domain}`) {
+    throw new SparkRequestError(
+      "lnurl register response: lightning_address is not the requested address",
+      { code: "unexpected_response" },
+    );
+  }
+  let decoded: string;
+  try {
+    decoded = decodeLnurl(lnurl);
+  } catch (error) {
+    throw new SparkRequestError("lnurl register response: lnurl does not decode", {
+      code: "unexpected_response",
+      cause: error,
+    });
+  }
+  if (decoded !== `https://${domain}/lnurlp/${username}`) {
+    throw new SparkRequestError(
+      "lnurl register response: lnurl does not point at the requested pay endpoint",
+      { code: "unexpected_response" },
+    );
   }
   return { lnurl, lightningAddress };
 }

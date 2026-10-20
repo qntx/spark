@@ -3,7 +3,7 @@ import type { Client, CallOptions } from "@connectrpc/connect";
 import { u64ToSats } from "../core/assert.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
-import { SparkInputError } from "../errors/index.ts";
+import { SparkError, SparkInputError } from "../errors/index.ts";
 import { TreeNodeStatus } from "../proto/gen/spark_pb.ts";
 import type { SparkService, TreeNode } from "../proto/gen/spark_pb.ts";
 
@@ -30,6 +30,12 @@ export type SparkLeaf = {
 };
 
 const LEAF_PAGE_SIZE = 50;
+
+/**
+ * Hard bound on coordinator-driven pagination: a hostile SO can keep returning full pages forever,
+ * and these callers run inside the leaf/token lock, so the loop must terminate.
+ */
+const MAX_PAGES = 1000;
 
 function optionalBytes(value: Uint8Array): Uint8Array | undefined {
   return value.length === 0 ? undefined : value;
@@ -75,7 +81,8 @@ export function mapTreeNode(node: TreeNode): SparkLeaf {
  * Pages through `query_nodes` for the owner's nodes in `statuses` — the same source filter and
  * short-page termination the upstream leaf-manager uses, in batches of 50. `includeParents`
  * additionally returns the matched nodes' ancestors (needed by the watchtower-exit listing, whose
- * recoverable output lives on a parent's direct tx).
+ * recoverable output lives on a parent's direct tx). The SO-supplied offset must strictly advance
+ * on every full page and the walk is bounded — endless or rewinding pages throw.
  */
 export async function queryOwnerNodes(options: {
   readonly spark: Client<typeof SparkService>;
@@ -85,7 +92,10 @@ export async function queryOwnerNodes(options: {
   readonly includeParents: boolean;
   readonly call?: CallOptions;
 }): Promise<TreeNode[]> {
-  const fetchPage = async (offset: number): Promise<TreeNode[]> => {
+  const nodes: TreeNode[] = [];
+  let offset = 0;
+  for (let pageIndex = 0; pageIndex < MAX_PAGES; pageIndex++) {
+    // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
     const response = await options.spark.query_nodes(
       {
         source: {
@@ -101,13 +111,17 @@ export async function queryOwnerNodes(options: {
       options.call,
     );
     const page = Object.values(response.nodes);
+    nodes.push(...page);
     if (page.length < LEAF_PAGE_SIZE) {
-      return page;
+      return nodes;
     }
-    const rest = await fetchPage(Number(response.offset));
-    return [...page, ...rest];
-  };
-  return fetchPage(0);
+    const nextOffset = Number(response.offset);
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+      throw new SparkError("query nodes: coordinator returned a non-advancing offset");
+    }
+    offset = nextOffset;
+  }
+  throw new SparkError("query nodes: coordinator did not stop returning full pages");
 }
 
 /** Pages through `query_nodes` for the owner's `AVAILABLE` leaves via {@link queryOwnerNodes}. */

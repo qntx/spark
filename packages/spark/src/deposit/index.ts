@@ -54,6 +54,7 @@ export type UnusedDepositAddress = {
 
 const PUBLIC_KEY_LENGTH = 33;
 const UNUSED_PAGE_SIZE = 100;
+const MAX_PAGES = 1000;
 
 /**
  * The BIP-341 key-path P2TR script over a coordinator-supplied verifying key — the only output
@@ -174,13 +175,21 @@ export async function generateDepositAddress(
 
 /**
  * Pages `query_unused_deposit_addresses` (batches of 100 until a short page) and returns every
- * address the SO still considers unused.
+ * address the SO still considers unused. The SO-supplied offset must strictly advance on every full
+ * page and the walk is bounded — endless or rewinding pages throw.
  */
 export async function queryUnusedDepositAddresses(
-  options: DepositCoordinator & { readonly call?: CallOptions },
+  options: DepositCoordinator & {
+    readonly call?: CallOptions;
+    /** Page bound override, for focused tests; walks default to {@link MAX_PAGES}. */
+    readonly maxPages?: number;
+  },
 ): Promise<UnusedDepositAddress[]> {
   const identityPublicKey = await options.signer.identityPublicKey();
-  const fetchPage = async (offset: number): Promise<UnusedDepositAddress[]> => {
+  const addresses: UnusedDepositAddress[] = [];
+  let offset = 0;
+  for (let pageIndex = 0; pageIndex < (options.maxPages ?? MAX_PAGES); pageIndex++) {
+    // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
     const response = await options.spark.query_unused_deposit_addresses(
       {
         identityPublicKey,
@@ -190,7 +199,7 @@ export async function queryUnusedDepositAddresses(
       },
       options.call,
     );
-    const page = response.depositAddresses.map((entry) => {
+    for (const entry of response.depositAddresses) {
       const expectedScript = depositScript(entry.verifyingPublicKey, options.network);
       const actualScript = depositAddressScript(entry.depositAddress, options.network);
       if (!equalBytes(actualScript, expectedScript)) {
@@ -198,19 +207,22 @@ export async function queryUnusedDepositAddresses(
           `deposit: unused address ${entry.depositAddress} does not pay to its verifying key`,
         );
       }
-      return {
+      addresses.push({
         address: entry.depositAddress,
         leafId: entry.leafId ?? "",
         verifyingPublicKey: entry.verifyingPublicKey,
-      };
-    });
-    if (response.depositAddresses.length < UNUSED_PAGE_SIZE) {
-      return page;
+      });
     }
-    const rest = await fetchPage(Number(response.offset));
-    return [...page, ...rest];
-  };
-  return fetchPage(0);
+    if (response.depositAddresses.length < UNUSED_PAGE_SIZE) {
+      return addresses;
+    }
+    const nextOffset = Number(response.offset);
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+      throw new SparkError("deposit: coordinator returned a non-advancing offset");
+    }
+    offset = nextOffset;
+  }
+  throw new SparkError("deposit: coordinator did not stop returning full pages");
 }
 
 export type DepositOutput = {

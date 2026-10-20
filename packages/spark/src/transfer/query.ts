@@ -10,6 +10,13 @@ import { TransferType } from "../proto/gen/spark_pb.ts";
 import { mapTransfer } from "./model.ts";
 import type { SparkTransfer } from "./model.ts";
 
+/**
+ * Terminal statuses a transfer can never come back from: RETURNED means the send refunded to the
+ * sender, EXPIRED means it timed out unclaimed. A probe that finds one must surface it — the id is
+ * burned, and matching it as committed would report a failed payment as successful.
+ */
+const TERMINAL_TRANSFER_STATUSES: ReadonlySet<string> = new Set(["RETURNED", "EXPIRED"]);
+
 /** `query_pending_transfers` — transfers awaiting this identity as receiver. */
 export async function queryPendingTransfers(options: {
   readonly spark: Client<typeof SparkService>;
@@ -89,13 +96,15 @@ export type CommittedTransferExpectation = {
  * Whether `transfer` is exactly the one we signed for: same type, our sender key, and the expected
  * receiver set. A populated `receivers` list must carry exactly the expected identity keys (and,
  * when `receiverAmountsSats` is given, exactly the requested per-receiver amounts); an empty
- * `receivers` list can only satisfy a single expected receiver via `receiverIdentityPublicKey`.
+ * `receivers` list can only satisfy a single expected receiver via `receiverIdentityPublicKey`. A
+ * terminal (RETURNED/EXPIRED) transfer can never be the committed one.
  */
 function matchesCommittedTransfer(
   transfer: SparkTransfer,
   expected: CommittedTransferExpectation,
 ): boolean {
   if (
+    TERMINAL_TRANSFER_STATUSES.has(transfer.status) ||
     transfer.type !== protoEnumName(TransferType, expected.type) ||
     !equalBytes(transfer.senderIdentityPublicKey, expected.senderIdentityPublicKey)
   ) {
@@ -212,9 +221,23 @@ export async function queryTransferById(options: {
 }
 
 /**
+ * A probed transfer in a terminal state is a distinct failure from a mismatch: the id can never
+ * commit under any terms, so the only remedy is a fresh one. Call before
+ * {@link assertCommittedTransfer} on probe-first paths.
+ */
+export function assertLiveTransfer(transfer: SparkTransfer): void {
+  if (TERMINAL_TRANSFER_STATUSES.has(transfer.status)) {
+    throw new SparkError(
+      `transfer ${transfer.id} was ${transfer.status}; retry with a new transferId`,
+    );
+  }
+}
+
+/**
  * The committed transfer must be exactly the one we signed for — our leaves to the expected
- * receivers under the expected type. On a recovered response in particular, continuing with a
- * transfer to other receivers would commit our leaves to terms we never agreed to.
+ * receivers under the expected type, in a committed status. On a recovered response in particular,
+ * continuing with a transfer to other receivers would commit our leaves to terms we never agreed
+ * to.
  */
 export function assertCommittedTransfer(
   transfer: SparkTransfer,

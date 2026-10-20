@@ -53,7 +53,7 @@ export function selectTokenOutputs(
   amount: bigint,
 ): SparkTokenOutput[] {
   assertTokenAmount(amount);
-  const available = outputs.filter((output) => output.status !== "pending-outbound");
+  const available = outputs.filter((output) => output.status === "available");
   const total = available.reduce((sum, output) => sum + output.amount, 0n);
   if (total < amount) {
     throw new SparkInputError("insufficient token amount");

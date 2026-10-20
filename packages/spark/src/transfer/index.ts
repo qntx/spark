@@ -8,6 +8,7 @@ export type {
 } from "./model.ts";
 export {
   assertCommittedTransfer,
+  assertLiveTransfer,
   queryAllTransfers,
   queryCommittedTransfer,
   queryPendingTransfers,

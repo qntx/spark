@@ -9,6 +9,8 @@ import {
   decodeLnurl,
   encodeLnurl,
   lightningAddressUrl,
+  lnurlGetJson,
+  lnurlSendJson,
   parseLnurlPayRequest,
   parseLnurlWithdrawRequest,
   parseSuccessAction,
@@ -41,6 +43,42 @@ function fetchStatus(status: number): typeof globalThis.fetch {
 function fetchText(body: string): typeof globalThis.fetch {
   return async () => Promise.resolve(new Response(body));
 }
+
+test("lnurlGetJson rejects a declared Content-Length over 256 KiB before reading", async () => {
+  let read = false;
+  const body = {
+    ok: true,
+    headers: new Headers({ "content-length": String(300 * 1024) }),
+    text: async () => {
+      read = true;
+      return Promise.resolve("{}");
+    },
+  } as Response;
+  const fetch: typeof globalThis.fetch = async () => Promise.resolve(body);
+  await expect(lnurlGetJson("https://service.com/x", fetch)).rejects.toThrow(
+    "body exceeds 256 KiB",
+  );
+  expect(read).toBe(false);
+});
+
+test("lnurlGetJson rejects an oversized body without a Content-Length after reading", async () => {
+  const big = `{ "data": "${"x".repeat(300 * 1024)}" }`;
+  await expect(lnurlGetJson("https://service.com/x", fetchText(big))).rejects.toThrow(
+    "body exceeds 256 KiB",
+  );
+});
+
+test("lnurlSendJson enforces the same response bound on both paths", async () => {
+  const declared: typeof globalThis.fetch = async () =>
+    Promise.resolve(new Response("{}", { headers: { "content-length": String(300 * 1024) } }));
+  await expect(
+    lnurlSendJson("https://service.com/x", declared, { method: "POST", body: {} }),
+  ).rejects.toThrow("body exceeds 256 KiB");
+  const big = `{ "data": "${"x".repeat(300 * 1024)}" }`;
+  await expect(
+    lnurlSendJson("https://service.com/x", fetchText(big), { method: "POST", body: {} }),
+  ).rejects.toThrow("body exceeds 256 KiB");
+});
 
 // --- test-only BOLT-11 encoder ------------------------------------------------
 

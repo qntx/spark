@@ -729,8 +729,10 @@ describe("transfers.claim", () => {
     typedSig?: boolean;
     legacySignature?: "der" | "malformed";
     transferReceiverId?: string;
+    transferId?: string;
   }) {
     const leafId = options.leafId ?? LEAF_ID;
+    const transferId = options.transferId ?? TRANSFER_ID;
     const receivedPublicKey = secp256k1.getPublicKey(options.receivedSecret, true);
     const crypto = await loadWasmBackend();
     const secretCipher = crypto.eciesEncrypt(
@@ -751,7 +753,7 @@ describe("transfers.claim", () => {
       receivingPublicKey: receivedPublicKey,
       network: "regtest",
     }).cpfpRefund.txBytes;
-    const digest = sendLeafSigningDigest(leafId, TRANSFER_ID, secretCipher);
+    const digest = sendLeafSigningDigest(leafId, transferId, secretCipher);
     const signature = secp256k1.sign(
       options.corruptSig === true ? sha256(digest) : digest,
       SENDER_SECRET,
@@ -816,11 +818,15 @@ describe("transfers.claim", () => {
     receivers?: ReadonlyArray<{ id: string; identityPublicKey: Uint8Array }>;
     extraLeaves?: ReadonlyArray<TransferLeaf>;
     transferReceiverId?: string;
+    transferId?: string;
+    leafId?: string;
   }) {
     const receiverIdentity = await options.receiverSigner.identityPublicKey();
     const leaf = await pendingLeaf({
       receiverIdentity,
       receivedSecret: options.receivedSecret,
+      ...(options.leafId === undefined ? {} : { leafId: options.leafId }),
+      ...(options.transferId === undefined ? {} : { transferId: options.transferId }),
       ...(options.leafOwnerKey === undefined ? {} : { leafOwnerKey: options.leafOwnerKey }),
       ...(options.corruptSig === undefined ? {} : { corruptSig: options.corruptSig }),
       ...(options.typedSig === undefined ? {} : { typedSig: options.typedSig }),
@@ -832,7 +838,7 @@ describe("transfers.claim", () => {
         : { transferReceiverId: options.transferReceiverId }),
     });
     return create(TransferSchema, {
-      id: TRANSFER_ID,
+      id: options.transferId ?? TRANSFER_ID,
       senderIdentityPublicKey: secp256k1.getPublicKey(SENDER_SECRET, true),
       receiverIdentityPublicKey: options.receiverIdentityPublicKey ?? receiverIdentity,
       status: options.status ?? TransferStatus.SENDER_KEY_TWEAKED,
@@ -881,8 +887,9 @@ describe("transfers.claim", () => {
     });
 
     const claimed = await client.transfers.claimPending();
-    expect(claimed).toHaveLength(1);
-    expect(claimed[0]?.id).toBe(LEAF_ID);
+    expect(claimed.leaves).toHaveLength(1);
+    expect(claimed.leaves[0]?.id).toBe(LEAF_ID);
+    expect(claimed.failures).toHaveLength(0);
 
     const commitments = required(commitmentsReq, "get_signing_commitments request");
     expect(commitments.nodeIdCount).toBe(1);
@@ -1061,8 +1068,55 @@ describe("transfers.claim", () => {
         return create(ClaimTransferResponseSchema, {});
       },
     });
-    await expect(client.transfers.claimPending()).resolves.toStrictEqual([]);
+    await expect(client.transfers.claimPending()).resolves.toStrictEqual({
+      leaves: [],
+      failures: [],
+    });
     expect(claimCalls).toBe(0);
+    receiver.dispose();
+  });
+
+  test("claimPending reports a poisoned transfer and still claims the rest", async () => {
+    const receiver = await testSigner();
+    // The first transfer's sender signature does not verify: claim throws inside the lock.
+    const poison = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(89),
+      corruptSig: true,
+      transferId: "01989abc-def0-7000-8000-abcdef000001",
+      leafId: "01989abc-def0-7abc-89ab-cdef00000001",
+    });
+    const good = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      transferId: "01989abc-def0-7000-8000-abcdef000002",
+      leafId: "01989abc-def0-7abc-89ab-cdef00000002",
+    });
+    const client = makeClient(receiver, {
+      query_pending_transfers: () =>
+        create(QueryTransfersResponseSchema, { transfers: [poison, good] }),
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * req.nodeIdCount),
+        }),
+      claim_transfer: async (req) =>
+        create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves: await claimedLeaves(receiver, [required(good.leaves[0], "good pending leaf")]),
+          }),
+        }),
+    });
+    const claimed = await client.transfers.claimPending();
+    expect(claimed.leaves.map((leaf) => leaf.id)).toStrictEqual([
+      "01989abc-def0-7abc-89ab-cdef00000002",
+    ]);
+    expect(claimed.failures).toHaveLength(1);
+    expect(claimed.failures[0]?.transferId).toBe(poison.id);
+    expect(String(claimed.failures[0]?.error)).toContain("sender signature verification failed");
     receiver.dispose();
   });
 
@@ -1374,7 +1428,7 @@ describe("transfers.claim", () => {
     const claimed = await client.transfers.claimPending();
     const chains = await store.exitChains();
     expect(chains.map((chain) => chain.leafId)).toStrictEqual([
-      required(claimed[0], "claimed leaf").id,
+      required(claimed.leaves[0], "claimed leaf").id,
     ]);
     receiver.dispose();
   });
@@ -1523,7 +1577,7 @@ describe("transfers.claim", () => {
     // 300 pending leaves → 300 sealed-key decryptions, 300 leaf public keys and
     // 600 refund signatures — every signer call is capped at 256.
     const claimed = await client.transfers.claimPending();
-    expect(claimed.map((leaf) => leaf.id)).toStrictEqual(leafIds);
+    expect(claimed.leaves.map((leaf) => leaf.id)).toStrictEqual(leafIds);
     const claim = required(claimReq, "claim_transfer request");
     const pkg = required(claim.claimPackage, "claim package");
     expect(pkg.leavesToClaim.map((job) => job.leafId)).toStrictEqual(leafIds);
@@ -2663,6 +2717,14 @@ describe("committed-transfer predicate", () => {
     receiverIdentityPublicKeys: [keyB],
   };
 
+  test("a terminal transfer never matches, whatever the terms", () => {
+    for (const status of ["RETURNED", "EXPIRED"]) {
+      expect(() => assertCommittedTransfer(transfer({ status }), expectation, "test")).toThrow(
+        /not ours/,
+      );
+    }
+  });
+
   test("accepts the exact receiver set and rejects supersets and missing receivers", () => {
     const receiver = (key: Uint8Array, amountSats = 0) => ({
       id: `r-${key[0]}`,
@@ -2873,6 +2935,64 @@ describe("send idempotent retries", () => {
       transferId: TRANSFER_ID,
     });
     expect(sent.id).toBe(TRANSFER_ID);
+    signer.dispose();
+  });
+
+  test("a terminal transfer under the caller's id demands a fresh transferId", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const returned = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: identity,
+      receiverIdentityPublicKey: receiver,
+      status: TransferStatus.RETURNED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: 60_000n,
+    });
+    const client = makeClient(signer, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [returned] }),
+      start_transfer_v2: () => {
+        throw new Error("start_transfer_v2 must not run on a terminal probe");
+      },
+    });
+    await expect(
+      client.transfers.send({ receiver, amountSats: 60_000, transferId: TRANSFER_ID }),
+    ).rejects.toThrow(`transfer ${TRANSFER_ID} was RETURNED; retry with a new transferId`);
+    signer.dispose();
+  });
+
+  test("a lost start_transfer response does not recover a terminal transfer", async () => {
+    const signer = await testSigner();
+    const a = await fabricatedNode(signer, MULTI_LEAF_A, 60_000n);
+    const identity = await signer.identityPublicKey();
+    const receiver = secp256k1.getPublicKey(RECEIVER_B_SECRET, true);
+    const expired = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: identity,
+      receiverIdentityPublicKey: receiver,
+      status: TransferStatus.EXPIRED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: 60_000n,
+    });
+    // First probe misses; the post-failure probe finds only an EXPIRED transfer — that is not a
+    // committed send, so the original lost-response error must surface, not a fake success.
+    const client = makeClient(signer, {
+      query_nodes: () => nodesResponse([a.node]),
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * req.nodeIds.length),
+        }),
+      query_transfers_by_id: byIdQueue([[], [expired]]),
+      start_transfer_v2: () => {
+        throw new ConnectError("start response lost", Code.Unavailable);
+      },
+    });
+    await expect(
+      client.transfers.send({ receiver, amountSats: 60_000, transferId: TRANSFER_ID }),
+    ).rejects.toThrow("start response lost");
     signer.dispose();
   });
 });

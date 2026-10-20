@@ -39,12 +39,14 @@ const CLAIM_TRANSFER_DELAY_MS = 1000;
 
 /**
  * Claims the transfer the SSP's `claim_static_deposit` credited: the reported transfer id when the
- * response carries one, otherwise the newest claimable inbound transfer from the SSP. Returns no
- * leaves when nothing claimable shows up within the bound — the caller can retry
- * `transfers.claimPending` later.
+ * response carries one, otherwise the oldest claimable inbound transfer from the SSP whose total
+ * equals `creditAmountSats`. Returns no leaves when nothing claimable shows up within the bound —
+ * the caller can retry `transfers.claimPending` later.
  */
-async function claimInboundTransfer(
+/** Exported for focused tests; the public entry point is `deposits.claimStatic`. */
+export async function claimInboundTransfer(
   context: ClientContext,
+  creditAmountSats: number,
   transferId?: string,
 ): Promise<ReadonlyArray<SparkLeaf>> {
   const { coordinatorConnection, signer, network } = context;
@@ -58,11 +60,17 @@ async function claimInboundTransfer(
     if (transferId === undefined) {
       // oxlint-disable-next-line no-await-in-loop -- bounded sequential polling
       const pending = await queryPendingTransfers({ spark, identityPublicKey, network });
-      transfer = pending.find(
-        (candidate) =>
-          equalBytes(candidate.senderIdentityPublicKey, sspIdentityPublicKey) &&
-          CLAIMABLE_TRANSFER_STATUSES.includes(candidate.status),
-      );
+      // Without a reported id only the claim's credit amount binds the transfer: other SSP
+      // transfers in flight must not be mistaken for this deposit's credit.
+      const [oldest] = pending
+        .filter(
+          (candidate) =>
+            equalBytes(candidate.senderIdentityPublicKey, sspIdentityPublicKey) &&
+            CLAIMABLE_TRANSFER_STATUSES.includes(candidate.status) &&
+            candidate.totalValueSats === creditAmountSats,
+        )
+        .sort((a, b) => (a.createdTimeMs ?? 0) - (b.createdTimeMs ?? 0));
+      transfer = oldest;
     } else {
       // oxlint-disable-next-line no-await-in-loop -- bounded sequential polling
       const [found] = await queryTransfersByIds({ spark, transferIds: [transferId], network });
@@ -74,6 +82,12 @@ async function claimInboundTransfer(
         ) {
           throw new SparkError(
             "claimStatic: the SSP-reported transfer is not the SSP's payment to us",
+          );
+        }
+        if (candidate.totalValueSats !== creditAmountSats) {
+          throw new SparkError(
+            `claimStatic: the SSP-reported transfer total ${candidate.totalValueSats} ` +
+              `does not match the credited ${creditAmountSats} sats`,
           );
         }
         if (CLAIMABLE_TRANSFER_STATUSES.includes(candidate.status)) {
@@ -142,7 +156,7 @@ export function createDeposits(context: ClientContext): SparkClient["deposits"] 
         },
         claimOptions,
       );
-      const leaves = await claimInboundTransfer(context, claim.transferId);
+      const leaves = await claimInboundTransfer(context, claim.creditAmountSats, claim.transferId);
       return { ...claim, leaves };
     },
     refundStatic: async (refundOptions) =>

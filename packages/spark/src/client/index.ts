@@ -41,6 +41,15 @@ import { createTokens } from "./tokens.ts";
 import { createTransfers } from "./transfers.ts";
 import { createWithdrawals } from "./withdrawals.ts";
 
+/**
+ * `transfers.claimPending` result: the leaves claimed this round plus one entry per transfer whose
+ * claim failed. Transfers in non-claimable statuses are skipped, not failures.
+ */
+export type ClaimPendingResult = {
+  readonly leaves: ReadonlyArray<SparkLeaf>;
+  readonly failures: ReadonlyArray<{ readonly transferId: string; readonly error: unknown }>;
+};
+
 export type SparkClient = {
   /** The 33-byte compressed secp256k1 identity public key. */
   readonly identityPublicKey: () => Promise<Uint8Array>;
@@ -55,6 +64,11 @@ export type SparkClient = {
    * (cheapest unilateral exit). Swaps run one at a time under the leaf lock — a concurrent spend
    * sees a consistent leaf set between rounds. The wallet decides when to call this (e.g. after
    * claims); nothing schedules it. Returns the executed swap count and leaf counts before/after.
+   *
+   * Swap fee note: the SSP response carries no fee before the inbound counter transfer is claimed,
+   * and the primary transfer is already committed by then — claiming anyway is the only safe move,
+   * so a non-zero SSP swap fee is detected only after the claim. Funds are never stranded or lost:
+   * the thrown error states the leaves are already ours.
    */
   readonly optimizeLeaves: (
     optimizeOptions?: OptimizeLeavesOptions,
@@ -99,11 +113,13 @@ export type SparkClient = {
     /** Verifies and claims a pending transfer addressed to this identity; returns the new leaves. */
     readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;
     /**
-     * Claims every pending incoming transfer; returns all new leaves. A committed transfer stays
-     * claimable indefinitely — the sender cannot cancel it and its expiry does not return it, so a
-     * receiver may stay offline across the sender's expiry and claim later.
+     * Claims every pending incoming transfer; returns the new leaves plus one failure entry per
+     * transfer that could not be claimed — a single poisoned transfer does not abort the rest. A
+     * committed transfer stays claimable indefinitely — the sender cannot cancel it and its expiry
+     * does not return it, so a receiver may stay offline across the sender's expiry and claim
+     * later.
      */
-    readonly claimPending: () => Promise<ReadonlyArray<SparkLeaf>>;
+    readonly claimPending: () => Promise<ClaimPendingResult>;
   };
   readonly tokens: {
     /** Token outputs owned by this identity, optionally narrowed to one bech32m identifier. */
@@ -156,8 +172,10 @@ export type SparkClient = {
     }) => Promise<string>;
     /**
      * Pays a Spark invoice address. `amount` is required for open invoices and must equal a fixed
-     * invoice amount when set. Resolves to the `SparkTransfer` for sats invoices or the hex final
-     * token transaction hash for token invoices.
+     * invoice amount when set. Unsigned invoices are accepted too: invoice fields (amount, sender
+     * restriction, expiry) are then only hints, and the receiver is always the identity key inside
+     * the address. Resolves to the `SparkTransfer` for sats invoices or the hex final token
+     * transaction hash for token invoices.
      */
     readonly pay: (
       invoice: string,

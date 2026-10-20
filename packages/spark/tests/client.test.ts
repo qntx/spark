@@ -236,6 +236,38 @@ test("leaves and balance page through query_nodes until a short page", async () 
   await expect(client.balance()).resolves.toBe(
     leaves.reduce((sum, leaf) => sum + Number(leaf.value), 0),
   );
+}, 60_000);
+
+test("leaves throws when the coordinator never stops returning full pages", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const nodes: Record<string, TreeNode> = {};
+  for (let i = 0; i < 50; i++) {
+    nodes[`leaf-${i}`] = ownedLeaf(`leaf-${i}`, 100n, leafSecret(i));
+  }
+  let pages = 0;
+  const client = makeClient(signer, {
+    query_nodes: (req: QueryNodesRequest) => {
+      pages += 1;
+      return { nodes, offset: req.offset + 50n };
+    },
+  });
+  await expect(client.leaves()).rejects.toThrow("did not stop returning full pages");
+  // The cap bounds each operator's walk — coordinator and cross-check operator alike.
+  expect(pages).toBe(2000);
+  // Two thousand sequential coordinator calls — slow locally, fast in CI.
+}, 600_000);
+
+test("leaves throws when the coordinator's offset does not advance", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const nodes: Record<string, TreeNode> = {};
+  for (let i = 0; i < 50; i++) {
+    nodes[`leaf-${i}`] = ownedLeaf(`leaf-${i}`, 100n, leafSecret(i));
+  }
+  const client = makeClient(signer, {
+    // A malicious coordinator repeating the same offset would paginate forever otherwise.
+    query_nodes: () => ({ nodes, offset: 0n }),
+  });
+  await expect(client.leaves()).rejects.toThrow("non-advancing offset");
 });
 
 test("pending and all transfers map to plain SparkTransfer", async () => {

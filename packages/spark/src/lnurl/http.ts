@@ -1,3 +1,5 @@
+import { utf8ToBytes } from "@noble/hashes/utils.js";
+
 import { serverErrorText } from "../core/text.ts";
 import { SparkRequestError } from "../errors/index.ts";
 
@@ -5,6 +7,33 @@ export type JsonObject = Record<string, unknown>;
 
 export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** LNURL responses are small JSON documents; a larger body is a hostile or broken endpoint. */
+export const MAX_LNURL_RESPONSE_BYTES: number = 256 * 1024;
+
+function tooLarge(): SparkRequestError {
+  return new SparkRequestError("lnurl response: body exceeds 256 KiB", {
+    code: "unexpected_response",
+  });
+}
+
+/**
+ * Rejects before reading when a truthful `Content-Length` already exceeds the bound. A missing (or
+ * lying) header cannot be trusted, so the caller still reads the body once and re-checks it against
+ * the same bound afterwards.
+ */
+function checkContentLength(response: Response): void {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (Number.isSafeInteger(declared) && declared > MAX_LNURL_RESPONSE_BYTES) {
+    throw tooLarge();
+  }
+}
+
+function checkBodySize(text: string): void {
+  if (utf8ToBytes(text).length > MAX_LNURL_RESPONSE_BYTES) {
+    throw tooLarge();
+  }
 }
 
 /**
@@ -28,9 +57,18 @@ export async function lnurlGetJson(
       code: `http_${response.status}`,
     });
   }
+  checkContentLength(response);
+  let text: string;
+  try {
+    // Without a trustworthy Content-Length the body is still read once, then size-checked.
+    text = await response.text();
+  } catch (error) {
+    throw new SparkRequestError("lnurl request failed", { cause: error });
+  }
+  checkBodySize(text);
   let parsed: unknown;
   try {
-    parsed = await response.json();
+    parsed = JSON.parse(text);
   } catch (error) {
     throw new SparkRequestError("lnurl response: body is not valid JSON", {
       code: "unexpected_response",
@@ -72,7 +110,9 @@ export async function lnurlSendJson(
   } catch (error) {
     throw new SparkRequestError("lnurl request failed", { cause: error });
   }
+  checkContentLength(response);
   const text = await response.text().catch(() => "");
+  checkBodySize(text);
   if (!response.ok) {
     const detail = serverErrorText(text);
     throw new SparkRequestError(

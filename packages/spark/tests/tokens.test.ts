@@ -17,9 +17,10 @@ import {
   ProtectedChallengeSchema,
   SparkAuthnService,
 } from "../src/proto/gen/spark_authn_pb.ts";
-import { Network } from "../src/proto/gen/spark_pb.ts";
+import { Network, PageResponseSchema } from "../src/proto/gen/spark_pb.ts";
 import {
   CommitStatus,
+  QueryTokenOutputsResponseSchema,
   SparkTokenService,
   TokenOutputStatus,
 } from "../src/proto/gen/spark_token_pb.ts";
@@ -110,7 +111,7 @@ function makeOutput(
   overrides?: {
     tokenIdentifier?: Uint8Array;
     prevVout?: number;
-    status?: "available" | "pending-outbound";
+    status?: "available" | "pending-outbound" | "unknown";
   },
 ): SparkTokenOutput {
   return {
@@ -120,7 +121,7 @@ function makeOutput(
     prevTransactionHash: hexToBytes("ee".repeat(32)),
     prevTransactionVout: overrides?.prevVout ?? 0,
     ownerPublicKey: OWNER,
-    ...(overrides?.status === undefined ? {} : { status: overrides.status }),
+    status: overrides?.status ?? "available",
   };
 }
 
@@ -135,8 +136,13 @@ describe("selectTokenOutputs", () => {
     expect(selectTokenOutputs(outputs, 60n).map((o) => o.id)).toStrictEqual(["b", "c"]);
   });
 
-  test("skips pending-outbound outputs", () => {
-    const outputs = [makeOutput("a", 50n), makeOutput("b", 50n, { status: "pending-outbound" })];
+  test("skips pending-outbound and unknown outputs", () => {
+    const outputs = [
+      makeOutput("a", 50n),
+      makeOutput("b", 50n, { status: "pending-outbound" }),
+      // An enum value the SDK does not recognize must never be spendable.
+      makeOutput("c", 50n, { status: "unknown" }),
+    ];
     expect(() => selectTokenOutputs(outputs, 80n)).toThrow(SparkInputError);
     expect(selectTokenOutputs(outputs, 50n).map((o) => o.id)).toStrictEqual(["a"]);
   });
@@ -493,6 +499,126 @@ describe("client.tokens", () => {
     expect(balances).toHaveLength(1);
     expect(balances[0]?.amount).toBe(30n);
     expect(balances[0]?.outputCount).toBe(1);
+    client.close();
+  });
+
+  test("outputs with an unrecognized status are listed but never spendable", async () => {
+    const client = clientWith({
+      query: () => ({
+        $typeName: "spark_token.QueryTokenOutputsResponse",
+        outputsWithPreviousTransactionData: [
+          tokenRow("o1", 30n),
+          // An enum value this SDK does not know must not count toward balances or selection.
+          tokenRow("o2", 20n, rawIdentifier, 99 as TokenOutputStatus),
+          tokenRow("o3", 5n, rawIdentifier, TokenOutputStatus.UNSPECIFIED),
+        ],
+      }),
+    });
+    const outputs = await client.tokens.outputs({ tokenIdentifier: identifier });
+    expect(outputs).toHaveLength(3);
+    expect(outputs[1]?.status).toBe("unknown");
+    const balances = await client.tokens.balances();
+    expect(balances).toHaveLength(1);
+    expect(balances[0]?.amount).toBe(30n);
+    expect(balances[0]?.outputCount).toBe(1);
+    client.close();
+  });
+
+  test("outputs rejects rows with malformed fields", async () => {
+    const cases: Array<{ name: string; row: Record<string, unknown>; message: string }> = [
+      {
+        name: "empty id",
+        row: { ...tokenRow("o1", 30n), output: { ...tokenRow("o1", 30n).output, id: "" } },
+        message: "token output: missing id",
+      },
+      {
+        name: "short previous transaction hash",
+        row: { ...tokenRow("o1", 30n), previousTransactionHash: new Uint8Array(31) },
+        message: "token output: previous transaction hash is not 32 bytes",
+      },
+      {
+        name: "short owner public key",
+        row: {
+          ...tokenRow("o1", 30n),
+          output: { ...tokenRow("o1", 30n).output, ownerPublicKey: new Uint8Array(32) },
+        },
+        message: "token output: owner public key is not 33 bytes",
+      },
+    ];
+    for (const testCase of cases) {
+      const client = clientWith({
+        query: () =>
+          create(QueryTokenOutputsResponseSchema, {
+            outputsWithPreviousTransactionData: [testCase.row as ReturnType<typeof tokenRow>],
+          }),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- each case needs its own client
+      await expect(client.tokens.outputs({ tokenIdentifier: identifier })).rejects.toThrow(
+        testCase.message,
+      );
+      client.close();
+    }
+  });
+
+  test("outputs page through an advancing cursor", async () => {
+    const cursors: string[] = [];
+    const client = clientWith({
+      query: (req) => {
+        const { cursor } = (req as unknown as { pageRequest: { cursor: string } }).pageRequest;
+        cursors.push(cursor);
+        // Appending "1" advances the cursor; on the last page nextCursor is ignored anyway.
+        const last = cursor === "11";
+        return create(QueryTokenOutputsResponseSchema, {
+          outputsWithPreviousTransactionData: [tokenRow(`o-${cursor}`, 1n)],
+          pageResponse: create(PageResponseSchema, {
+            hasNextPage: !last,
+            nextCursor: `${cursor}1`,
+          }),
+        });
+      },
+    });
+    const outputs = await client.tokens.outputs({ tokenIdentifier: identifier });
+    expect(outputs).toHaveLength(3);
+    expect(cursors).toStrictEqual(["", "1", "11"]);
+    client.close();
+  });
+
+  test("outputs throws on a non-advancing cursor", async () => {
+    const client = clientWith({
+      query: () =>
+        create(QueryTokenOutputsResponseSchema, {
+          outputsWithPreviousTransactionData: [tokenRow("o1", 1n)],
+          pageResponse: create(PageResponseSchema, {
+            hasNextPage: true,
+            nextCursor: "",
+          }),
+        }),
+    });
+    await expect(client.tokens.outputs({ tokenIdentifier: identifier })).rejects.toThrow(
+      "non-advancing cursor",
+    );
+    client.close();
+  });
+
+  test("outputs throws when the coordinator never stops paging", async () => {
+    let pages = 0;
+    const client = clientWith({
+      query: (req) => {
+        pages += 1;
+        const { cursor } = (req as unknown as { pageRequest: { cursor: string } }).pageRequest;
+        return create(QueryTokenOutputsResponseSchema, {
+          outputsWithPreviousTransactionData: [tokenRow(`o-${pages}`, 1n)],
+          pageResponse: create(PageResponseSchema, {
+            hasNextPage: true,
+            nextCursor: `${cursor}1`,
+          }),
+        });
+      },
+    });
+    await expect(client.tokens.outputs({ tokenIdentifier: identifier })).rejects.toThrow(
+      "did not stop returning full pages",
+    );
+    expect(pages).toBe(1000);
     client.close();
   });
 

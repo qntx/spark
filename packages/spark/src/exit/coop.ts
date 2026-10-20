@@ -33,6 +33,7 @@ import { mapTransfer } from "../transfer/model.ts";
 import type { SparkTransfer } from "../transfer/model.ts";
 import {
   assertCommittedTransfer,
+  assertLiveTransfer,
   queryCommittedTransfer,
   queryTransferById,
 } from "../transfer/query.ts";
@@ -257,6 +258,16 @@ async function resumeCommittedExit(
   if (COOP_EXIT_FAILED.has(request.status)) {
     throw new SparkError(`coop exit: ssp request for transfer ${transfer.id} is ${request.status}`);
   }
+  // The SSP request record must be bound to the committed transfer we probed — dedupe on the
+  // external id should guarantee it, but a record carrying a different transfer id would mean the
+  // payout belongs to an exit we did not commit.
+  const bound = await ssp.coopExitRequest(request.id);
+  if (bound.transferId !== undefined && bound.transferId !== transfer.id) {
+    throw new SparkError(
+      `coop exit: ssp request ${request.id} is bound to transfer ${bound.transferId}, ` +
+        `not the committed ${transfer.id}`,
+    );
+  }
 
   const payoutSats = payoutSatsForAddress(request.rawCoopExitTransaction, options.address, network);
   validateCoopExitPayoutTransaction({
@@ -339,6 +350,7 @@ export async function cooperativeExit(
       transferId: options.transferId,
     });
     if (committed !== undefined) {
+      assertLiveTransfer(committed);
       return resumeCommittedExit(deps, options, committed);
     }
   }

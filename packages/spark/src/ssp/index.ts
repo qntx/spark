@@ -1161,12 +1161,17 @@ function parseCoopExitResult(request: JsonObject, field: string): SspCoopExitRes
  * (`ssp-challenge`) → VerifyChallenge, sends `Authorization: Bearer <session token>`, and
  * re-authenticates once on a 401. Only the queries this stage needs are supported.
  */
+/** Whole-round-trip bound for every GraphQL POST to the SSP. */
+const SSP_REQUEST_TIMEOUT_MS = 60_000;
+
 export function createSspClient(options: {
   readonly baseUrl: string;
   readonly graphqlPath: string;
   readonly signer: SparkSigner;
   readonly fetch: typeof globalThis.fetch;
   readonly now?: () => number;
+  /** Whole-round-trip bound per GraphQL POST; defaults to {@link SSP_REQUEST_TIMEOUT_MS}. */
+  readonly requestTimeoutMs?: number;
 }): SspClient {
   const now = options.now ?? (() => Date.now());
   const endpoint = `${options.baseUrl.replace(/\/+$/, "")}/${options.graphqlPath.replace(/^\/+/, "")}`;
@@ -1185,50 +1190,74 @@ export function createSspClient(options: {
     if (authed && sessionToken !== undefined) {
       headers["Authorization"] = `Bearer ${sessionToken}`;
     }
-    let response: Response;
+    // AbortController + setTimeout is the Hermes-safe way to bound the whole round trip —
+    // request and body read — without an injected timer.
+    const timeout = new AbortController();
+    const timer = setTimeout(
+      () => timeout.abort(),
+      options.requestTimeoutMs ?? SSP_REQUEST_TIMEOUT_MS,
+    );
     try {
-      response = await options.fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ operationName, query, variables }),
-      });
-    } catch (error) {
-      throw new SparkRequestError("ssp request failed", { cause: error });
+      let response: Response;
+      try {
+        response = await options.fetch(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ operationName, query, variables }),
+          signal: timeout.signal,
+        });
+      } catch (error) {
+        if (timeout.signal.aborted) {
+          throw new SparkRequestError("ssp request timed out", {
+            code: "deadline_exceeded",
+            cause: error,
+          });
+        }
+        throw new SparkRequestError("ssp request failed", { cause: error });
+      }
+      if (response.status === 401) {
+        throw new SparkRequestError("ssp request unauthorized", {
+          code: "unauthenticated",
+        });
+      }
+      if (response.status !== 200) {
+        throw new SparkRequestError(`ssp request failed with status ${response.status}`, {
+          code: `http_${response.status}`,
+        });
+      }
+      let parsed: unknown;
+      try {
+        parsed = await response.json();
+      } catch (error) {
+        if (timeout.signal.aborted) {
+          throw new SparkRequestError("ssp request timed out", {
+            code: "deadline_exceeded",
+            cause: error,
+          });
+        }
+        throw new SparkRequestError("ssp response: body is not valid JSON", {
+          code: "unexpected_response",
+          cause: error,
+        });
+      }
+      const body = asObject(parsed, "body");
+      const { errors } = body;
+      if (Array.isArray(errors) && errors.length > 0) {
+        const first = asObject(errors[0], "errors[0]");
+        const { extensions } = first;
+        const code =
+          typeof extensions === "object" && extensions !== null
+            ? asObject(extensions, "extensions")["code"]
+            : undefined;
+        throw new SparkRequestError(
+          `ssp error: ${serverErrorText(asString(first["message"], "errors[0].message"))}`,
+          typeof code === "string" ? { code: code.toLowerCase() } : {},
+        );
+      }
+      return asObject(body["data"], "data");
+    } finally {
+      clearTimeout(timer);
     }
-    if (response.status === 401) {
-      throw new SparkRequestError("ssp request unauthorized", {
-        code: "unauthenticated",
-      });
-    }
-    if (response.status !== 200) {
-      throw new SparkRequestError(`ssp request failed with status ${response.status}`, {
-        code: `http_${response.status}`,
-      });
-    }
-    let parsed: unknown;
-    try {
-      parsed = await response.json();
-    } catch (error) {
-      throw new SparkRequestError("ssp response: body is not valid JSON", {
-        code: "unexpected_response",
-        cause: error,
-      });
-    }
-    const body = asObject(parsed, "body");
-    const { errors } = body;
-    if (Array.isArray(errors) && errors.length > 0) {
-      const first = asObject(errors[0], "errors[0]");
-      const { extensions } = first;
-      const code =
-        typeof extensions === "object" && extensions !== null
-          ? asObject(extensions, "extensions")["code"]
-          : undefined;
-      throw new SparkRequestError(
-        `ssp error: ${serverErrorText(asString(first["message"], "errors[0].message"))}`,
-        typeof code === "string" ? { code: code.toLowerCase() } : {},
-      );
-    }
-    return asObject(body["data"], "data");
   }
 
   async function authenticate(): Promise<void> {

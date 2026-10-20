@@ -176,6 +176,11 @@ export function createLightningAddressServer(options: {
     ]);
   }
 
+  /**
+   * Claims the signed statement before anything else — replay protection burns the signature
+   * unconditionally, so a registration that then loses a name race still consumes its statement and
+   * the caller must sign a fresh one (its timestamp window has moved on anyway).
+   */
   async function claimAndStore(
     pubkeyHex: string,
     message: string,

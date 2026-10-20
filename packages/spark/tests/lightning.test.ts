@@ -1125,6 +1125,37 @@ describe("payLightningInvoice", () => {
     expect(payment.transferId).toBe("0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee");
   });
 
+  test("a terminal transfer under the caller's transfer id demands a fresh id", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const transferId = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+    const returned = transferProto({
+      id: transferId,
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      status: TransferStatus.RETURNED,
+      leaves: [leaf],
+      totalValue: 1007n,
+    });
+    const { deps } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: returned,
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run on a terminal probe");
+      },
+    });
+    await expect(
+      payLightningInvoice(deps, { invoice, maxFeeSats: 200, transferId }),
+    ).rejects.toThrow(`transfer ${transferId} was RETURNED; retry with a new transferId`);
+  });
+
   test("a probed swap whose committed fee exceeds maxFeeSats is rejected", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();

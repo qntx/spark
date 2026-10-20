@@ -10,6 +10,8 @@ import { base64 } from "@scure/base";
 import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
+import type { ClientContext } from "../src/client/context.ts";
+import { claimInboundTransfer } from "../src/client/deposits.ts";
 import { createSparkClientWith } from "../src/client/index.ts";
 import {
   createCurrentTimelockRefundTxs,
@@ -25,6 +27,7 @@ import {
   sendLeafSigningDigest,
   staticDepositStatementDigest,
 } from "../src/core/hashing/statements.ts";
+import { createMutex } from "../src/core/mutex.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import type { DepositCoordinator } from "../src/deposit/index.ts";
 import {
@@ -759,6 +762,204 @@ describe("claimStaticDeposit", () => {
       { txid, vout: 0, maxFeeSats: 500 },
     );
     expect(result.feeSats).toBe(Number(UTXO_SATS) - QUOTE_CREDIT);
+    signer.dispose();
+  });
+});
+
+describe("claimInboundTransfer", () => {
+  const CREDIT = 4800;
+
+  /** A pending SSP→identity transfer whose only distinguishing claim fixture is the leaf id. */
+  function inboundTransfer(options: {
+    id: string;
+    leafId: string;
+    receiverIdentity: Uint8Array;
+    sender?: Uint8Array;
+    totalSats?: bigint;
+    createdMs?: number;
+    status?: TransferStatus;
+  }): Transfer {
+    return create(TransferSchema, {
+      id: options.id,
+      senderIdentityPublicKey: options.sender ?? SSP_IDENTITY,
+      receiverIdentityPublicKey: options.receiverIdentity,
+      status: options.status ?? TransferStatus.SENDER_KEY_TWEAKED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: options.totalSats ?? BigInt(CREDIT),
+      createdTime: timestampFromMs(options.createdMs ?? 1),
+      leaves: [
+        create(TransferLeafSchema, {
+          leaf: create(TreeNodeSchema, {
+            id: options.leafId,
+            treeId: `tree-${options.leafId}`,
+            value: BigInt(CREDIT),
+            nodeTx: new Uint8Array(4),
+            refundTx: new Uint8Array(4),
+            verifyingPublicKey: new Uint8Array(33).fill(5),
+            ownerIdentityPublicKey: options.receiverIdentity,
+            ownerSigningPublicKey: new Uint8Array(33).fill(6),
+            signingKeyshare: {
+              ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+              threshold: THRESHOLD,
+              publicKey: SHARE_PUB,
+              publicShares: {},
+            },
+            status: "AVAILABLE",
+            network: Network.REGTEST,
+            treenodeStatus: TreeNodeStatus.AVAILABLE,
+          }),
+          secretCipher: new Uint8Array(8),
+          sig: { case: "signature" as const, value: new Uint8Array(64) },
+        }),
+      ],
+    });
+  }
+
+  function inboundContext(signer: SparkSigner, impl: SparkImpl): ClientContext {
+    return {
+      coordinatorConnection: { spark: fakeSpark(impl) },
+      signer,
+      network: "regtest",
+      config: { ssp: { identityPublicKey: SSP_IDENTITY } },
+      leafLock: createMutex(),
+      sleep: async () => Promise.resolve(),
+      transferCoordinator: {
+        spark: fakeSpark(impl),
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+      },
+      storeChainsFor: async () => Promise.resolve(),
+    } as unknown as ClientContext;
+  }
+
+  test("claims the oldest SSP transfer whose total matches the credit", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const pending = [
+      // Newer matching transfer first — selection must sort by created time, not response order.
+      inboundTransfer({
+        id: "t-new",
+        leafId: "leaf-new",
+        receiverIdentity: identity,
+        createdMs: 200,
+      }),
+      inboundTransfer({
+        id: "t-old",
+        leafId: "leaf-old",
+        receiverIdentity: identity,
+        createdMs: 100,
+      }),
+      // Distractors the credit amount and sender rule out.
+      inboundTransfer({
+        id: "t-other-total",
+        leafId: "leaf-other",
+        receiverIdentity: identity,
+        totalSats: 9999n,
+        createdMs: 50,
+      }),
+      inboundTransfer({
+        id: "t-other-sender",
+        leafId: "leaf-other-sender",
+        receiverIdentity: identity,
+        sender: new Uint8Array(33).fill(8),
+        createdMs: 40,
+      }),
+    ];
+    const context = inboundContext(signer, {
+      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: pending }),
+    });
+    // The selected transfer reaches claimTransfer and fails there on its (stub) leaf signature —
+    // the leaf id in the error proves the oldest matching candidate was picked.
+    await expect(claimInboundTransfer(context, CREDIT)).rejects.toThrow("leaf leaf-old");
+    signer.dispose();
+  });
+
+  test("returns no leaves when no pending transfer matches the credit", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const context = inboundContext(signer, {
+      query_pending_transfers: () =>
+        create(QueryTransfersResponseSchema, {
+          transfers: [
+            inboundTransfer({
+              id: "t-1",
+              leafId: "leaf-1",
+              receiverIdentity: identity,
+              totalSats: 100n,
+            }),
+          ],
+        }),
+    });
+    await expect(claimInboundTransfer(context, CREDIT)).resolves.toStrictEqual([]);
+    signer.dispose();
+  });
+
+  test("rejects a reported transfer whose total differs from the credit", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const context = inboundContext(signer, {
+      query_transfers_by_id: () =>
+        create(QueryTransfersResponseSchema, {
+          transfers: [
+            inboundTransfer({
+              id: "t-reported",
+              leafId: "leaf-reported",
+              receiverIdentity: identity,
+              totalSats: 100n,
+            }),
+          ],
+        }),
+    });
+    await expect(claimInboundTransfer(context, CREDIT, "t-reported")).rejects.toThrow(
+      "does not match the credited 4800 sats",
+    );
+    signer.dispose();
+  });
+
+  test("rejects a reported transfer that is not the SSP's payment to us", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const context = inboundContext(signer, {
+      query_transfers_by_id: () =>
+        create(QueryTransfersResponseSchema, {
+          transfers: [
+            inboundTransfer({
+              id: "t-reported",
+              leafId: "leaf-reported",
+              receiverIdentity: identity,
+              sender: new Uint8Array(33).fill(8),
+            }),
+          ],
+        }),
+    });
+    await expect(claimInboundTransfer(context, CREDIT, "t-reported")).rejects.toThrow(
+      "not the SSP's payment to us",
+    );
+    signer.dispose();
+  });
+
+  test("accepts a reported transfer that matches id, sender and credit", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const context = inboundContext(signer, {
+      query_transfers_by_id: () =>
+        create(QueryTransfersResponseSchema, {
+          transfers: [
+            inboundTransfer({
+              id: "t-reported",
+              leafId: "leaf-reported",
+              receiverIdentity: identity,
+            }),
+          ],
+        }),
+    });
+    // Validation passed — the claim itself fails on the stub leaf signature, naming its leaf.
+    await expect(claimInboundTransfer(context, CREDIT, "t-reported")).rejects.toThrow(
+      "leaf leaf-reported",
+    );
     signer.dispose();
   });
 });

@@ -1,6 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { createRouterTransport } from "@connectrpc/connect";
+import { createClient, createRouterTransport } from "@connectrpc/connect";
 import { mod } from "@noble/curves/abstract/modular.js";
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -20,6 +20,7 @@ import {
 } from "../src/core/bitcoin/index.ts";
 import { proofOfPossessionDigest } from "../src/core/hashing/statements.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { queryUnusedDepositAddresses } from "../src/deposit/index.ts";
 import { SparkInputError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkStore } from "../src/exit/store.ts";
@@ -395,6 +396,73 @@ describe("deposits.unused", () => {
       leafId: "leaf-0",
       verifyingPublicKey: entryKey,
     });
+    signer.dispose();
+  });
+
+  test("unused throws when the coordinator never stops returning full pages", async () => {
+    const signer = await testSigner();
+    let pages = 0;
+    const entryKey = secp256k1.getPublicKey(new Uint8Array(32).fill(2), true);
+    const entryAddress = p2trAddressFromPublicKey(entryKey, "regtest");
+    // Every page full and advancing — the walk must give up at its page bound instead of
+    // paginating forever. Three pages stand in for MAX_PAGES: the per-entry script checks
+    // are the slow part of a real 1000-page walk, not the loop.
+    const spark = createClient(
+      SparkService,
+      createRouterTransport((router) => {
+        router.service(SparkService, {
+          query_unused_deposit_addresses: (req: { offset: bigint }) => {
+            pages += 1;
+            const offset = Number(req.offset);
+            return create(QueryUnusedDepositAddressesResponseSchema, {
+              depositAddresses: Array.from({ length: 100 }, (_, i) =>
+                create(DepositAddressQueryResultSchema, {
+                  depositAddress: entryAddress,
+                  userSigningPublicKey: new Uint8Array(33).fill(1),
+                  verifyingPublicKey: entryKey,
+                  leafId: `leaf-${offset + i}`,
+                }),
+              ),
+              offset: BigInt(offset + 100),
+            });
+          },
+        });
+      }),
+    );
+    await expect(
+      queryUnusedDepositAddresses({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        coordinatorIdentifier: COORDINATOR_ID,
+        maxPages: 3,
+      }),
+    ).rejects.toThrow("did not stop returning full pages");
+    expect(pages).toBe(3);
+    signer.dispose();
+  });
+
+  test("unused throws when the coordinator's offset does not advance", async () => {
+    const signer = await testSigner();
+    const entryKey = secp256k1.getPublicKey(new Uint8Array(32).fill(2), true);
+    const entryAddress = p2trAddressFromPublicKey(entryKey, "regtest");
+    const client = makeClient(signer, {
+      // A full page whose offset rewinds would otherwise paginate forever.
+      query_unused_deposit_addresses: () =>
+        create(QueryUnusedDepositAddressesResponseSchema, {
+          depositAddresses: Array.from({ length: 100 }, (_, i) =>
+            create(DepositAddressQueryResultSchema, {
+              depositAddress: entryAddress,
+              userSigningPublicKey: new Uint8Array(33).fill(1),
+              verifyingPublicKey: entryKey,
+              leafId: `leaf-${i}`,
+            }),
+          ),
+          offset: 0n,
+        }),
+    });
+    await expect(client.deposits.unused()).rejects.toThrow("non-advancing offset");
     signer.dispose();
   });
 

@@ -260,6 +260,7 @@ function transferProto(options: {
   sender: Uint8Array;
   receiver: Uint8Array;
   type?: TransferType;
+  status?: TransferStatus;
   leaves?: ReadonlyArray<SparkLeaf>;
   totalValue?: bigint;
 }): Transfer {
@@ -267,7 +268,7 @@ function transferProto(options: {
     id: options.id,
     senderIdentityPublicKey: options.sender,
     receiverIdentityPublicKey: options.receiver,
-    status: TransferStatus.SENDER_KEY_TWEAKED,
+    status: options.status ?? TransferStatus.SENDER_KEY_TWEAKED,
     type: options.type ?? TransferType.COOPERATIVE_EXIT,
     network: Network.REGTEST,
     totalValue: options.totalValue ?? 0n,
@@ -498,7 +499,7 @@ async function exitDeps(overrides: {
     coopExitRequestId: string;
     userOutboundTransferExternalId: string;
   }) => { status: string } | Promise<{ status: string }>;
-  exitStatus?: (id: string) => { status: string };
+  exitStatus?: (id: string) => { status: string; transferId?: string };
   requestStatus?: string;
   identityPublicKey?: Uint8Array;
 }): Promise<Setup> {
@@ -1284,6 +1285,75 @@ describe("cooperativeExit", () => {
       }),
     ).rejects.toThrow("does not pay the withdrawal address");
     expect(spendAmounts).toStrictEqual([]);
+    expect(completions).toStrictEqual([]);
+  });
+
+  test("a terminal transfer under the caller's transfer id demands a fresh id", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-t", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      status: TransferStatus.RETURNED,
+      leaves: [leaf],
+      totalValue: 100_000n,
+    });
+    const { deps, completions } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow(`was RETURNED; retry with a new transferId`);
+    expect(completions).toStrictEqual([]);
+  });
+
+  test("a resumed exit throws when the request record is bound to another transfer", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-b", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+    });
+    const { deps, completions } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      // The request record names a different transfer: the payout belongs to an exit we did
+      // not commit, so completing it would spend the wrong funds.
+      exitStatus: () => ({
+        status: "INITIATED",
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-0000000000ff",
+      }),
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow("is bound to transfer");
     expect(completions).toStrictEqual([]);
   });
 
