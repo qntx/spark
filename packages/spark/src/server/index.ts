@@ -80,6 +80,9 @@ function lnurlError(reason: string): LightningAddressResult {
   return result(200, { status: "ERROR", reason });
 }
 
+/** `settlePending` polls at most this many invoice statuses in parallel. */
+const SETTLE_CONCURRENCY = 8;
+
 function asStringField(body: Record<string, unknown>, field: string): string {
   const value = body[field];
   if (typeof value !== "string") {
@@ -365,7 +368,10 @@ export function createLightningAddressServer(options: {
   }
 
   async function verify(paymentHashHex: string): Promise<LightningAddressResult> {
-    const record = await store.invoiceByPaymentHash(paymentHashHex);
+    const hash = paymentHashHex.toLowerCase();
+    const record = /^[0-9a-f]{64}$/u.test(hash)
+      ? await store.invoiceByPaymentHash(hash)
+      : undefined;
     if (record === undefined) {
       return lnurlError("Not found");
     }
@@ -377,24 +383,37 @@ export function createLightningAddressServer(options: {
     });
   }
 
+  async function settleOne(
+    record: LightningAddressInvoice,
+  ): Promise<LightningAddressInvoice | undefined> {
+    try {
+      const status = await client.lightning.receiveStatus(record.requestId);
+      const { preimage } = status;
+      if (preimage === undefined) {
+        return undefined;
+      }
+      if (!equalBytes(sha256(preimage), hexToBytes(record.paymentHash))) {
+        return undefined;
+      }
+      return await store.settleInvoice(record.paymentHash, bytesToHex(preimage));
+    } catch {
+      // A failed read (or a failed store write) leaves the invoice pending for the next round.
+      return undefined;
+    }
+  }
+
   async function settlePending(): Promise<ReadonlyArray<LightningAddressInvoice>> {
     const pending = await store.pendingInvoices(now());
-    const statuses = await Promise.all(
-      pending.map(async (record) => client.lightning.receiveStatus(record.requestId)),
-    );
-    const settled = await Promise.all(
-      pending.map(async (record, index) => {
-        const preimage = statuses[index]?.preimage;
-        if (preimage === undefined) {
-          return undefined;
-        }
-        if (!equalBytes(sha256(preimage), hexToBytes(record.paymentHash))) {
-          return undefined;
-        }
-        return store.settleInvoice(record.paymentHash, bytesToHex(preimage));
-      }),
-    );
-    return settled.filter((invoice): invoice is LightningAddressInvoice => invoice !== undefined);
+    const settled: LightningAddressInvoice[] = [];
+    for (let start = 0; start < pending.length; start += SETTLE_CONCURRENCY) {
+      const chunk = pending.slice(start, start + SETTLE_CONCURRENCY);
+      // oxlint-disable-next-line no-await-in-loop -- chunks are sequential to bound concurrency
+      const results = await Promise.all(chunk.map(settleOne));
+      settled.push(
+        ...results.filter((invoice): invoice is LightningAddressInvoice => invoice !== undefined),
+      );
+    }
+    return settled;
   }
 
   return { register, unregister, payRequest, invoice, verify, settlePending };
