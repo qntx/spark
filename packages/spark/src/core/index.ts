@@ -3,6 +3,21 @@ export { encodeSparkAddress, decodeSparkAddress, verifySparkAddressSignature } f
 export { encodeTokenIdentifier, decodeTokenIdentifier } from "./token-identifier.ts";
 export type { SparkTokenIdentifierData } from "./token-identifier.ts";
 export { decodeBolt11, isExpired } from "./bolt11.ts";
+export {
+  LIGHTNING_ADDRESS_MAX_DESCRIPTION_LENGTH,
+  LIGHTNING_ADDRESS_USERNAME_PATTERN,
+  LIGHTNING_ADDRESS_VALIDITY_SECS,
+  checkLightningAddressDomain,
+  checkLightningAddressUsername,
+  lightningAddressDescriptionHash,
+  lightningAddressMessage,
+  lightningAddressMessageDigest,
+  lightningAddressRegisterMessage,
+  lightningAddressStatementHash,
+  lightningAddressTimestampFresh,
+  lightningAddressUnregisterMessage,
+} from "./lightning-address.ts";
+export type { LightningAddressStatement } from "./lightning-address.ts";
 export type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "./network.ts";
 export type { SparkAddress } from "./address.ts";
 export type { SparkInvoiceFields, SparkPayment } from "./invoice.ts";
