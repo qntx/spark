@@ -80,8 +80,14 @@ const RETRY_MAX_MS = 10_000;
 const EVENT_RECONNECT_BASE_MS = 1000;
 const EVENT_RECONNECT_MAX_MS = 60_000;
 
-/** Overall deadline applied to every unary call without an explicit `timeoutMs`. */
-const DEFAULT_RPC_TIMEOUT_MS = 60_000;
+/**
+ * Overall deadline applied to every unary call without an explicit `timeoutMs`. Mutating calls can
+ * legitimately run long — `start_transfer_v2` carries up to ~3000 signing jobs for a 1000-leaf
+ * transfer. A deadline on a mutating call is safe only because every mutating path has a
+ * probe/recovery step on retry: send and lightning payments re-query for the committed transfer,
+ * cooperative exits re-request the SSP record, and claims recover leaves already tweaked.
+ */
+const DEFAULT_RPC_TIMEOUT_MS = 120_000;
 
 /**
  * The SO emits a heartbeat event every 5s while a `subscribe_to_events` stream is live (upstream
@@ -452,16 +458,7 @@ export function sparkEvents(
     if (idleTimer !== undefined) {
       clearTimeout(idleTimer);
     }
-    const timer = setTimeout(() => attemptAbort?.abort(), idleTimeoutMs);
-    // Node's Timeout keeps a process alive; a background event stream must not.
-    const rawTimer: unknown = timer;
-    if (typeof rawTimer === "object" && rawTimer !== null && "unref" in rawTimer) {
-      const unref: unknown = rawTimer.unref;
-      if (typeof unref === "function") {
-        Reflect.apply(unref, rawTimer, []);
-      }
-    }
-    idleTimer = timer;
+    idleTimer = setTimeout(() => attemptAbort?.abort(), idleTimeoutMs);
   };
 
   /** Backoff-then-resubscribe shared by stream errors and clean closes. */
