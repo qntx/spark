@@ -36,7 +36,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Inside a workflow_call, github.workflow is the CALLER's name, so a
+  # github.workflow-keyed group would land the called jobs in the caller's own
+  # concurrency group and deadlock. Standalone runs dedupe per ref; calls get
+  # a group unique to the calling run.
+  group: ${{ github.workflow == 'Native' && format('native-{0}', github.ref) || format('native-call-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
