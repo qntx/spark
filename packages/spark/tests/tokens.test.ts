@@ -573,6 +573,49 @@ describe("broadcastPartialTokenTransaction recovery", () => {
     ).rejects.toThrow(SparkRequestError);
   });
 
+  test("a matching transaction that has not finalized fails instead of reporting success", async () => {
+    const assertPending = async (
+      status: (typeof TokenTransactionStatus)[keyof typeof TokenTransactionStatus],
+    ): Promise<void> => {
+      const { client } = recoverableTokenClient({
+        broadcasts: [LOST],
+        rows: [statusRow(v2TxFor(partial), status, committedHash)],
+      });
+      const failure = await broadcastPartialTokenTransaction({
+        token: client,
+        ...broadcastOptions,
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SparkRequestError);
+      expect((failure as Error).message).toContain("still in progress");
+      expect((failure as Error).message).toContain(bytesToHex(committedHash));
+      expect((failure as Error).message).toContain("out-1");
+    };
+    await assertPending(TokenTransactionStatus.TOKEN_TRANSACTION_STARTED);
+    await assertPending(TokenTransactionStatus.TOKEN_TRANSACTION_SIGNED);
+    await assertPending(TokenTransactionStatus.TOKEN_TRANSACTION_REVEALED);
+    await assertPending(TokenTransactionStatus.TOKEN_TRANSACTION_UNKNOWN);
+  });
+
+  test("a matching row without a transaction hash reports the in-progress tx as pending", async () => {
+    const { client } = recoverableTokenClient({
+      broadcasts: [LOST],
+      rows: [
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_STARTED,
+          new Uint8Array(0),
+        ),
+      ],
+    });
+    const failure = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SparkRequestError);
+    expect((failure as Error).message).toContain("pending");
+    expect((failure as Error).message).toContain("still in progress");
+  });
+
   test("definitive rejections are rethrown without retry or probe", async () => {
     const rejected = () => {
       throw new SparkRequestError("invalid signature", { code: "invalid_argument" });

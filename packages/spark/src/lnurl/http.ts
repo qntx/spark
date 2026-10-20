@@ -12,6 +12,13 @@ export function isJsonObject(value: unknown): value is JsonObject {
 /** LNURL responses are small JSON documents; a larger body is a hostile or broken endpoint. */
 export const MAX_LNURL_RESPONSE_BYTES: number = 256 * 1024;
 
+/** Whole-round-trip bound for every LNURL request — request and body read. */
+export const LNURL_REQUEST_TIMEOUT_MS = 30_000;
+
+function timedOut(): SparkRequestError {
+  return new SparkRequestError("lnurl request timed out", { code: "deadline_exceeded" });
+}
+
 function tooLarge(): SparkRequestError {
   return new SparkRequestError("lnurl response: body exceeds 256 KiB", {
     code: "unexpected_response",
@@ -46,48 +53,62 @@ export async function lnurlGetJson(
   url: string,
   fetch: typeof globalThis.fetch,
 ): Promise<JsonObject> {
-  let response: Response;
+  // AbortController + setTimeout is the Hermes-safe way to bound the whole round trip —
+  // request and body read — without an injected timer.
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), LNURL_REQUEST_TIMEOUT_MS);
   try {
-    response = await fetch(url);
-  } catch (error) {
-    throw new SparkRequestError("lnurl request failed", { cause: error });
+    let response: Response;
+    try {
+      response = await fetch(url, { signal: timeout.signal });
+    } catch (error) {
+      if (timeout.signal.aborted) {
+        throw timedOut();
+      }
+      throw new SparkRequestError("lnurl request failed", { cause: error });
+    }
+    if (!response.ok) {
+      throw new SparkRequestError(`lnurl request failed with status ${response.status}`, {
+        code: `http_${response.status}`,
+      });
+    }
+    checkContentLength(response);
+    let text: string;
+    try {
+      // Without a trustworthy Content-Length the body is still read once, then size-checked.
+      text = await response.text();
+    } catch (error) {
+      if (timeout.signal.aborted) {
+        throw timedOut();
+      }
+      throw new SparkRequestError("lnurl request failed", { cause: error });
+    }
+    checkBodySize(text);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new SparkRequestError("lnurl response: body is not valid JSON", {
+        code: "unexpected_response",
+        cause: error,
+      });
+    }
+    if (!isJsonObject(parsed)) {
+      throw new SparkRequestError("lnurl response: body is not an object", {
+        code: "unexpected_response",
+      });
+    }
+    if (parsed["status"] === "ERROR") {
+      const { reason } = parsed;
+      throw new SparkRequestError(
+        `lnurl error: ${typeof reason === "string" ? serverErrorText(reason) : "no reason given"}`,
+        { code: "lnurl_error" },
+      );
+    }
+    return parsed;
+  } finally {
+    clearTimeout(timer);
   }
-  if (!response.ok) {
-    throw new SparkRequestError(`lnurl request failed with status ${response.status}`, {
-      code: `http_${response.status}`,
-    });
-  }
-  checkContentLength(response);
-  let text: string;
-  try {
-    // Without a trustworthy Content-Length the body is still read once, then size-checked.
-    text = await response.text();
-  } catch (error) {
-    throw new SparkRequestError("lnurl request failed", { cause: error });
-  }
-  checkBodySize(text);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    throw new SparkRequestError("lnurl response: body is not valid JSON", {
-      code: "unexpected_response",
-      cause: error,
-    });
-  }
-  if (!isJsonObject(parsed)) {
-    throw new SparkRequestError("lnurl response: body is not an object", {
-      code: "unexpected_response",
-    });
-  }
-  if (parsed["status"] === "ERROR") {
-    const { reason } = parsed;
-    throw new SparkRequestError(
-      `lnurl error: ${typeof reason === "string" ? serverErrorText(reason) : "no reason given"}`,
-      { code: "lnurl_error" },
-    );
-  }
-  return parsed;
 }
 
 /**
@@ -98,51 +119,69 @@ export async function lnurlGetJson(
 export async function lnurlSendJson(
   url: string,
   fetch: typeof globalThis.fetch,
-  options: { readonly method: string; readonly body: JsonObject },
+  options: {
+    readonly method: string;
+    readonly body: JsonObject;
+    /** Whole-round-trip bound; defaults to {@link LNURL_REQUEST_TIMEOUT_MS}. */
+    readonly timeoutMs?: number;
+  },
 ): Promise<JsonObject | undefined> {
-  let response: Response;
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), options.timeoutMs ?? LNURL_REQUEST_TIMEOUT_MS);
   try {
-    response = await fetch(url, {
-      method: options.method,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(options.body),
-    });
-  } catch (error) {
-    throw new SparkRequestError("lnurl request failed", { cause: error });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: options.method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(options.body),
+        signal: timeout.signal,
+      });
+    } catch (error) {
+      if (timeout.signal.aborted) {
+        throw timedOut();
+      }
+      throw new SparkRequestError("lnurl request failed", { cause: error });
+    }
+    checkContentLength(response);
+    const text = await response.text().catch(() => "");
+    if (timeout.signal.aborted) {
+      throw timedOut();
+    }
+    checkBodySize(text);
+    if (!response.ok) {
+      const detail = serverErrorText(text);
+      throw new SparkRequestError(
+        `lnurl request failed with status ${response.status}${detail === "" ? "" : `: ${detail}`}`,
+        { code: `http_${response.status}` },
+      );
+    }
+    if (text === "") {
+      return undefined;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new SparkRequestError("lnurl response: body is not valid JSON", {
+        code: "unexpected_response",
+        cause: error,
+      });
+    }
+    if (!isJsonObject(parsed)) {
+      throw new SparkRequestError("lnurl response: body is not an object", {
+        code: "unexpected_response",
+      });
+    }
+    if (parsed["status"] === "ERROR") {
+      const { reason } = parsed;
+      throw new SparkRequestError(
+        `lnurl error: ${typeof reason === "string" ? serverErrorText(reason) : "no reason given"}`,
+        { code: "lnurl_error" },
+      );
+    }
+    return parsed;
+  } finally {
+    clearTimeout(timer);
   }
-  checkContentLength(response);
-  const text = await response.text().catch(() => "");
-  checkBodySize(text);
-  if (!response.ok) {
-    const detail = serverErrorText(text);
-    throw new SparkRequestError(
-      `lnurl request failed with status ${response.status}${detail === "" ? "" : `: ${detail}`}`,
-      { code: `http_${response.status}` },
-    );
-  }
-  if (text === "") {
-    return undefined;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    throw new SparkRequestError("lnurl response: body is not valid JSON", {
-      code: "unexpected_response",
-      cause: error,
-    });
-  }
-  if (!isJsonObject(parsed)) {
-    throw new SparkRequestError("lnurl response: body is not an object", {
-      code: "unexpected_response",
-    });
-  }
-  if (parsed["status"] === "ERROR") {
-    const { reason } = parsed;
-    throw new SparkRequestError(
-      `lnurl error: ${typeof reason === "string" ? serverErrorText(reason) : "no reason given"}`,
-      { code: "lnurl_error" },
-    );
-  }
-  return parsed;
 }

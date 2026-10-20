@@ -2,9 +2,10 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
-import { expect, test } from "vite-plus/test";
+import { expect, test, vi } from "vite-plus/test";
 
 import { SparkInputError } from "../src/errors/index.ts";
+import { LNURL_REQUEST_TIMEOUT_MS } from "../src/lnurl/http.ts";
 import {
   decodeLnurl,
   encodeLnurl,
@@ -78,6 +79,41 @@ test("lnurlSendJson enforces the same response bound on both paths", async () =>
   await expect(
     lnurlSendJson("https://service.com/x", fetchText(big), { method: "POST", body: {} }),
   ).rejects.toThrow("body exceeds 256 KiB");
+});
+
+test("lnurlGetJson aborts a hung request at the timeout", async () => {
+  vi.useFakeTimers();
+  // A hung endpoint never resolves; only the round-trip abort ends the wait.
+  const fetch: typeof globalThis.fetch = async (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(new DOMException("The operation was aborted.", "AbortError")),
+      );
+    });
+  const pending = lnurlGetJson("https://service.com/x", fetch).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await vi.advanceTimersByTimeAsync(LNURL_REQUEST_TIMEOUT_MS);
+  const failure = await pending;
+  vi.useRealTimers();
+  expect(failure).toMatchObject({ name: "SparkRequestError", code: "deadline_exceeded" });
+});
+
+test("lnurlSendJson aborts a hung request at the configured timeout", async () => {
+  const fetch: typeof globalThis.fetch = async (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(new DOMException("The operation was aborted.", "AbortError")),
+      );
+    });
+  await expect(
+    lnurlSendJson("https://service.com/x", fetch, {
+      method: "POST",
+      body: {},
+      timeoutMs: 5,
+    }),
+  ).rejects.toMatchObject({ name: "SparkRequestError", code: "deadline_exceeded" });
 });
 
 // --- test-only BOLT-11 encoder ------------------------------------------------

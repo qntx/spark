@@ -5,7 +5,7 @@ import { equalBytes, numberToBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 import { compareBytes } from "../core/bytes.ts";
-import { hashFinalTokenTransaction, hashTokenTransactionV3 } from "../core/hashing/token.ts";
+import { hashFinalTokenTransaction } from "../core/hashing/token.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
 import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.ts";
@@ -375,7 +375,7 @@ async function probeCommittedTransfer(options: {
   readonly partial: PartialTokenTransaction;
   readonly inputOutputIds: ReadonlyArray<string>;
   readonly call?: CallOptions;
-}): Promise<{ transactionHash: string } | undefined> {
+}): Promise<{ transactionHash: string } | { inProgressHash: string } | undefined> {
   const inputs = options.partial.tokenInputs;
   if (inputs.case !== "transferInput") {
     return undefined;
@@ -421,15 +421,22 @@ async function probeCommittedTransfer(options: {
       continue;
     }
     const hash =
+      row.tokenTransactionHash.length > 0 ? bytesToHex(row.tokenTransactionHash) : "pending";
+    if (!sameInputSet(actualInputs, expectedInputs) || !sameV2Outputs(tx, options.partial)) {
+      throw new SparkError(
+        `broadcast_transaction: inputs were consumed by a different token transaction ${hash}`,
+      );
+    }
+    // Only a finalized row proves the broadcast committed — the row carries the final hash, never
+    // recompute it from a non-final transaction shape. A live non-final transaction spending the
+    // inputs is still in flight: it may finalize or expire, so the caller must not retry.
+    if (
+      row.status === TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED &&
       row.tokenTransactionHash.length > 0
-        ? bytesToHex(row.tokenTransactionHash)
-        : bytesToHex(hashTokenTransactionV3(tx));
-    if (sameInputSet(actualInputs, expectedInputs) && sameV2Outputs(tx, options.partial)) {
+    ) {
       return { transactionHash: hash };
     }
-    throw new SparkError(
-      `broadcast_transaction: inputs were consumed by a different token transaction ${hash}`,
-    );
+    return { inProgressHash: hash };
   }
   return undefined;
 }
@@ -514,7 +521,7 @@ export async function broadcastPartialTokenTransaction(options: {
       if (isDefinitiveBroadcastRejection(retryError)) {
         throw retryError;
       }
-      let recovered: { transactionHash: string } | undefined;
+      let recovered: { transactionHash: string } | { inProgressHash: string } | undefined;
       try {
         recovered = await probeCommittedTransfer({
           token: options.token,
@@ -531,9 +538,6 @@ export async function broadcastPartialTokenTransaction(options: {
         }
         recovered = undefined;
       }
-      if (recovered !== undefined) {
-        return recovered;
-      }
       const requestOptions: ErrorOptions & { code?: string; operator?: string } = {
         cause: error,
       };
@@ -544,6 +548,18 @@ export async function broadcastPartialTokenTransaction(options: {
         if (error.operator !== undefined) {
           requestOptions.operator = error.operator;
         }
+      }
+      if (recovered !== undefined) {
+        if ("transactionHash" in recovered) {
+          return recovered;
+        }
+        throw new SparkRequestError(
+          `token transaction ${recovered.inProgressHash} spending these inputs is still in ` +
+            `progress; check tokens.outputs() for input output ids ${inputOutputIds.join(
+              ",",
+            )} before retrying`,
+          requestOptions,
+        );
       }
       throw new SparkRequestError(
         `broadcast_transaction may have committed; check tokens.outputs() for input output ids ${inputOutputIds.join(
