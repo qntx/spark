@@ -42,6 +42,11 @@
       "import": "./dist/lnurl.mjs",
       "default": "./dist/lnurl.mjs"
     },
+    "./server": {
+      "types": "./dist/server.d.mts",
+      "import": "./dist/server.mjs",
+      "default": "./dist/server.mjs"
+    },
     "./signer": {
       "types": "./dist/signer.d.mts",
       "import": "./dist/signer.mjs",

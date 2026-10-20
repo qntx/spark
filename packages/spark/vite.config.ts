@@ -46,6 +46,7 @@ const config: UserConfig = defineConfig({
       crypto: "src/crypto/index.ts",
       signer: "src/signer/index.ts",
       lnurl: "src/lnurl/index.ts",
+      server: "src/server/index.ts",
     },
   },
 });
