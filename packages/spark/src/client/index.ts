@@ -164,7 +164,10 @@ export type SparkClient = {
     /**
      * `user_request` status of a send; `preimage` appears once the SSP settled it. Pass the
      * `LightningPayment` from `pay` — the request's invoice and preimage are verified against its
-     * payment hash, not the hash the SSP reports.
+     * payment hash, not the hash the SSP reports. `outcome` maps the SSP status to
+     * "pending"/"succeeded"/"failed"/"returned": "failed" means the payment will not settle but the
+     * funds are not back — keep polling until "returned" (≈5 min on hosted; the leaves then
+     * reappear in `leaves()` on the next sync).
      */
     readonly sendStatus: (request: LightningSendStatusRequest) => Promise<LightningSendStatus>;
     /** `user_request` status of a receive, with the inbound transfer id once present. */
@@ -245,7 +248,9 @@ export type SparkClient = {
     /**
      * Cooperatively exits leaves to `address`, deducting `speed`'s quoted fee from the payout.
      * `amountSats` exits exactly that much; omitting it exits the whole balance. Pass the same
-     * `transferId` to retry a call whose response was lost.
+     * `transferId` to retry a call whose response was lost — a committed exit resumes with the
+     * committed leaves. Note the SSP request expires ~2 minutes after creation unless the transfer
+     * commits: an uncommitted id is burned, retry with a fresh `transferId`.
      */
     readonly cooperativeExit: (options: {
       readonly address: string;

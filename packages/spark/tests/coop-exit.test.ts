@@ -261,6 +261,7 @@ function transferProto(options: {
   receiver: Uint8Array;
   type?: TransferType;
   leaves?: ReadonlyArray<SparkLeaf>;
+  totalValue?: bigint;
 }): Transfer {
   return create(TransferSchema, {
     id: options.id,
@@ -269,6 +270,7 @@ function transferProto(options: {
     status: TransferStatus.SENDER_KEY_TWEAKED,
     type: options.type ?? TransferType.COOPERATIVE_EXIT,
     network: Network.REGTEST,
+    totalValue: options.totalValue ?? 0n,
     leaves: (options.leaves ?? []).map((leaf) =>
       create(TransferLeafSchema, {
         leaf: create(TreeNodeSchema, {
@@ -491,11 +493,13 @@ async function exitDeps(overrides: {
     input: Record<string, unknown>,
   ) => Promise<{ transfer?: Transfer }> | { transfer?: Transfer };
   recoveredTransfer?: Transfer;
+  queryTransfersById?: (input: Record<string, unknown>) => { transfers?: Transfer[] };
   complete?: (req: {
     coopExitRequestId: string;
     userOutboundTransferExternalId: string;
   }) => { status: string } | Promise<{ status: string }>;
   exitStatus?: (id: string) => { status: string };
+  requestStatus?: string;
   identityPublicKey?: Uint8Array;
 }): Promise<Setup> {
   const base = createSparkSigner({
@@ -535,12 +539,17 @@ async function exitDeps(overrides: {
           }),
         };
       }),
-    query_transfers_by_id: () =>
-      overrides.recoveredTransfer === undefined ? {} : { transfers: [overrides.recoveredTransfer] },
+    query_transfers_by_id:
+      overrides.queryTransfersById ??
+      (() =>
+        overrides.recoveredTransfer === undefined
+          ? {}
+          : { transfers: [overrides.recoveredTransfer] }),
   });
   const { ssp, exitRequests, completions, statusReads } = fakeSsp({
     coopExitFeeQuote: () => ({ fees: overrides.fees ?? { fast: 100, medium: 50, slow: 10 } }),
     requestCoopExit: () => ({
+      ...(overrides.requestStatus === undefined ? {} : { status: overrides.requestStatus }),
       rawCoopExitTransaction: payoutTx,
       coopExitTxid,
       rawConnectorTransaction: connectorTx,
@@ -956,10 +965,14 @@ describe("cooperativeExit", () => {
       receiver: SSP_IDENTITY,
       leaves: [leaf],
     });
+    // The caller-id probe runs first and must miss; the lost-response probe inside the commit
+    // catch is the one that finds the transfer.
+    let queries = 0;
     const { deps, deleted, completions } = await exitDeps({
       leaves: [leaf],
       cooperative_exit_v2: async () => Promise.reject(new SparkRequestError("response lost")),
-      recoveredTransfer: recovered,
+      // oxlint-disable-next-line no-conditional-in-test -- probe must miss, recovery must hit
+      queryTransfersById: () => ({ transfers: queries++ === 0 ? [] : [recovered] }),
     });
     const result = await cooperativeExit(deps, {
       address: WITHDRAW_ADDRESS,
@@ -989,7 +1002,7 @@ describe("cooperativeExit", () => {
     ).rejects.toThrow("response lost");
   });
 
-  test("a recovered transfer of another type does not continue", async () => {
+  test("a probed transfer of another type does not continue", async () => {
     const signer0 = createSparkSigner({
       crypto: await loadWasmBackend(),
       accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
@@ -998,20 +1011,26 @@ describe("cooperativeExit", () => {
     });
     const leaf = await fabricateLeaf(signer0, { leafId: "leaf-w", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      type: TransferType.TRANSFER,
+      leaves: [leaf],
+    });
     const { deps } = await exitDeps({
       leaves: [leaf],
       cooperative_exit_v2: async () => Promise.reject(new SparkRequestError("response lost")),
-      recoveredTransfer: transferProto({
-        id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
-        sender: identity,
-        receiver: SSP_IDENTITY,
-        type: TransferType.TRANSFER,
-        leaves: [leaf],
-      }),
+      recoveredTransfer: committed,
     });
     await expect(
-      cooperativeExit(deps, { address: WITHDRAW_ADDRESS, speed: "SLOW", maxFeeSats: 100 }),
-    ).rejects.toThrow("response lost");
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow("committed transfer is not ours");
   });
 
   test("a failed completion retries on status: accepted resolves, failed throws, unknown retries out", async () => {
@@ -1177,6 +1196,149 @@ describe("cooperativeExit", () => {
     const firstJob = required(transfer.transferPackage?.leavesToSend?.[0], "refund job");
     const refundInput = parseTransaction(required(firstJob.rawTx, "refund rawTx")).getInput(0);
     expect(bytesToHex(required(refundInput.txid, "refund input txid"))).toBe(txId(renewed));
+  });
+
+  test("a caller transferId with a committed transfer resumes without selecting leaves", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-p", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+    });
+    const { deps, calls, exitRequests, completions, deleted, spendAmounts, frostJobs, events } =
+      await exitDeps({ leaves: [leaf], recoveredTransfer: committed });
+    // maxFeeSats: 0 proves the resume path is not gated by the fee cap.
+    const result = await cooperativeExit(deps, {
+      address: WITHDRAW_ADDRESS,
+      speed: "SLOW",
+      maxFeeSats: 0,
+      transferId: committed.id,
+    });
+    expect(result).toMatchObject({
+      transferId: committed.id,
+      requestId: "exit-1",
+      payoutSats: 99_990,
+      feeSats: 10,
+      status: "TX_BROADCASTED",
+    });
+    // No selection, no signing, no commit — the only SO call was the probe itself.
+    expect(spendAmounts).toStrictEqual([]);
+    expect(frostJobs).toStrictEqual([]);
+    expect(calls.filter((c) => c.method !== "query_transfers_by_id")).toStrictEqual([]);
+    expect(exitRequests).toStrictEqual([
+      {
+        leafIds: ["leaf-p"],
+        withdrawalAddress: WITHDRAW_ADDRESS,
+        exitSpeed: "SLOW",
+        withdrawAll: true,
+        userOutboundTransferExternalId: committed.id,
+      },
+    ]);
+    expect(deleted).toStrictEqual([["leaf-p"]]);
+    expect(events).toStrictEqual(["delete", "complete"]);
+    expect(completions).toStrictEqual([
+      { coopExitRequestId: "exit-1", userOutboundTransferExternalId: committed.id },
+    ]);
+  });
+
+  test("a resumed exit fails when the payout does not pay the requested address", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-q", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+    });
+    const otherAddress = p2trAddressFromPublicKey(
+      secp256k1.getPublicKey(new Uint8Array(32).fill(78), true),
+      "regtest",
+    );
+    const { deps, spendAmounts, completions } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      payoutTx: payoutTxFor(otherAddress, 99_990),
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow("does not pay the withdrawal address");
+    expect(spendAmounts).toStrictEqual([]);
+    expect(completions).toStrictEqual([]);
+  });
+
+  test("a resumed exit throws when the re-created request is already failed", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-e", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+    });
+    const { deps, completions } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      requestStatus: "EXPIRED",
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow("is EXPIRED");
+    expect(completions).toStrictEqual([]);
+  });
+
+  test("an already-expired ssp request fails before any signing or commit", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-xp", valueSats: 100_000n });
+    const { deps, calls, frostJobs, deleted, completions } = await exitDeps({
+      leaves: [leaf],
+      requestStatus: "EXPIRED",
+    });
+    await expect(
+      cooperativeExit(deps, { address: WITHDRAW_ADDRESS, speed: "SLOW", maxFeeSats: 100 }),
+    ).rejects.toThrow("retry with a new transferId");
+    // No signing commitments, no signing, no commit, no chain deletion.
+    expect(calls).toStrictEqual([]);
+    expect(frostJobs).toStrictEqual([]);
+    expect(deleted).toStrictEqual([]);
+    expect(completions).toStrictEqual([]);
   });
 });
 

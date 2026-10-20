@@ -1,6 +1,8 @@
+import { randomBytes } from "@noble/hashes/utils.js";
 import { describe, expect, test } from "vite-plus/test";
 
 import { p2trAddressFromPublicKey } from "../src/core/bitcoin/index.ts";
+import { uuidv7 } from "../src/core/uuid.ts";
 import type { HostedWallet } from "./support/hosted.ts";
 import { hostedSeed, hostedWallet } from "./support/hosted.ts";
 
@@ -101,6 +103,82 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest coopera
     // The 3000 sats leave the wallet only once the SSP claims the inbound transfer, which
     // trails the broadcast — a balance drop is expected but its timing is the SSP's.
     expect(balanceA1).toBeLessThanOrEqual(balanceA0);
+
+    clientA.close();
+    walletA.signer.dispose();
+  }, 600_000);
+
+  test("retrying with the same transferId resumes the committed exit", async (ctx) => {
+    const seed = hostedSeed();
+    const walletA = await hostedWallet(seed, 0);
+    const { client: clientA } = walletA;
+
+    const walletDest = await hostedWallet(seed, 2);
+    const destination = p2trAddressFromPublicKey(
+      await walletDest.client.identityPublicKey(),
+      "regtest",
+    );
+    walletDest.client.close();
+    walletDest.signer.dispose();
+
+    await clientA.transfers.claimPending();
+    const balanceA0 = await clientA.balance();
+    console.log("A balance:", balanceA0);
+    ctx.skip(
+      balanceA0 < 3500,
+      `hosted account 0 holds ${balanceA0} sats (< 3500) — fund ${FUNDED_ADDRESS} via the web faucet`,
+    );
+
+    const options = {
+      address: destination,
+      speed: "SLOW" as const,
+      maxFeeSats: 3000,
+      amountSats: 3000,
+      transferId: uuidv7(randomBytes),
+    };
+    const first = await clientA.withdrawals.cooperativeExit(options);
+    console.log(
+      "first:",
+      first.requestId,
+      "transfer:",
+      first.transferId,
+      "txid:",
+      first.coopExitTxid,
+      "payout:",
+      first.payoutSats,
+      "fee:",
+      first.feeSats,
+      "status:",
+      first.status,
+    );
+    const balanceAfterFirst = await clientA.balance();
+    console.log("balance after first:", balanceAfterFirst);
+
+    const second = await clientA.withdrawals.cooperativeExit(options);
+    console.log(
+      "second:",
+      second.requestId,
+      "transfer:",
+      second.transferId,
+      "txid:",
+      second.coopExitTxid,
+      "payout:",
+      second.payoutSats,
+      "fee:",
+      second.feeSats,
+      "status:",
+      second.status,
+    );
+    expect(second.transferId).toBe(first.transferId);
+    expect(second.requestId).toBe(first.requestId);
+    expect(second.coopExitTxid).toBe(first.coopExitTxid);
+    expect(second.payoutSats).toBe(first.payoutSats);
+    expect(second.feeSats).toBe(first.feeSats);
+
+    // The resume path does not commit a second transfer — the wallet is debited once.
+    const balanceAfterSecond = await clientA.balance();
+    console.log("balance after second:", balanceAfterSecond);
+    expect(balanceAfterSecond).toBe(balanceAfterFirst);
 
     clientA.close();
     walletA.signer.dispose();
