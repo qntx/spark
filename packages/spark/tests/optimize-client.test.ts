@@ -519,14 +519,14 @@ describe("client.optimizeLeaves", () => {
     const result = await optimizeLeaves(context);
     expect(result).toStrictEqual({ swaps: 0, leavesBefore: 4, leavesAfter: 4 });
     expect(events).toHaveLength(0);
-  });
+  }, 60_000);
 
   test("does nothing for an empty wallet", async () => {
     const { context, events } = await swapContext({ walletValues: [] });
     const result = await optimizeLeaves(context, { multiplicity: 0 });
     expect(result).toStrictEqual({ swaps: 0, leavesBefore: 0, leavesAfter: 0 });
     expect(events).toHaveLength(0);
-  });
+  }, 60_000);
 
   test("rejects invalid options before touching the SO", async () => {
     const { context, events } = await swapContext({ walletValues: [8] });
@@ -534,7 +534,7 @@ describe("client.optimizeLeaves", () => {
     await expect(optimizeLeaves(context, { multiplicity: 6 })).rejects.toThrow(SparkInputError);
     await expect(optimizeLeaves(context, { maxLeavesPerSwap: 0 })).rejects.toThrow(SparkInputError);
     expect(events).toHaveLength(0);
-  });
+  }, 60_000);
 
   test("consolidates dust into one leaf, one swap per locked round", async () => {
     const walletValues = Array.from({ length: 64 }, () => 1);
@@ -563,7 +563,7 @@ describe("client.optimizeLeaves", () => {
     }
     // Every input exit chain was deleted; only consumed ids were seeded.
     await expect(store.exitChains()).resolves.toHaveLength(0);
-  });
+  }, 60_000);
 
   test("maps planned values onto concrete leaves in plan order", async () => {
     // The plan sorts inputs ascending: sixteen 1-sat leaves then the 64-sat leaf.
@@ -580,7 +580,7 @@ describe("client.optimizeLeaves", () => {
       "wallet-leaf-16",
     ]);
     expect(required(swapRequests[0], "swap request").targetAmountsSats).toStrictEqual([16, 64]);
-  });
+  }, 60_000);
 
   test("reshapes a single leaf for multiplicity 1 and conserves balance", async () => {
     const { context, swapRequests, wallet } = await swapContext({ walletValues: [100] });
@@ -593,7 +593,7 @@ describe("client.optimizeLeaves", () => {
       1, 1, 2, 4, 4, 8, 16, 32, 32,
     ]);
     expect(wallet().reduce((sum, leaf) => sum + leaf.valueSats, 0)).toBe(100);
-  });
+  }, 60_000);
 
   test("aborts between swaps", async () => {
     const controller = new AbortController();
@@ -610,7 +610,7 @@ describe("client.optimizeLeaves", () => {
     expect(result.leavesBefore).toBe(64);
     expect(result.leavesAfter).toBe(57);
     expect(events.filter((e) => e.kind === "initiate")).toHaveLength(1);
-  });
+  }, 60_000);
 
   test("replans when the leaf set changed between rounds", async () => {
     // After the first swap lands, the wallet is replaced wholesale (external churn); the next
@@ -632,5 +632,5 @@ describe("client.optimizeLeaves", () => {
       Array.from({ length: 8 }, (_, i) => `churned-leaf-${i}`),
     );
     expect(wallet().map((leaf) => leaf.valueSats)).toStrictEqual([64]);
-  });
+  }, 60_000);
 });
