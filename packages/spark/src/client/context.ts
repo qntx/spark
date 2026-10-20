@@ -13,9 +13,7 @@ import type { createSspClient } from "../ssp/index.ts";
 import type { TransferCoordinator } from "../transfer/index.ts";
 import { malformedLeafTx, operatorsDisagree, ownsLeaf, queryLeaves } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
-
-/** Signer `publicKeys`/`signFrost` calls bound each batch; match the signer's per-call limit. */
-const SIGNER_BATCH = 256;
+import { batchedPublicKeys } from "../tree/signing.ts";
 
 /** Everything the per-group factories share, built once per client. */
 export type ClientContext = {
@@ -112,25 +110,17 @@ export function createClientContext(
     );
 
     const ownedIds = new Set<string>();
-    const chunks: SparkLeaf[][] = [];
-    for (let i = 0; i < reported.length; i += SIGNER_BATCH) {
-      chunks.push(reported.slice(i, i + SIGNER_BATCH));
-    }
-    const chunkKeys = await Promise.all(
-      chunks.map(async (chunk) =>
-        signer.publicKeys(chunk.map((leaf) => ({ type: "leaf", leafId: leaf.id }))),
-      ),
+    const keys = await batchedPublicKeys(
+      signer,
+      reported.map((leaf) => ({ type: "leaf", leafId: leaf.id })),
     );
-    for (const [i, chunk] of chunks.entries()) {
-      const keys = chunkKeys[i];
-      for (const [j, leaf] of chunk.entries()) {
-        const leafPublicKey = keys?.[j];
-        if (leafPublicKey === undefined) {
-          throw new SparkError("leaves: signer returned fewer public keys than requested");
-        }
-        if (ownsLeaf(leaf, leafPublicKey)) {
-          ownedIds.add(leaf.id);
-        }
+    for (const [i, leaf] of reported.entries()) {
+      const leafPublicKey = keys[i];
+      if (leafPublicKey === undefined) {
+        throw new SparkError("leaves: signer returned fewer public keys than requested");
+      }
+      if (ownsLeaf(leaf, leafPublicKey)) {
+        ownedIds.add(leaf.id);
       }
     }
 

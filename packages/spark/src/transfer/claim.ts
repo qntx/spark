@@ -12,6 +12,7 @@ import { ClaimPackageSchema, HashVariant } from "../proto/gen/spark_pb.ts";
 import type { ClaimTransferResponse, SparkService, TransferLeaf } from "../proto/gen/spark_pb.ts";
 import { mapTreeNode, ownsLeaf } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
+import { batchedPublicKeys, batchedReceivedPublicKeys } from "../tree/signing.ts";
 import { CLAIMABLE_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
 import type { SparkTransfer, SparkTransferLeaf, TransferCoordinator } from "./model.ts";
 import { queryTransfersByIds } from "./query.ts";
@@ -177,7 +178,8 @@ export async function claimTransfer(
     }
   }
 
-  const receivedKeys = await signer.receivedPublicKeys(
+  const receivedKeys = await batchedReceivedPublicKeys(
+    signer,
     claimLeaves.map((leaf) => leaf.secretCipher),
   );
   for (const [i, leaf] of claimLeaves.entries()) {
@@ -210,7 +212,8 @@ export async function claimTransfer(
     options.call,
   );
 
-  const newLeafKeys = await signer.publicKeys(
+  const newLeafKeys = await batchedPublicKeys(
+    signer,
     claimLeaves.map((leaf) => ({ type: "leaf", leafId: leaf.leaf.id })),
   );
   const newLeafKeyById = new Map<string, Uint8Array>();

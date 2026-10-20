@@ -12,6 +12,7 @@ import {
 } from "../proto/gen/spark_pb.ts";
 import type { TransferPackage } from "../proto/gen/spark_pb.ts";
 import type { SparkLeaf } from "../tree/index.ts";
+import { batchedPublicKeys } from "../tree/signing.ts";
 import { mapTransfer } from "./model.ts";
 import type { SparkTransfer, TransferCoordinator } from "./model.ts";
 import { refundJobGroups, signRefundJobs } from "./refunds.ts";
@@ -69,7 +70,8 @@ export async function prepareTransferPackage(
     options.call,
   );
 
-  const signingPublicKeys = await signer.publicKeys(
+  const signingPublicKeys = await batchedPublicKeys(
+    signer,
     options.leaves.map((leaf) => ({ type: "leaf", leafId: leaf.leaf.id })),
   );
 

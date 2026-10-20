@@ -2,7 +2,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient, createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
 import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
@@ -62,6 +62,7 @@ import type {
   TransferLeaf,
 } from "../src/proto/gen/spark_pb.ts";
 import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
+import { MAX_JOBS } from "../src/signer/backend.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
@@ -73,7 +74,10 @@ import {
 } from "../src/transfer/index.ts";
 import type { SparkTransfer } from "../src/transfer/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
+import { batchedPublicKeys, SIGNER_BATCH_LIMIT, signUserJobs } from "../src/tree/signing.ts";
+import type { UserSigningSpec } from "../src/tree/signing.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import { createTestSigner } from "./support/test-signer.ts";
 
 const OPERATOR_SECRETS = [
   new Uint8Array(32).fill(9),
@@ -111,12 +115,29 @@ function fixedRandom(): (length: number) => Uint8Array {
   };
 }
 
-async function testSigner(): Promise<SparkSigner> {
+/**
+ * Deterministic byte stream whose 64-byte windows never repeat — `fixedRandom`'s 251-byte period
+ * makes commitment batches collide once they exceed ~250 items.
+ */
+function uniqueRandom(): (length: number) => Uint8Array {
+  let counter = 0;
+  return (length) => {
+    const out = new Uint8Array(length);
+    for (let i = 0; i < length; i += 32) {
+      const block = sha256(utf8ToBytes(`signer-test-${counter}`));
+      counter += 1;
+      out.set(block.subarray(0, Math.min(32, length - i)), i);
+    }
+    return out;
+  };
+}
+
+async function testSigner(random?: (length: number) => Uint8Array): Promise<SparkSigner> {
   return createSparkSigner({
     crypto: await loadWasmBackend(),
     accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
     network: "regtest",
-    random: fixedRandom(),
+    random: random ?? fixedRandom(),
   });
 }
 
@@ -141,10 +162,16 @@ function fabricateLeaf(options: {
   signingPublicKey: Uint8Array;
   ownerIdentityPublicKey: Uint8Array;
   valueSats?: bigint;
+  /** Node tx input sequence; nonzero marks a live timelock so direct refunds are built. */
+  nodeSequence?: number;
 }): { leaf: SparkLeaf; nodeTx: Uint8Array; refundTx: Uint8Array; verifyingKey: Uint8Array } {
   const verifyingKey = verifyingKeyFor(options.signingPublicKey);
   const nodeTx = new Transaction({ allowUnknownOutputs: true });
-  nodeTx.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
+  nodeTx.addInput({
+    txid: new Uint8Array(32).fill(7),
+    index: 0,
+    sequence: options.nodeSequence ?? 0,
+  });
   nodeTx.addOutput({
     script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
     amount: options.valueSats ?? 100_000n,
@@ -303,6 +330,22 @@ function nodesResponse(nodes: Array<ReturnType<typeof create<typeof TreeNodeSche
     nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
     offset: 0n,
   });
+}
+
+/**
+ * A `query_nodes` handler that serves `nodes` page by page — `queryLeaves` keeps paging while a
+ * page comes back full, so a fake that ignores `offset` and always returns every node loops
+ * forever. `LEAF_PAGE_SIZE` mirrors the client's page size (50).
+ */
+function pagedNodes(nodes: Array<ReturnType<typeof create<typeof TreeNodeSchema>>>) {
+  const PAGE = 50;
+  return (req: unknown) => {
+    const offset = Number((req as QueryNodesRequest).offset);
+    return create(QueryNodesResponseSchema, {
+      nodes: Object.fromEntries(nodes.slice(offset, offset + PAGE).map((node) => [node.id, node])),
+      offset: BigInt(offset + Math.min(PAGE, nodes.length - offset)),
+    });
+  };
 }
 
 /** `query_transfers_by_id` answering with the queued responses in order, then empty. */
@@ -542,6 +585,133 @@ describe("transfers.send", () => {
       "signer returned fewer shares than requested",
     );
     signer.dispose();
+  });
+
+  test("SIGNER_BATCH_LIMIT matches the signer's per-call cap", () => {
+    expect(SIGNER_BATCH_LIMIT).toBe(MAX_JOBS);
+  });
+
+  test("signUserJobs preserves spec order across signer-call chunks", async () => {
+    const signer = await testSigner(uniqueRandom());
+    const identity = await signer.identityPublicKey();
+    const leafIds = ["order-a", "order-b", "order-c", "order-d"];
+    const keys = await signer.publicKeys(
+      leafIds.map((leafId) => ({ type: "leaf" as const, leafId })),
+    );
+    const leaves = leafIds.map((leafId, index) => {
+      const { leaf } = fabricateLeaf({
+        leafId,
+        signingPublicKey: required(keys[index], "leaf public key"),
+        ownerIdentityPublicKey: identity,
+      });
+      return leaf;
+    });
+    // 600 specs → three signer rounds; each output job must line up with its spec.
+    const specs: UserSigningSpec[] = Array.from({ length: 600 }, (_, i) => {
+      const leaf = required(leaves[i % leaves.length], "leaf");
+      const signingPublicKey = required(keys[i % leafIds.length], "leaf public key");
+      return {
+        leafId: `${leaf.id}-${i}`,
+        key: { type: "leaf" as const, leafId: leaf.id },
+        signingPublicKey,
+        verifyingKey: leaf.verifyingPublicKey,
+        target: {
+          transaction: leaf.refundTx,
+          inputIndex: 0,
+          prevouts: [
+            {
+              script: p2trScriptFromPublicKey(leaf.verifyingPublicKey, "regtest"),
+              amount: leaf.valueSats,
+            },
+          ],
+        },
+        commitments: create(RequestedSigningCommitmentsSchema, {
+          signingNonceCommitments: operatorCommitments(),
+        }),
+      };
+    });
+    const jobs = await signUserJobs(signer, specs);
+    expect(jobs).toHaveLength(specs.length);
+    for (const [i, spec] of specs.entries()) {
+      expect(jobs[i]?.leafId).toBe(spec.leafId);
+      expect(jobs[i]?.signingPublicKey).toStrictEqual(spec.signingPublicKey);
+    }
+    signer.dispose();
+  });
+
+  test("a 300-leaf send chunks every signer call within the per-call cap", async () => {
+    const signer = await testSigner(uniqueRandom());
+    const leafIds = Array.from({ length: 300 }, (_, i) => `batch-send-${i}`);
+    const fabricated = await fabricatedNodes(signer, leafIds, 100_000n, { withDirectTx: true });
+    const nodes = fabricated.map((entry) => entry.node);
+    const receiver = secp256k1.getPublicKey(RECEIVER_SECRET, true);
+    let startReq: StartTransferRequest | undefined;
+    const client = makeClient(signer, {
+      query_nodes: pagedNodes(nodes),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * leafIds.length),
+        }),
+      start_transfer_v2: (req) => {
+        startReq = req;
+        return create(StartTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            senderIdentityPublicKey: req.ownerIdentityPublicKey,
+            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+            status: TransferStatus.SENDER_INITIATED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            totalValue: BigInt(leafIds.length * 100_000),
+          }),
+        });
+      },
+    });
+
+    // 300 leaves × cpfp/direct/direct-from-CPFP refund jobs = 900 signatures, and
+    // publicKeys runs over all 300 leaf keys — every call is capped at 256.
+    const transfer = await client.transfers.send({
+      receiver,
+      amountSats: leafIds.length * 100_000,
+    });
+    const start = required(startReq, "start_transfer_v2 request");
+    expect(transfer.id).toBe(start.transferId);
+    const pkg = required(start.transferPackage, "transfer package");
+    expect(pkg.leavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
+    expect(pkg.directLeavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
+    expect(pkg.directFromCpfpLeavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
+    signer.dispose();
+  });
+
+  test("rejects a send whose selection exceeds the 1000-leaf transfer limit", async () => {
+    // The guard fires at leaf selection, before any signing — a map-backed test signer
+    // (all leaves sharing one key) avoids a thousand real key derivations.
+    const leafIds = Array.from({ length: 1001 }, (_, i) => `overlimit-leaf-${i}`);
+    const leafPublicKey = secp256k1.getPublicKey(new Uint8Array(32).fill(9), true);
+    const signer = createTestSigner(
+      OTHER_IDENTITY_SECRET,
+      new Map(leafIds.map((leafId) => [leafId, leafPublicKey])),
+    );
+    const identity = await signer.identityPublicKey();
+    const nodes = leafIds.map((leafId) =>
+      treeNodeOf(
+        fabricateLeaf({
+          leafId,
+          signingPublicKey: leafPublicKey,
+          ownerIdentityPublicKey: identity,
+        }).leaf,
+        identity,
+      ),
+    );
+    const client = makeClient(signer, {
+      query_nodes: pagedNodes(nodes),
+    });
+    await expect(
+      client.transfers.send({
+        receiver: secp256k1.getPublicKey(RECEIVER_SECRET, true),
+        amountSats: leafIds.length * 100_000,
+      }),
+    ).rejects.toThrow("over the 1000-leaf limit");
   });
 });
 
@@ -1309,6 +1479,57 @@ describe("transfers.claim", () => {
     expect(leavesResult.length).toBeGreaterThan(0);
     receiver.dispose();
   });
+
+  test("a 300-leaf claim chunks every signer call within the per-call cap", async () => {
+    const receiver = await testSigner(uniqueRandom());
+    const receiverIdentity = await receiver.identityPublicKey();
+    const receivedSecret = new Uint8Array(32).fill(88);
+    const leafIds = Array.from({ length: 300 }, (_, i) => `batch-claim-${i}`);
+    const leaves = await Promise.all(
+      leafIds.map(async (leafId) => pendingLeaf({ receiverIdentity, receivedSecret, leafId })),
+    );
+    const pending = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: secp256k1.getPublicKey(SENDER_SECRET, true),
+      receiverIdentityPublicKey: receiverIdentity,
+      status: TransferStatus.SENDER_KEY_TWEAKED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: BigInt(leafIds.length * 100_000),
+      leaves,
+    });
+
+    let claimReq: ClaimTransferRequest | undefined;
+    const client = makeClient(receiver, {
+      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * leafIds.length),
+        }),
+      claim_transfer: async (req) => {
+        claimReq = req;
+        return create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves: await claimedLeaves(receiver, leaves),
+          }),
+        });
+      },
+    });
+
+    // 300 pending leaves → 300 sealed-key decryptions, 300 leaf public keys and
+    // 600 refund signatures — every signer call is capped at 256.
+    const claimed = await client.transfers.claimPending();
+    expect(claimed.map((leaf) => leaf.id)).toStrictEqual(leafIds);
+    const claim = required(claimReq, "claim_transfer request");
+    const pkg = required(claim.claimPackage, "claim package");
+    expect(pkg.leavesToClaim.map((job) => job.leafId)).toStrictEqual(leafIds);
+    expect(pkg.directFromCpfpLeavesToClaim.map((job) => job.leafId)).toStrictEqual(leafIds);
+    receiver.dispose();
+  });
 });
 
 function storedChain(leafId: string): SparkExitChain {
@@ -2073,6 +2294,91 @@ describe("transfers.swap", () => {
     expect(chains.map((chain) => chain.leafId)).toStrictEqual([CHANGE_LEAF_ID]);
     signer.dispose();
   });
+
+  test("a 300-input swap chunks every signer call within the per-call cap", async () => {
+    const signer = await testSigner(uniqueRandom());
+    const identity = await signer.identityPublicKey();
+    const leafIds = Array.from({ length: 300 }, (_, i) => `batch-swap-${i}`);
+    const fabricated = await fabricatedNodes(signer, leafIds, 100_000n);
+    const leaves = fabricated.map((entry) => entry.leaf);
+    const inbound = await sspInboundTransfer(identity, [
+      { leafId: SWAP_LEAF_ID, valueSats: BigInt(leafIds.length * 100_000) },
+    ]);
+
+    // The fake SO cannot produce real operator shares, so aggregateFrost is wrapped to
+    // enforce the per-call cap and record each batch's size while returning stand-ins.
+    const aggregateCalls: number[] = [];
+    const wrapped: SparkSigner = {
+      ...signer,
+      aggregateFrost: async (jobs) => {
+        expect(jobs.length).toBeLessThanOrEqual(MAX_JOBS);
+        aggregateCalls.push(jobs.length);
+        return Promise.resolve(jobs.map(() => new Uint8Array(64).fill(0x42)));
+      },
+    };
+
+    let swapReq: InitiateSwapPrimaryTransferRequest | undefined;
+    const { ssp } = fakeSsp({
+      status: "SUCCEEDED",
+      inboundTransferId: INBOUND_ID,
+      feeSats: 0,
+    });
+    const spark = swapSpark({
+      get_signing_commitments: (req) =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3 * Math.max(req.nodeIds.length, req.nodeIdCount)),
+        }),
+      initiate_swap_primary_transfer: (req) => {
+        swapReq = req;
+        const transfer = required(req.transfer, "swap request transfer");
+        return create(InitiateSwapPrimaryTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: transfer.transferId,
+            senderIdentityPublicKey: transfer.ownerIdentityPublicKey,
+            receiverIdentityPublicKey: transfer.receiverIdentityPublicKey,
+            status: TransferStatus.SENDER_INITIATED,
+            type: TransferType.PRIMARY_SWAP_V3,
+            network: Network.REGTEST,
+            totalValue: BigInt(leafIds.length * 100_000),
+          }),
+          signingResults: leaves.map((leaf) => signingResult(leaf.id, leaf.verifyingPublicKey)),
+        });
+      },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+      claim_transfer: async (req) =>
+        create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.COUNTER_SWAP_V3,
+            network: Network.REGTEST,
+            leaves: await claimedLeaves(signer, inbound.leaves),
+          }),
+        }),
+    });
+
+    // 300 input leaves → 300 adaptor-signed refund jobs plus 300 aggregateFrost jobs —
+    // every signer call is capped at 256.
+    const claimed = await swapLeaves({
+      spark,
+      signer: wrapped,
+      network: "regtest",
+      operators: OPERATORS,
+      threshold: THRESHOLD,
+      ssp,
+      sspIdentityPublicKey: SSP_IDENTITY,
+      transferId: TRANSFER_ID,
+      leaves,
+      targetAmountsSats: [leafIds.length * 100_000],
+      random: fixedRandom(),
+    });
+    expect(claimed.map((leaf) => leaf.id)).toStrictEqual([SWAP_LEAF_ID]);
+    expect(aggregateCalls).toStrictEqual([MAX_JOBS, leafIds.length - MAX_JOBS]);
+    const request = required(swapReq, "initiate_swap_primary_transfer request");
+    const pkg = required(request.transfer?.transferPackage, "transfer package");
+    expect(pkg.leavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
+    signer.dispose();
+  });
 });
 
 const MULTI_LEAF_A = "01989abc-def0-7abc-89ab-0000000000b1";
@@ -2080,22 +2386,19 @@ const MULTI_LEAF_B = "01989abc-def0-7abc-89ab-0000000000c2";
 const RECEIVER_B_SECRET = new Uint8Array(32).fill(0xb1);
 const RECEIVER_C_SECRET = new Uint8Array(32).fill(0xc2);
 
-/** A fabricated leaf plus the `query_nodes` TreeNode the wallet would see for it. */
-async function fabricatedNode(signer: SparkSigner, leafId: string, valueSats: bigint) {
-  const identity = await signer.identityPublicKey();
-  const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId }]);
-  const { leaf } = fabricateLeaf({
-    leafId,
-    signingPublicKey: required(leafKey, "leaf public key"),
-    ownerIdentityPublicKey: identity,
-    valueSats,
-  });
-  const node = create(TreeNodeSchema, {
+/** The `query_nodes` TreeNode the wallet would see for a fabricated leaf. */
+function treeNodeOf(
+  leaf: SparkLeaf,
+  identity: Uint8Array,
+  options?: { withDirectTx?: boolean },
+): ReturnType<typeof create<typeof TreeNodeSchema>> {
+  return create(TreeNodeSchema, {
     id: leaf.id,
     treeId: leaf.treeId,
-    value: valueSats,
+    value: BigInt(leaf.valueSats),
     nodeTx: leaf.nodeTx,
     refundTx: leaf.refundTx,
+    ...(options?.withDirectTx === true ? { directTx: leaf.nodeTx } : {}),
     vout: 0,
     verifyingPublicKey: leaf.verifyingPublicKey,
     ownerIdentityPublicKey: identity,
@@ -2110,7 +2413,51 @@ async function fabricatedNode(signer: SparkSigner, leafId: string, valueSats: bi
     network: Network.REGTEST,
     treenodeStatus: TreeNodeStatus.AVAILABLE,
   });
-  return { leaf, node };
+}
+
+/** A fabricated leaf plus the `query_nodes` TreeNode the wallet would see for it. */
+async function fabricatedNode(
+  signer: SparkSigner,
+  leafId: string,
+  valueSats: bigint,
+  options?: { withDirectTx?: boolean },
+) {
+  const identity = await signer.identityPublicKey();
+  const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId }]);
+  const { leaf } = fabricateLeaf({
+    leafId,
+    signingPublicKey: required(leafKey, "leaf public key"),
+    ownerIdentityPublicKey: identity,
+    valueSats,
+    ...(options?.withDirectTx === true ? { nodeSequence: 2000 } : {}),
+  });
+  return { leaf, node: treeNodeOf(leaf, identity, options) };
+}
+
+/** `fabricatedNode` for many leaves at once — one `publicKeys` call for the whole set. */
+async function fabricatedNodes(
+  signer: SparkSigner,
+  leafIds: ReadonlyArray<string>,
+  valueSats: bigint,
+  options?: { withDirectTx?: boolean },
+) {
+  const identity = await signer.identityPublicKey();
+  const keys = await batchedPublicKeys(
+    signer,
+    leafIds.map((leafId) => ({ type: "leaf" as const, leafId })),
+  );
+  return leafIds.map((leafId, index) => {
+    const { leaf } = fabricateLeaf({
+      leafId,
+      signingPublicKey: required(keys[index], "leaf public key"),
+      ownerIdentityPublicKey: identity,
+      valueSats,
+      // A leaf that carries a direct tx has a live node timelock — zero would mean a
+      // zero-timelock leaf, which never gets a direct refund.
+      ...(options?.withDirectTx === true ? { nodeSequence: 2000 } : {}),
+    });
+    return { leaf, node: treeNodeOf(leaf, identity, options) };
+  });
 }
 
 describe("transfers.sendMany", () => {

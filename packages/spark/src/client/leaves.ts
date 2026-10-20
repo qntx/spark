@@ -1,5 +1,5 @@
 import { uuidv7 } from "../core/uuid.ts";
-import { SparkError } from "../errors/index.ts";
+import { SparkError, SparkInputError } from "../errors/index.ts";
 import { swapLeaves } from "../transfer/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { renewLeaf, renewalKind } from "../tree/renew.ts";
@@ -28,6 +28,17 @@ export async function renewStaleLeaves(
   return out;
 }
 
+// The SO rejects a transfer package carrying more leaves than this (upstream MaxLeavesToSend).
+const MAX_TRANSFER_LEAVES = 1000;
+
+function assertTransferLeafLimit(group: ReadonlyArray<SparkLeaf>, context: string): void {
+  if (group.length > MAX_TRANSFER_LEAVES) {
+    throw new SparkInputError(
+      `${context}: the transfer carries ${group.length} leaves, over the ${MAX_TRANSFER_LEAVES}-leaf limit`,
+    );
+  }
+}
+
 /**
  * One leaf group per amount, each summing exactly to its amount: disjoint exact combinations when
  * they all exist, otherwise an SSP leaves swap minted for all amounts at once — with stale-input
@@ -46,12 +57,14 @@ export async function selectSendLeaves(
   if (selection.kind === "exact") {
     const renewed: SparkLeaf[][] = [];
     for (const group of selection.groups) {
+      assertTransferLeafLimit(group, "send");
       // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order
       renewed.push(await renewStaleLeaves(context, group));
     }
     return renewed;
   }
 
+  assertTransferLeafLimit(selection.leaves, "send swap");
   const swapInputs = await renewStaleLeaves(context, selection.leaves);
   const claimed = await swapLeaves({
     ...context.transferCoordinator,
@@ -71,6 +84,7 @@ export async function selectSendLeaves(
   }
   const renewed: SparkLeaf[][] = [];
   for (const group of groups) {
+    assertTransferLeafLimit(group, "send");
     // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order
     renewed.push(await renewStaleLeaves(context, group));
   }
