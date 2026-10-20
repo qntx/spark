@@ -235,6 +235,25 @@ export async function claimUntilAccepted(
   }
 }
 
+export async function claimManyUntilAccepted(
+  client: ReturnType<typeof createSparkClient>,
+  transactions: ReadonlyArray<Uint8Array>,
+  deadline: number,
+): Promise<SparkLeaf> {
+  try {
+    return await client.deposits.claimMany({
+      outputs: transactions.map((transaction) => ({ transaction })),
+    });
+  } catch (error) {
+    if (Date.now() > deadline) {
+      throw error;
+    }
+    console.log("claimMany not accepted yet:", (error as Error).message.split("\n")[0]);
+    await sleep(3000);
+    return claimManyUntilAccepted(client, transactions, deadline);
+  }
+}
+
 export type FundedUtxo = {
   readonly txid: string;
   readonly vout: number;

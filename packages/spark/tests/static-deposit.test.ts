@@ -966,9 +966,9 @@ describe("refundStaticDeposit", () => {
 
     // The returned signature verifies under the tweaked verifying key — the same check
     // refundStaticDeposit runs before returning.
-    expect(verifyFinalizedTaprootSignature(result.transaction, sighash, group.verifyingKey)).toBe(
-      true,
-    );
+    expect(
+      verifyFinalizedTaprootSignature(result.transaction, sighash, group.verifyingKey, 0),
+    ).toBe(true);
     signer.dispose();
   });
 

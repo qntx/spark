@@ -76,8 +76,8 @@ export function txIdInputBytes(txBytes: Uint8Array): Uint8Array {
 /**
  * Verifies the aggregated Schnorr key-path signature an operator attaches to a finalized
  * transaction (e.g. the root node and refund returned by `finalize_deposit_tree_creation`): input
- * 0's first witness element must be a 64-byte BIP-340 signature over `sighash` under the BIP-341
- * taproot output key of `verifyingPublicKey` with an empty script tree. Fails closed — any
+ * `inputIndex`'s first witness element must be a 64-byte BIP-340 signature over `sighash` under the
+ * BIP-341 taproot output key of `verifyingPublicKey` with an empty script tree. Fails closed — any
  * malformed input returns `false` rather than throwing, matching breez-spark-sdk
  * `verify_finalized_taproot_signature` (bitcoin/service.rs @956ff90).
  */
@@ -85,10 +85,14 @@ export function verifyFinalizedTaprootSignature(
   signedTxBytes: Uint8Array,
   sighash: Uint8Array,
   verifyingPublicKey: Uint8Array,
+  inputIndex: number,
 ): boolean {
   try {
     const tx = parseTransaction(signedTxBytes);
-    const witness = tx.inputsLength > 0 ? tx.getInput(0).finalScriptWitness : undefined;
+    const witness =
+      inputIndex >= 0 && inputIndex < tx.inputsLength
+        ? tx.getInput(inputIndex).finalScriptWitness
+        : undefined;
     const signature = witness?.[0];
     if (signature === undefined || signature.length !== 64 || sighash.length !== 32) {
       return false;
@@ -262,21 +266,6 @@ export function createNodeTxs(params: NodeTxsParams): NodeTxPair {
     directSequence,
     DEFAULT_FEE_SATS,
   );
-}
-
-/** Root node transactions: sequence 0, direct sequence `DIRECT_TIMELOCK_OFFSET`. */
-export function createRootNodeTx(
-  parentTx: Uint8Array,
-  vout: number,
-  network: SparkNetwork,
-): NodeTxPair {
-  return createNodeTxs({
-    parentTx,
-    sequence: INITIAL_ROOT_NODE_SEQUENCE,
-    directSequence: DIRECT_TIMELOCK_OFFSET,
-    vout,
-    network,
-  });
 }
 
 /** Zero-timelock node transactions over output 0 (root variant of `createNodeTxs`). */

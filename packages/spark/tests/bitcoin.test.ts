@@ -23,9 +23,11 @@ import {
 } from "../src/core/bitcoin/script.ts";
 import {
   checkIfValidSequence,
+  DIRECT_TIMELOCK_OFFSET,
   getNextHTLCTransactionSequence,
   getNextTransactionSequence,
   getTimelockFromSequence,
+  INITIAL_ROOT_NODE_SEQUENCE,
   isZeroTimelock,
   roundDownToTimelockInterval,
 } from "../src/core/bitcoin/sequence.ts";
@@ -494,6 +496,22 @@ test("createConnectorRefundTxs appends the connector input to every variant", ()
   expect(bytesToHex(required(connectorInput.txid, "connector txid"))).toBe("ab".repeat(32));
   expect(connectorInput.sequence).toBe(500);
 });
+
+test.each([{ vout: 0 }, { vout: 1 }])(
+  "createMultiInputRootTx with one input matches the classic root node builder (vout $vout)",
+  ({ vout }) => {
+    // claimDeposit's one-UTXO claim is the multi path with N=1 — it must be byte-identical to
+    // the sequence-0 root node tx the single-input builder produced.
+    const classic = createNodeTxs({
+      parentTx: parent(),
+      vout,
+      sequence: INITIAL_ROOT_NODE_SEQUENCE,
+      directSequence: DIRECT_TIMELOCK_OFFSET,
+      network: "regtest",
+    }).cpfp.txBytes;
+    expect(createMultiInputRootTx([{ tx: parent(), vout }])).toStrictEqual(classic);
+  },
+);
 
 test("createMultiInputRootTx sums the deposits into one output plus the anchor", () => {
   const txBytes = createMultiInputRootTx([

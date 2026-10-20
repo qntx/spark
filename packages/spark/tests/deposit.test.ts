@@ -9,11 +9,14 @@ import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
 import { createSparkClientWith } from "../src/client/index.ts";
+import { u64ToSats } from "../src/core/assert.ts";
 import {
   addressToScript,
   createInitialTimelockRefundTxs,
-  createRootNodeTx,
+  createMultiInputRootTx,
   p2trAddressFromPublicKey,
+  parseTransaction,
+  taprootKeySpendSighash,
 } from "../src/core/bitcoin/index.ts";
 import { proofOfPossessionDigest } from "../src/core/hashing/statements.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
@@ -43,6 +46,7 @@ import type {
   FinalizeDepositTreeCreationRequest,
   GenerateDepositAddressRequest,
   GetSigningCommitmentsRequest,
+  InputSigningData,
 } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
@@ -194,9 +198,14 @@ function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStor
   );
 }
 
-function depositTxTo(address: string, sats: bigint, extraOutputs: string[] = []): Uint8Array {
+function depositTxTo(
+  address: string,
+  sats: bigint,
+  extraOutputs: string[] = [],
+  inputFill = 7,
+): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });
-  tx.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
+  tx.addInput({ txid: new Uint8Array(32).fill(inputFill), index: 0, sequence: 0 });
   tx.addOutput({ script: addressToScript(address), amount: sats });
   for (const extra of extraOutputs) {
     tx.addOutput({ script: addressToScript(extra), amount: sats });
@@ -425,49 +434,89 @@ describe("deposits.claim", () => {
   const VERIFYING_KEY = secp256k1.Point.BASE.multiply(VERIFYING_SECRET).toBytes(true);
   const OTHER_KEY = secp256k1.Point.BASE.multiply(OTHER_SECRET).toBytes(true);
 
-  /** Attaches the BIP-340 key-path signature the aggregate would carry for `constructed`. */
+  /**
+   * Attaches to every input of `txBytes` the BIP-340 key-path signature the aggregate would carry,
+   * each over its own sighash committing to all `prevouts`. `corruptInput` produces an invalid
+   * signature for that one input.
+   */
   function signedFinalizedTx(
-    constructed: { txBytes: Uint8Array; sighash: Uint8Array },
+    txBytes: Uint8Array,
+    prevouts: ReadonlyArray<{ script: Uint8Array; amount: number }>,
     secret: bigint,
     verifyingKey: Uint8Array,
-    corrupt?: boolean,
+    corruptInput?: number,
   ): Uint8Array {
     const point = secp256k1.Point.fromBytes(verifyingKey);
     const evenSecret =
       (point.toAffine().y & 1n) === 0n ? secret : secp256k1.Point.Fn.ORDER - secret;
     const { tweak } = taprootTweakedKey(verifyingKey);
-    const tweakedSecret =
-      corrupt === true ? secret : mod(evenSecret + tweak, secp256k1.Point.Fn.ORDER);
-    const tx = Transaction.fromRaw(constructed.txBytes, { allowUnknownOutputs: true });
-    tx.updateInput(0, {
-      finalScriptWitness: [
-        schnorr.sign(constructed.sighash, be32(tweakedSecret), new Uint8Array(32).fill(4)),
-      ],
-    });
+    const tweakedSecret = mod(evenSecret + tweak, secp256k1.Point.Fn.ORDER);
+    const tx = Transaction.fromRaw(txBytes, { allowUnknownOutputs: true });
+    for (let i = 0; i < tx.inputsLength; i++) {
+      const sighash = taprootKeySpendSighash({ transaction: txBytes, inputIndex: i, prevouts });
+      tx.updateInput(i, {
+        finalScriptWitness: [
+          schnorr.sign(
+            sighash,
+            be32(i === corruptInput ? secret : tweakedSecret),
+            new Uint8Array(32).fill(4),
+          ),
+        ],
+      });
+    }
     return tx.toBytes(true, true);
   }
 
-  /** Emulates the coordinator: rebuilds the pair from the request and returns it signed. */
+  /** Emulates the coordinator: rebuilds the multi-input root from the request, signs it back. */
   function finalizedRootNode(
     req: FinalizeDepositTreeCreationRequest,
-    options: { secret: bigint; verifyingKey: Uint8Array; wrongTx?: boolean; badSig?: boolean },
+    options: {
+      secret: bigint;
+      verifyingKey: Uint8Array;
+      wrongTx?: boolean;
+      /** Index of the root input whose signature is invalid. */
+      badSigInput?: number;
+    },
     id = "claimed-1",
   ) {
-    const utxo = required(req.onChainUtxo, "onChainUtxo");
-    const root = createRootNodeTx(utxo.rawTx, utxo.vout, "regtest");
+    const utxos = [required(req.onChainUtxo, "onChainUtxo"), ...req.additionalOnChainUtxos];
+    const rootTxBytes = createMultiInputRootTx(utxos.map((u) => ({ tx: u.rawTx, vout: u.vout })));
     const refunds = createInitialTimelockRefundTxs({
-      nodeTx: root.cpfp.txBytes,
+      nodeTx: rootTxBytes,
       receivingPublicKey: required(req.rootTxSigningJob, "root signing job").signingPublicKey,
       network: "regtest",
     });
+    const depositPrevouts = utxos.map((u) => {
+      const output = parseTransaction(u.rawTx).getOutput(u.vout);
+      return {
+        script: required(output.script, "utxo script"),
+        amount: u64ToSats(required(output.amount, "utxo amount"), "utxo"),
+      };
+    });
+    const rootOut = parseTransaction(rootTxBytes).getOutput(0);
+    const refundPrevouts = [
+      {
+        script: required(rootOut.script, "root output script"),
+        amount: u64ToSats(required(rootOut.amount, "root output amount"), "root output"),
+      },
+    ];
     return fakeLeaf(id, {
-      nodeTx: signedFinalizedTx(
-        options.wrongTx === true ? root.direct : root.cpfp,
+      nodeTx:
+        options.wrongTx === true
+          ? refunds.directFromCpfpRefund.txBytes
+          : signedFinalizedTx(
+              rootTxBytes,
+              depositPrevouts,
+              options.secret,
+              options.verifyingKey,
+              options.badSigInput,
+            ),
+      refundTx: signedFinalizedTx(
+        refunds.cpfpRefund.txBytes,
+        refundPrevouts,
         options.secret,
         options.verifyingKey,
-        options.badSig,
       ),
-      refundTx: signedFinalizedTx(refunds.cpfpRefund, options.secret, options.verifyingKey),
       verifyingPublicKey: options.verifyingKey,
     });
   }
@@ -534,9 +583,9 @@ describe("deposits.claim", () => {
     expect(bytesToHex(utxo.rawTx)).toBe(bytesToHex(transaction));
     expect(utxo.network).toBe(Network.REGTEST);
 
-    const expected = createRootNodeTx(transaction, 0, "regtest");
+    const expectedRootTx = createMultiInputRootTx([{ tx: transaction, vout: 0 }]);
     const refunds = createInitialTimelockRefundTxs({
-      nodeTx: expected.cpfp.txBytes,
+      nodeTx: expectedRootTx,
       receivingPublicKey: signingPublicKey!,
       network: "regtest",
     });
@@ -546,13 +595,15 @@ describe("deposits.claim", () => {
       finalize.directFromCpfpRefundTxSigningJob,
     ];
     const expectedRaw = [
-      expected.cpfp.txBytes,
+      expectedRootTx,
       refunds.cpfpRefund.txBytes,
       refunds.directFromCpfpRefund.txBytes,
     ];
     for (const [i, job] of jobs.entries()) {
       const signingJob = required(job, "signing job");
-      expect(bytesToHex(signingJob.rawTx)).toBe(bytesToHex(expectedRaw[i]!));
+      expect(bytesToHex(signingJob.rawTx)).toBe(
+        bytesToHex(required(expectedRaw[i], "expected raw tx")),
+      );
       expect(bytesToHex(signingJob.signingPublicKey)).toBe(bytesToHex(signingPublicKey!));
       expect(signingJob.userSignature.length).toBeGreaterThan(0);
       const commitmentMap = required(signingJob.signingCommitments, "signing commitments");
@@ -638,7 +689,7 @@ describe("deposits.claim", () => {
         }),
     });
     await expect(client.deposits.claim({ transaction })).rejects.toThrow(
-      "fewer than three commitments",
+      "fewer than 3 commitments",
     );
     signer.dispose();
   });
@@ -788,13 +839,262 @@ describe("deposits.claim", () => {
         rootNode: finalizedRootNode(req, {
           secret: VERIFYING_SECRET,
           verifyingKey: VERIFYING_KEY,
-          badSig: true,
+          badSigInput: 0,
         }),
       }),
     );
     await expect(client.deposits.claim({ transaction })).rejects.toThrow(
       "invalid taproot signature",
     );
+    signer.dispose();
+  });
+
+  /** Operator commitments that differ per commitment index, so input ordering is observable. */
+  function opCommitmentsAt(index: number) {
+    return Object.fromEntries(
+      OPERATORS.map((op) => [
+        op.identifier,
+        {
+          hiding: secp256k1.Point.BASE.toBytes(true),
+          binding: secp256k1.Point.BASE.multiply(BigInt(index + 2)).toBytes(true),
+        },
+      ]),
+    );
+  }
+
+  /** A claimMany fake SO reporting `addresses` as unused, each bound to `leafId`. */
+  function claimManyClient(
+    signer: SparkSigner,
+    addresses: ReadonlyArray<{ address: string; verifyingKey: Uint8Array; leafId: string }>,
+    hooks: {
+      onCommitments?: (req: GetSigningCommitmentsRequest) => void;
+      onFinalize?: (req: FinalizeDepositTreeCreationRequest) => void;
+      commitmentCount?: number;
+      leafId?: string;
+    } = {},
+  ) {
+    return makeClient(signer, {
+      query_unused_deposit_addresses: () =>
+        create(QueryUnusedDepositAddressesResponseSchema, {
+          depositAddresses: addresses.map((entry) =>
+            create(DepositAddressQueryResultSchema, {
+              depositAddress: entry.address,
+              userSigningPublicKey: new Uint8Array(33).fill(1),
+              verifyingPublicKey: entry.verifyingKey,
+              leafId: entry.leafId,
+            }),
+          ),
+          offset: BigInt(addresses.length),
+        }),
+      get_signing_commitments: (req) => {
+        hooks.onCommitments?.(req);
+        return create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: Array.from({ length: hooks.commitmentCount ?? 8 }, (_, i) =>
+            create(RequestedSigningCommitmentsSchema, {
+              signingNonceCommitments: opCommitmentsAt(i),
+            }),
+          ),
+        });
+      },
+      finalize_deposit_tree_creation: (req) => {
+        hooks.onFinalize?.(req);
+        return create(FinalizeDepositTreeCreationResponseSchema, {
+          rootNode: finalizedRootNode(req, {
+            secret: VERIFYING_SECRET,
+            verifyingKey: VERIFYING_KEY,
+          }),
+        });
+      },
+    });
+  }
+
+  test("claimMany consolidates two UTXOs of one address into one leaf", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const txA = depositTxTo(address, 60_000n, [], 7);
+    const txB = depositTxTo(address, 40_000n, [], 8);
+    let commitmentsReq: GetSigningCommitmentsRequest | undefined;
+    let finalizeReq: FinalizeDepositTreeCreationRequest | undefined;
+    const client = claimManyClient(
+      signer,
+      [{ address, verifyingKey: VERIFYING_KEY, leafId: LEAF_ID }],
+      {
+        onCommitments: (req) => {
+          commitmentsReq = req;
+        },
+        onFinalize: (req) => {
+          finalizeReq = req;
+        },
+      },
+    );
+
+    const leaf = await client.deposits.claimMany({
+      outputs: [{ transaction: txA }, { transaction: txB }],
+    });
+    expect(leaf.id).toBe("claimed-1");
+
+    // N root inputs + 2 refund jobs = 4 commitments, in the SO's order.
+    expect(required(commitmentsReq, "commitments request").count).toBe(4);
+
+    const finalize = required(finalizeReq, "finalize request");
+    const primary = required(finalize.onChainUtxo, "onChainUtxo");
+    expect(primary.vout).toBe(0);
+    expect(bytesToHex(primary.rawTx)).toBe(bytesToHex(txA));
+    // The rest of the UTXOs ride additional_on_chain_utxos in caller order.
+    expect(finalize.additionalOnChainUtxos).toHaveLength(1);
+    const [additionalUtxo] = finalize.additionalOnChainUtxos;
+    expect(additionalUtxo?.vout).toBe(0);
+    expect(bytesToHex(required(additionalUtxo, "additional utxo").rawTx)).toBe(bytesToHex(txB));
+
+    const rootJob = required(finalize.rootTxSigningJob, "root signing job");
+    expect(parseTransaction(rootJob.rawTx).inputsLength).toBe(2);
+    // Root input 0 rides the job's fields with commitments index 0; input 1 rides
+    // additional_inputs with commitments index 1 — order proves the mapping.
+    const bindings = (job: Pick<InputSigningData, "signingCommitments">) =>
+      Object.fromEntries(
+        Object.entries(
+          required(job.signingCommitments, "signing commitments").signingCommitments,
+        ).map(([identifier, commitment]) => [identifier, bytesToHex(commitment.binding)]),
+      );
+    const bindingsAt = (index: number) =>
+      Object.fromEntries(
+        OPERATORS.map((op) => [
+          op.identifier,
+          bytesToHex(secp256k1.Point.BASE.multiply(BigInt(index + 2)).toBytes(true)),
+        ]),
+      );
+    expect(bindings(rootJob)).toStrictEqual(bindingsAt(0));
+    expect(rootJob.additionalInputs).toHaveLength(1);
+    const [additional] = rootJob.additionalInputs;
+    expect(bindings(required(additional, "additional input"))).toStrictEqual(bindingsAt(1));
+    // The fake signed each input over its own sighash committing to BOTH deposit prevouts;
+    // the client's post-finalize verification just proved its targets did the same.
+    signer.dispose();
+  });
+
+  test("claimMany rejects outputs paying different addresses", async () => {
+    const signer = await testSigner();
+    const addressA = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const addressB = p2trAddressFromPublicKey(OTHER_KEY, "regtest");
+    const client = claimManyClient(signer, [
+      { address: addressA, verifyingKey: VERIFYING_KEY, leafId: LEAF_ID },
+      { address: addressB, verifyingKey: OTHER_KEY, leafId: "leaf-b" },
+    ]);
+    await expect(
+      client.deposits.claimMany({
+        outputs: [
+          { transaction: depositTxTo(addressA, 60_000n, [], 7) },
+          { transaction: depositTxTo(addressB, 40_000n, [], 8) },
+        ],
+      }),
+    ).rejects.toThrow("different deposit addresses");
+    signer.dispose();
+  });
+
+  test("claimMany rejects a duplicate outpoint", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const transaction = depositTxTo(address, 60_000n);
+    const client = claimManyClient(signer, [
+      { address, verifyingKey: VERIFYING_KEY, leafId: LEAF_ID },
+    ]);
+    await expect(
+      client.deposits.claimMany({ outputs: [{ transaction }, { transaction }] }),
+    ).rejects.toThrow("duplicate deposit outpoint");
+    signer.dispose();
+  });
+
+  test("claimMany rejects an empty outputs list", async () => {
+    const signer = await testSigner();
+    const client = claimManyClient(signer, []);
+    await expect(client.deposits.claimMany({ outputs: [] })).rejects.toThrow("must not be empty");
+    signer.dispose();
+  });
+
+  test("claimMany rejects more than 11 outputs", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const transaction = depositTxTo(address, 60_000n);
+    const client = claimManyClient(signer, [
+      { address, verifyingKey: VERIFYING_KEY, leafId: LEAF_ID },
+    ]);
+    await expect(
+      client.deposits.claimMany({
+        outputs: Array.from({ length: 12 }, () => ({ transaction })),
+      }),
+    ).rejects.toThrow("at most 11 outputs");
+    signer.dispose();
+  });
+
+  test("claimMany rejects an output paying no unused address", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const stranger = p2trAddressFromPublicKey(OTHER_KEY, "regtest");
+    const client = claimManyClient(signer, [
+      { address, verifyingKey: VERIFYING_KEY, leafId: LEAF_ID },
+    ]);
+    await expect(
+      client.deposits.claimMany({
+        outputs: [
+          { transaction: depositTxTo(address, 60_000n, [], 7) },
+          { transaction: depositTxTo(stranger, 40_000n, [], 8) },
+        ],
+      }),
+    ).rejects.toThrow("none of the unused addresses");
+    signer.dispose();
+  });
+
+  test("claimMany rejects a deposit address without a leafId", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const client = claimManyClient(signer, [{ address, verifyingKey: VERIFYING_KEY, leafId: "" }]);
+    await expect(
+      client.deposits.claimMany({ outputs: [{ transaction: depositTxTo(address, 60_000n) }] }),
+    ).rejects.toThrow("not a single-use leaf deposit address");
+    signer.dispose();
+  });
+
+  test("claimMany rejects a finalized root with a bad signature on input 1", async () => {
+    const signer = await testSigner();
+    const address = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
+    const client = makeClient(signer, {
+      query_unused_deposit_addresses: () =>
+        create(QueryUnusedDepositAddressesResponseSchema, {
+          depositAddresses: [
+            create(DepositAddressQueryResultSchema, {
+              depositAddress: address,
+              userSigningPublicKey: new Uint8Array(33).fill(1),
+              verifyingPublicKey: VERIFYING_KEY,
+              leafId: LEAF_ID,
+            }),
+          ],
+          offset: 1n,
+        }),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: [0, 1, 2, 3].map((i) =>
+            create(RequestedSigningCommitmentsSchema, {
+              signingNonceCommitments: opCommitmentsAt(i),
+            }),
+          ),
+        }),
+      finalize_deposit_tree_creation: (req) =>
+        create(FinalizeDepositTreeCreationResponseSchema, {
+          rootNode: finalizedRootNode(req, {
+            secret: VERIFYING_SECRET,
+            verifyingKey: VERIFYING_KEY,
+            badSigInput: 1,
+          }),
+        }),
+    });
+    await expect(
+      client.deposits.claimMany({
+        outputs: [
+          { transaction: depositTxTo(address, 60_000n, [], 7) },
+          { transaction: depositTxTo(address, 40_000n, [], 8) },
+        ],
+      }),
+    ).rejects.toThrow("nodeTx input 1 has an invalid taproot signature");
     signer.dispose();
   });
 });
