@@ -20,19 +20,26 @@ invoices, so it needs no balance.
 
 ## Configuration
 
-| Variable                  | Default     | Notes                                        |
-| ------------------------- | ----------- | -------------------------------------------- |
-| `LNURL_DOMAIN`            | (required)  | Domain served in `name@domain` addresses     |
-| `LNURL_NETWORK`           | (required)  | `mainnet` or `regtest`                       |
-| `LNURL_SPARK_SEED`        | (required)  | 64-byte hex; the invoice-issuing wallet seed |
-| `LNURL_SPARK_ACCOUNT`     | SDK default | Account index (mainnet 1, regtest 0)         |
-| `LNURL_DB_PATH`           | (required)  | SQLite database path                         |
-| `LNURL_PORT`              | `8080`      | `0` binds an ephemeral port                  |
-| `LNURL_MIN_SENDABLE_MSAT` | `1000`      | LUD-06 minimum                               |
-| `LNURL_MAX_SENDABLE_MSAT` | `100000000` | LUD-06 maximum                               |
-| `LNURL_COMMENT_ALLOWED`   | `255`       | LUD-12 comment limit                         |
-| `LNURL_POLL_INTERVAL_MS`  | `5000`      | Settlement + receipt-publish round interval  |
-| `LNURL_ZAP_SECRET_KEY`    | (unset)     | 32-byte hex; set enables NIP-57 zaps         |
+| Variable                              | Default      | Notes                                                                     |
+| ------------------------------------- | ------------ | ------------------------------------------------------------------------- |
+| `LNURL_DOMAIN`                        | (required)   | Domain served in `name@domain` addresses                                  |
+| `LNURL_NETWORK`                       | (required)   | `mainnet` or `regtest`                                                    |
+| `LNURL_SPARK_SEED`                    | (required)   | 64-byte hex; the invoice-issuing wallet seed                              |
+| `LNURL_SPARK_ACCOUNT`                 | SDK default  | Account index (mainnet 1, regtest 0)                                      |
+| `LNURL_DB_PATH`                       | (required)   | SQLite database path                                                      |
+| `LNURL_PORT`                          | `8080`       | `0` binds an ephemeral port                                               |
+| `LNURL_MIN_SENDABLE_MSAT`             | `1000`       | LUD-06 minimum                                                            |
+| `LNURL_MAX_SENDABLE_MSAT`             | `100000000`  | LUD-06 maximum                                                            |
+| `LNURL_COMMENT_ALLOWED`               | `255`        | LUD-12 comment limit                                                      |
+| `LNURL_POLL_INTERVAL_MS`              | `5000`       | Settlement + receipt-publish round interval                               |
+| `LNURL_INVOICE_EXPIRY_SECS`           | `3600`       | BOLT-11 expiry on issued invoices                                         |
+| `LNURL_MAX_PENDING_INVOICES_PER_USER` | `100`        | Pending-invoice quota per payee                                           |
+| `LNURL_MAX_PENDING_INVOICES`          | `10000`      | Pending-invoice quota across the server                                   |
+| `LNURL_SETTLE_BATCH`                  | `200`        | Invoices status-checked per round, least-recently-checked first           |
+| `LNURL_PRUNE_EVERY_ROUNDS`            | `720`        | Prune expired invoices and stale receipts every N rounds (≈ hourly at 5s) |
+| `LNURL_SETTLED_RETENTION_MS`          | `2592000000` | Settled invoices kept 30d past expiry                                     |
+| `LNURL_ZAP_RECEIPT_BATCH`             | `50`         | Zap receipts fetched for publishing per round                             |
+| `LNURL_ZAP_SECRET_KEY`                | (unset)      | 32-byte hex; set enables NIP-57 zaps                                      |
 
 Secrets are never logged or echoed in errors.
 
@@ -53,10 +60,15 @@ zaps extension): `nostr` invoice parameters are validated per NIP-57 appendix D,
 settled zapped invoice produces a signed kind-9735 receipt persisted in `zap_receipts` and
 published to the request's `relays` (up to 10 URLs, retried up to 5 rounds).
 
-Receipt relays are payer-controlled, so the server only connects to `wss://` URLs whose host is
-plausibly public (no `localhost`/`*.localhost`, no IPv6 literals, no private or reserved IPv4
-literals). A public DNS name can still resolve to a private address (DNS rebinding): run the
-service where outbound connections to internal ranges are denied at the network layer.
+Receipt relays are payer-controlled, so the server only connects to `wss://` URLs on port 443
+whose host is plausibly public (no `localhost`/`*.localhost`, no IPv6 literals, no private or
+reserved IPv4 literals). A public DNS name can still resolve to a private address (DNS rebinding):
+run the service where outbound connections to internal ranges are denied at the network layer.
+
+Over-quota invoice requests fail with the LNURL error `too many pending invoices`; expired
+unsettled invoices, settled invoices past `LNURL_SETTLED_RETENTION_MS`, published zap receipts
+older than 7 days, and receipts that exhausted their attempts are pruned every
+`LNURL_PRUNE_EVERY_ROUNDS` settle rounds.
 
 ## Layout
 

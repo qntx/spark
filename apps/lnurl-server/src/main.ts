@@ -17,7 +17,12 @@ import { loadConfig } from "./config.ts";
 import { createLnurlApp } from "./http.ts";
 import { abortableSleep } from "./sleep.ts";
 import { createLnurlStore } from "./store.ts";
-import { publishZapReceipts, validateZapRequest } from "./zap.ts";
+import {
+  ZAP_RECEIPT_MAX_ATTEMPTS,
+  ZAP_RECEIPT_RETENTION_MS,
+  publishZapReceipts,
+  validateZapRequest,
+} from "./zap.ts";
 
 const log = (message: string): void => {
   process.stdout.write(`[lnurl-server] ${message}\n`);
@@ -65,6 +70,10 @@ export async function startLnurlServer(
     minSendableMsat: config.minSendableMsat,
     maxSendableMsat: config.maxSendableMsat,
     commentAllowed: config.commentAllowed,
+    invoiceExpirySecs: config.invoiceExpirySecs,
+    maxPendingInvoicesPerUser: config.maxPendingInvoicesPerUser,
+    maxPendingInvoices: config.maxPendingInvoices,
+    settleBatch: config.settleBatch,
     ...(zapKeys === undefined
       ? {}
       : {
@@ -87,7 +96,10 @@ export async function startLnurlServer(
   });
 
   // Settlement loop: never overlapping rounds; a failed round logs and the loop continues.
+  // Expired invoices and stale zap receipts are pruned every `pruneEveryRounds` rounds
+  // (720 × 5s ≈ hourly by default).
   const stop = new AbortController();
+  let round = 0;
   const loop = (async () => {
     for (;;) {
       if (stop.signal.aborted) {
@@ -98,7 +110,25 @@ export async function startLnurlServer(
         const settled = await server.settlePending();
         if (zapKeys !== undefined && pool !== undefined) {
           // oxlint-disable-next-line no-await-in-loop -- receipts publish within the round
-          await publishZapReceipts({ store, keys: zapKeys, pool, settled, log });
+          await publishZapReceipts({
+            store,
+            keys: zapKeys,
+            pool,
+            settled,
+            batch: config.zapReceiptBatch,
+            log,
+          });
+        }
+        round += 1;
+        if (round % config.pruneEveryRounds === 0) {
+          // oxlint-disable-next-line no-await-in-loop -- prunes run inside the settle loop
+          const [invoices, receipts] = await Promise.all([
+            store.pruneInvoices(Date.now(), config.settledRetentionMs),
+            store.pruneZapReceipts(Date.now(), ZAP_RECEIPT_RETENTION_MS, ZAP_RECEIPT_MAX_ATTEMPTS),
+          ]);
+          if (invoices > 0 || receipts > 0) {
+            log(`pruned ${invoices} invoices and ${receipts} zap receipts`);
+          }
         }
       } catch (error) {
         log(`settle round failed: ${String(error)}`);

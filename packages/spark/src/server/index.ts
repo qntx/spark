@@ -64,9 +64,9 @@ export type LightningAddressServer = {
   /** `GET /lnurlp/verify/{paymentHash}` — LUD-21 payment status. */
   readonly verify: (paymentHashHex: string) => Promise<LightningAddressResult>;
   /**
-   * Polls `client.lightning.receiveStatus` for every pending invoice and settles the ones whose
-   * verified preimage arrived. Returns the records settled this round so the app can publish zap
-   * receipts or webhooks.
+   * Polls `client.lightning.receiveStatus` for a bounded batch of pending invoices —
+   * least-recently-checked first — and settles the ones whose verified preimage arrived. Returns
+   * the records settled this round so the app can publish zap receipts or webhooks.
    */
   readonly settlePending: () => Promise<ReadonlyArray<LightningAddressInvoice>>;
 };
@@ -82,6 +82,19 @@ function lnurlError(reason: string): LightningAddressResult {
 
 /** `settlePending` polls at most this many invoice statuses in parallel. */
 const SETTLE_CONCURRENCY = 8;
+
+const DEFAULT_INVOICE_EXPIRY_SECS = 3600;
+const DEFAULT_MAX_PENDING_PER_USER = 100;
+const DEFAULT_MAX_PENDING = 10_000;
+const DEFAULT_SETTLE_BATCH = 200;
+
+function positiveInt(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 1) {
+    throw new SparkInputError(`lightning address server: ${name} must be a positive integer`);
+  }
+  return resolved;
+}
 
 function asStringField(body: Record<string, unknown>, field: string): string {
   const value = body[field];
@@ -143,6 +156,20 @@ export function createLightningAddressServer(options: {
   readonly maxSendableMsat: number;
   /** Longest payer comment accepted (LUD-12 `commentAllowed`). */
   readonly commentAllowed: number;
+  /** BOLT-11 expiry requested for every issued invoice; default {@link DEFAULT_INVOICE_EXPIRY_SECS}. */
+  readonly invoiceExpirySecs?: number;
+  /**
+   * Pending (unsettled, unexpired) invoices one payee may hold — an unauthenticated callback is a
+   * write, so without a cap a name's quota is a free database row each. Default 100.
+   */
+  readonly maxPendingInvoicesPerUser?: number;
+  /** Pending invoices the whole server holds; default 10_000. */
+  readonly maxPendingInvoices?: number;
+  /**
+   * Invoices status-checked per `settlePending` round, least-recently-checked first so a backlog
+   * rotates fairly instead of starving the tail. Default {@link DEFAULT_SETTLE_BATCH}.
+   */
+  readonly settleBatch?: number;
   readonly zap?: LightningAddressZapConfig | undefined;
   readonly now?: (() => number) | undefined;
 }): LightningAddressServer {
@@ -166,6 +193,22 @@ export function createLightningAddressServer(options: {
   }
   const { client, store } = options;
   const { zap } = options;
+  const invoiceExpirySecs = positiveInt(
+    options.invoiceExpirySecs,
+    DEFAULT_INVOICE_EXPIRY_SECS,
+    "invoiceExpirySecs",
+  );
+  const maxPendingPerUser = positiveInt(
+    options.maxPendingInvoicesPerUser,
+    DEFAULT_MAX_PENDING_PER_USER,
+    "maxPendingInvoicesPerUser",
+  );
+  const maxPending = positiveInt(
+    options.maxPendingInvoices,
+    DEFAULT_MAX_PENDING,
+    "maxPendingInvoices",
+  );
+  const settleBatch = positiveInt(options.settleBatch, DEFAULT_SETTLE_BATCH, "settleBatch");
   const now = options.now ?? (() => Date.now());
   const nowSecs = (): number => Math.floor(now() / 1000);
 
@@ -342,6 +385,12 @@ export function createLightningAddressServer(options: {
         return lnurlError(serverErrorText(error instanceof Error ? error.message : String(error)));
       }
     }
+    if (
+      (await store.countPendingInvoices(now(), user.pubkeyHex)) >= maxPendingPerUser ||
+      (await store.countPendingInvoices(now())) >= maxPending
+    ) {
+      return lnurlError("too many pending invoices");
+    }
     // NIP-57: the invoice commits to the zap request alone; otherwise to the metadata.
     const descriptionHash = sha256(utf8ToBytes(params.nostr ?? metadataOf(user)));
     let created;
@@ -350,6 +399,7 @@ export function createLightningAddressServer(options: {
         amountSats: params.amount / 1000,
         descriptionHash,
         receiver: hexToBytes(user.pubkeyHex),
+        expirySecs: invoiceExpirySecs,
       });
     } catch {
       return lnurlError("failed to create invoice");
@@ -404,11 +454,14 @@ export function createLightningAddressServer(options: {
     } catch {
       // A failed read (or a failed store write) leaves the invoice pending for the next round.
       return undefined;
+    } finally {
+      // Fairness bookkeeping only — a failed mark just degrades the check order.
+      await store.markChecked(record.paymentHash, now()).catch(() => undefined);
     }
   }
 
   async function settlePending(): Promise<ReadonlyArray<LightningAddressInvoice>> {
-    const pending = await store.pendingInvoices(now());
+    const pending = await store.pendingInvoices(now(), settleBatch);
     const settled: LightningAddressInvoice[] = [];
     for (let start = 0; start < pending.length; start += SETTLE_CONCURRENCY) {
       const chunk = pending.slice(start, start + SETTLE_CONCURRENCY);
