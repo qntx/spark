@@ -11,7 +11,7 @@ import {
   TransferPackageSchema,
 } from "../proto/gen/spark_pb.ts";
 import type { SspClient } from "../ssp/index.ts";
-import { selectExact } from "../tree/index.ts";
+import { selectExactMany } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { signUserJobs } from "../tree/signing.ts";
 import { claimTransfer } from "./claim.ts";
@@ -67,10 +67,10 @@ export async function swapLeaves(
 
   const prepared = await signer.prepareTransfer({
     transferId: options.transferId,
-    receiverIdentityPublicKey: options.sspIdentityPublicKey,
     leaves: options.leaves.map((leaf) => ({
       leafId: leaf.id,
       key: { type: "leaf", leafId: leaf.id },
+      receiverIdentityPublicKey: options.sspIdentityPublicKey,
     })),
     operators,
     threshold,
@@ -271,17 +271,11 @@ export async function swapLeaves(
         `(inputs ${totalSats} minus fee ${requestedFeeSats}); the swap leaves are already ours`,
     );
   }
-  let remaining = claimed;
-  for (const target of options.targetAmountsSats) {
-    const exact = selectExact(remaining, target);
-    if (exact === undefined) {
-      throw new SparkError(
-        `swapLeaves: claimed leaves cannot cover target amount ${target} sats exactly; ` +
-          "the swap leaves are already ours",
-      );
-    }
-    const used = new Set(exact.map((leaf) => leaf.id));
-    remaining = remaining.filter((leaf) => !used.has(leaf.id));
+  if (selectExactMany(claimed, options.targetAmountsSats) === undefined) {
+    throw new SparkError(
+      `swapLeaves: claimed leaves cannot cover the target amounts exactly; ` +
+        "the swap leaves are already ours",
+    );
   }
   return claimed;
 }

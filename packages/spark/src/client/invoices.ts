@@ -111,8 +111,12 @@ export function createInvoices(context: ClientContext): SparkClient["invoices"] 
       const { payment } = parsed.fields;
       if (payment?.type === "sats") {
         return sendSats(context, {
-          receiver: parsed.receiverIdentityPublicKey,
-          amountSats: satsAmount(payment.amount, payOptions?.amount),
+          receivers: [
+            {
+              receiverIdentityPublicKey: parsed.receiverIdentityPublicKey,
+              amountSats: satsAmount(payment.amount, payOptions?.amount),
+            },
+          ],
           sparkInvoice: invoice,
         });
       }

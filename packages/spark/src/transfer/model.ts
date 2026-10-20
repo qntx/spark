@@ -33,6 +33,8 @@ export type SparkTransferLeaf = {
 export type SparkTransferReceiver = {
   readonly id: string;
   readonly identityPublicKey: Uint8Array;
+  /** Sats this receiver edge carries (0 on single-receiver transfers that leave it unset). */
+  readonly amountSats: number;
   readonly status: string;
 };
 
@@ -106,6 +108,7 @@ export function mapTransfer(transfer: Transfer): SparkTransfer {
     receivers: transfer.receivers.map((receiver) => ({
       id: receiver.id,
       identityPublicKey: receiver.identityPublicKey,
+      amountSats: u64ToSats(receiver.amountSats, "transfer receiver amount"),
       status: protoEnumName(TransferReceiverStatus, receiver.status),
     })),
     status: protoEnumName(TransferStatus, transfer.status),

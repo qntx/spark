@@ -3,7 +3,7 @@ import { SparkError } from "../errors/index.ts";
 import { swapLeaves } from "../transfer/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { renewLeaf, renewalKind } from "../tree/renew.ts";
-import { selectExact, selectLeaves } from "../tree/select.ts";
+import { selectExactMany, selectLeaves } from "../tree/select.ts";
 import type { ClientContext } from "./context.ts";
 
 /**
@@ -29,36 +29,48 @@ export async function renewStaleLeaves(
 }
 
 /**
- * Leaves covering exactly `amountSats`: an exact combination when one exists, otherwise an SSP
- * leaves swap minted for the amount — with stale-input renewals on both paths and exit-chain
- * bookkeeping (swap inputs dropped, swapped-in leaves stored). Shared by `transfers.send`,
- * `invoices.pay` and `lightning.pay`.
+ * One leaf group per amount, each summing exactly to its amount: disjoint exact combinations when
+ * they all exist, otherwise an SSP leaves swap minted for all amounts at once — with stale-input
+ * renewals on both paths and exit-chain bookkeeping (swap inputs dropped, swapped-in leaves
+ * stored). Shared by `transfers.send`/`sendMany`, `invoices.pay`, `lightning.pay` and coop exits.
  */
 export async function selectSendLeaves(
   context: ClientContext,
-  amountSats: number,
-): Promise<SparkLeaf[]> {
+  amounts: ReadonlyArray<number>,
+): Promise<SparkLeaf[][]> {
   const { store, random, now } = context;
 
-  const selection = selectLeaves(await context.leaves(), amountSats);
-  if (selection.kind === "swap") {
-    const swapInputs = await renewStaleLeaves(context, selection.leaves);
-    const claimed = await swapLeaves({
-      ...context.transferCoordinator,
-      ssp: context.sspClient,
-      sspIdentityPublicKey: context.config.ssp.identityPublicKey,
-      transferId: uuidv7(random, now),
-      leaves: swapInputs,
-      targetAmountsSats: [amountSats],
-      random,
-    });
-    await store.deleteExitChains(swapInputs.map((leaf) => leaf.id));
-    await context.storeChainsFor(claimed);
-    const exact = selectExact(claimed, amountSats);
-    if (exact === undefined) {
-      throw new SparkError(`send: swapped leaves cannot cover ${amountSats} sats exactly`);
+  const selection = selectLeaves(await context.leaves(), amounts);
+  if (selection.kind === "exact") {
+    const renewed: SparkLeaf[][] = [];
+    for (const group of selection.groups) {
+      // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order
+      renewed.push(await renewStaleLeaves(context, group));
     }
-    return renewStaleLeaves(context, exact);
+    return renewed;
   }
-  return renewStaleLeaves(context, selection.leaves);
+
+  const swapInputs = await renewStaleLeaves(context, selection.leaves);
+  const claimed = await swapLeaves({
+    ...context.transferCoordinator,
+    ssp: context.sspClient,
+    sspIdentityPublicKey: context.config.ssp.identityPublicKey,
+    transferId: uuidv7(random, now),
+    leaves: swapInputs,
+    targetAmountsSats: amounts,
+    random,
+  });
+  await store.deleteExitChains(swapInputs.map((leaf) => leaf.id));
+  await context.storeChainsFor(claimed);
+  // swapLeaves already verified coverage with the same selection rule.
+  const groups = selectExactMany(claimed, amounts);
+  if (groups === undefined) {
+    throw new SparkError("send: swapped leaves cannot cover the requested amounts exactly");
+  }
+  const renewed: SparkLeaf[][] = [];
+  for (const group of groups) {
+    // oxlint-disable-next-line no-await-in-loop -- renewals must complete in order
+    renewed.push(await renewStaleLeaves(context, group));
+  }
+  return renewed;
 }

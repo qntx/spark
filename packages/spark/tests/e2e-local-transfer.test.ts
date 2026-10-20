@@ -132,3 +132,65 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO transfer flow"
     signerB.dispose();
   }, 300_000);
 });
+
+/** Deposit `amountBtc` to a fresh single-use address and claim the leaf it produces. */
+async function fundAndClaim(
+  client: Awaited<ReturnType<typeof localWallet>>["client"],
+  amountBtc: number,
+  minerAddress: string,
+) {
+  const address = await client.deposits.newAddress();
+  const txid = (await bitcoinRpc("sendtoaddress", [address, amountBtc])) as string;
+  await bitcoinRpc("generatetoaddress", [1, minerAddress]);
+  const rawHex = (await bitcoinRpc("getrawtransaction", [txid])) as string;
+  return claimUntilAccepted(client, hexToBytes(rawHex), Date.now() + CLAIM_DEADLINE_MS);
+}
+
+describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO multi-receiver send", () => {
+  test("A sends to B and C in one sendMany; both claim their edge", async () => {
+    const { signer: signerA, client: clientA } = await localWallet(randomBytes(32));
+    const { signer: signerB, client: clientB } = await localWallet(randomBytes(32));
+    const { signer: signerC, client: clientC } = await localWallet(randomBytes(32));
+    const minerAddress = (await bitcoinRpc("getnewaddress", [])) as string;
+
+    // Two deposits → two leaves, so each receiver gets an exact leaf group (no SSP locally).
+    const leaf100k = await fundAndClaim(clientA, 0.001, minerAddress);
+    const leaf50k = await fundAndClaim(clientA, 0.0005, minerAddress);
+    console.log("A claimed leaves:", leaf100k.id, leaf50k.id);
+
+    const transfer = await clientA.transfers.sendMany({
+      receivers: [
+        { receiver: await signerB.identityPublicKey(), amountSats: 100_000 },
+        { receiver: await signerC.identityPublicKey(), amountSats: 50_000 },
+      ],
+    });
+    console.log("A sent multi-receiver transfer:", transfer.id, "status:", transfer.status);
+    console.log(
+      "receivers:",
+      transfer.receivers.map((receiver) => `${receiver.id}=${receiver.amountSats}`).join(", "),
+    );
+    await expect(clientA.balance()).resolves.toBe(0);
+
+    const [pendingB] = await pendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    const claimedByB = await clientB.transfers.claim(requiredTransfer(pendingB));
+    expect(claimedByB.map((leaf) => leaf.valueSats)).toStrictEqual([100_000]);
+    const [pendingC] = await pendingUntil(clientC, Date.now() + CLAIM_DEADLINE_MS);
+    const claimedByC = await clientC.transfers.claim(requiredTransfer(pendingC));
+    expect(claimedByC.map((leaf) => leaf.valueSats)).toStrictEqual([50_000]);
+    await expect(clientB.balance()).resolves.toBe(100_000);
+    await expect(clientC.balance()).resolves.toBe(50_000);
+    console.log(
+      "B claimed:",
+      claimedByB.map((leaf) => leaf.id).join(", "),
+      "— C claimed:",
+      claimedByC.map((leaf) => leaf.id).join(", "),
+    );
+
+    clientA.close();
+    clientB.close();
+    clientC.close();
+    signerA.dispose();
+    signerB.dispose();
+    signerC.dispose();
+  }, 300_000);
+});

@@ -53,12 +53,27 @@ export type SparkClient = {
     }) => Promise<ReadonlyArray<SparkTransfer>>;
     /**
      * Sends exactly `amountSats` to `receiver` (a `spark1…`/`sparkrt1…` address string or a 33-byte
-     * identity public key) via `start_transfer_v2`. Selects AVAILABLE leaves summing exactly to the
-     * amount — leaf swaps arrive with S8, so other amounts are rejected for now.
+     * identity public key) via `start_transfer_v2` — selecting exact leaves, or swapping with the
+     * SSP first when no exact combination exists. Pass the same `transferId` to retry a call whose
+     * response was lost.
      */
     readonly send: (sendOptions: {
       readonly receiver: string | Uint8Array;
       readonly amountSats: number;
+      readonly transferId?: string;
+    }) => Promise<SparkTransfer>;
+    /**
+     * Sends to several receivers in one `start_transfer_v3` — one exact leaf group per entry, or a
+     * single SSP swap minting every amount. `receiver` accepts the same shapes as `send` (invoice
+     * addresses are rejected); duplicate receivers are rejected. `transferId` has the same retry
+     * semantics as `send`.
+     */
+    readonly sendMany: (sendOptions: {
+      readonly receivers: ReadonlyArray<{
+        readonly receiver: string | Uint8Array;
+        readonly amountSats: number;
+      }>;
+      readonly transferId?: string;
     }) => Promise<SparkTransfer>;
     /** Verifies and claims a pending transfer addressed to this identity; returns the new leaves. */
     readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;

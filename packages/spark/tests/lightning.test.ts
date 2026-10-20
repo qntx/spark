@@ -179,6 +179,12 @@ function commitments(count: number) {
   );
 }
 
+/** A `query_transfers_by_id` lookup answering with the queued transfers in order, then none. */
+function queuedTransfers(responses: ReadonlyArray<Transfer | undefined>) {
+  const queue = [...responses];
+  return () => queue.shift();
+}
+
 function transferProto(options: {
   id: string;
   sender: Uint8Array;
@@ -186,6 +192,7 @@ function transferProto(options: {
   type?: TransferType;
   status?: TransferStatus;
   leaves?: ReadonlyArray<SparkLeaf>;
+  totalValue?: bigint;
 }): Transfer {
   return create(TransferSchema, {
     id: options.id,
@@ -194,6 +201,7 @@ function transferProto(options: {
     status: options.status ?? TransferStatus.SENDER_KEY_TWEAKED,
     type: options.type ?? TransferType.PREIMAGE_SWAP,
     network: Network.REGTEST,
+    totalValue: options.totalValue ?? 0n,
     leaves: (options.leaves ?? []).map((leaf) =>
       create(TransferLeafSchema, {
         leaf: create(TreeNodeSchema, {
@@ -648,8 +656,11 @@ async function sendDeps(overrides: {
   initiate?: (
     input: Record<string, unknown>,
   ) => Promise<{ transfer?: Transfer }> | { transfer?: Transfer };
-  /** Recovered transfer for the `query_transfers_by_id` probe (default: none found). */
-  recoveredTransfer?: Transfer;
+  /**
+   * Recovered transfer for the `query_transfers_by_id` probe — or a per-call lookup (default: none
+   * found).
+   */
+  recoveredTransfer?: Transfer | (() => Transfer | undefined);
   /** Override the SSP send-request response (defaults to echoing the invoice back). */
   requestLightningSend?: (req: SspLightningSendRequest) => Partial<SspLightningSendResult>;
   deleted?: string[][];
@@ -679,8 +690,13 @@ async function sendDeps(overrides: {
           }),
         };
       }),
-    query_transfers_by_id: () =>
-      overrides.recoveredTransfer === undefined ? {} : { transfers: [overrides.recoveredTransfer] },
+    query_transfers_by_id: () => {
+      const recovered =
+        typeof overrides.recoveredTransfer === "function"
+          ? overrides.recoveredTransfer()
+          : overrides.recoveredTransfer;
+      return recovered === undefined ? {} : { transfers: [recovered] };
+    },
   });
   const { ssp, sendRequests, feeEstimates } = fakeSsp({
     lightningSendFeeEstimate: () => overrides.feeSats ?? 7,
@@ -941,7 +957,8 @@ describe("payLightningInvoice", () => {
     });
     const { deps, sendRequests, deleted, calls } = await sendDeps({
       leaves: [leaf],
-      recoveredTransfer: committed,
+      // The pre-send probe misses; the post-failure probe finds the committed transfer.
+      recoveredTransfer: queuedTransfers([undefined, committed]),
       initiate: () => {
         throw new SparkRequestError("initiate response lost", { code: "unavailable" });
       },
@@ -951,7 +968,7 @@ describe("payLightningInvoice", () => {
     expect(payment.transferId).toBe(transferId);
     expect(sendRequests[0]?.userOutboundTransferExternalId).toBe(transferId);
     expect(deleted).toStrictEqual([["leaf-1"]]);
-    expect(calls.filter((call) => call.method === "query_transfers_by_id")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "query_transfers_by_id")).toHaveLength(2);
   });
 
   test("a non-committed initiate failure rethrows the original error", async () => {
@@ -974,9 +991,85 @@ describe("payLightningInvoice", () => {
     expect(sendRequests).toHaveLength(0);
   });
 
-  test("a recovered non-preimage-swap transfer does not count", async () => {
+  test("a committed swap under the caller's transfer id resumes without initiating", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+      totalValue: 1007n, // 1000 sats amount + 7 sats committed fee
+    });
+    const { deps, calls, sendRequests, feeEstimates, deleted } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run when the probe hits");
+      },
+    });
+    const payment = await payLightningInvoice(deps, {
+      invoice,
+      maxFeeSats: 200,
+      transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+    });
+    // The probe hit skips the fee estimate, selection and package building entirely.
+    expect(calls.map((call) => call.method)).toStrictEqual(["query_transfers_by_id"]);
+    expect(feeEstimates).toHaveLength(0);
+    expect(payment.feeSats).toBe(7);
+    expect(sendRequests).toHaveLength(1);
+    expect(sendRequests[0]!.userOutboundTransferExternalId).toBe(
+      "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+    );
+    expect(deleted).toStrictEqual([["leaf-1"]]);
+    expect(payment.requestId).toBe("send-req-1");
+    expect(payment.transferId).toBe("0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee");
+  });
+
+  test("a probed swap whose committed fee exceeds maxFeeSats is rejected", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+      totalValue: 1201n, // implies a 201-sat fee, above maxFeeSats
+    });
+    const { deps, sendRequests, feeEstimates } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run when the probe hits");
+      },
+    });
+    await expect(
+      payLightningInvoice(deps, {
+        invoice,
+        maxFeeSats: 200,
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ).rejects.toThrow(/committed transfer fee 201 exceeds maxFeeSats 200/);
+    expect(feeEstimates).toHaveLength(0);
+    expect(sendRequests).toHaveLength(0);
+  });
+
+  test("a probed transfer under someone else's sender key is rejected", async () => {
+    const signer = await testSigner();
     const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
@@ -990,21 +1083,21 @@ describe("payLightningInvoice", () => {
       type: TransferType.PREIMAGE_SWAP,
       leaves: [leaf],
     });
-    const { deps } = await sendDeps({
+    const { deps, sendRequests } = await sendDeps({
       leaves: [leaf],
       recoveredTransfer: foreign,
       initiate: () => {
         throw new SparkRequestError("initiate response lost", { code: "unavailable" });
       },
     });
-    void identityPublicKey;
     await expect(
       payLightningInvoice(deps, {
         invoice,
         maxFeeSats: 200,
         transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
       }),
-    ).rejects.toThrow("initiate response lost");
+    ).rejects.toThrow("committed transfer is not ours");
+    expect(sendRequests).toHaveLength(0);
   });
 
   test("exit chains are deleted for the returned transfer's leaves, not the selection", async () => {
@@ -1096,7 +1189,7 @@ describe("payLightningInvoice", () => {
     expect(sendRequests).toHaveLength(0);
   });
 
-  test("a recovered transfer to another receiver does not count", async () => {
+  test("a probed transfer to another receiver does not count", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
     const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
@@ -1125,7 +1218,7 @@ describe("payLightningInvoice", () => {
         maxFeeSats: 200,
         transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
       }),
-    ).rejects.toThrow("initiate response lost");
+    ).rejects.toThrow("committed transfer is not ours");
   });
 
   test("an ssp send request echoing a different invoice is rejected", async () => {
