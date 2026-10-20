@@ -56,6 +56,7 @@ export type {
   LightningInvoice,
   LightningPayment,
   LightningReceiveStatus,
+  LightningSendOutcome,
   LightningSendStatus,
   LightningSendStatusRequest,
 } from "./lightning/index.ts";

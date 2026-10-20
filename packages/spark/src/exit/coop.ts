@@ -1,8 +1,9 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import type { Client } from "@connectrpc/connect";
+import { equalBytes } from "@noble/curves/utils.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { Address } from "@scure/btc-signer";
+import { Address, OutScript } from "@scure/btc-signer";
 
 import { u64ToSats } from "../core/assert.ts";
 import {
@@ -30,7 +31,11 @@ import type {
 } from "../ssp/index.ts";
 import { mapTransfer } from "../transfer/model.ts";
 import type { SparkTransfer } from "../transfer/model.ts";
-import { assertCommittedTransfer, queryCommittedTransfer } from "../transfer/query.ts";
+import {
+  assertCommittedTransfer,
+  queryCommittedTransfer,
+  queryTransferById,
+} from "../transfer/query.ts";
 import { prepareTransferPackage } from "../transfer/send.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 
@@ -128,6 +133,27 @@ function prevout0(txBytes: Uint8Array, context: string): { script: Uint8Array; a
   return { script: output.script, amount: u64ToSats(output.amount, context) };
 }
 
+/** The sats `rawCoopExitTransaction` pays to `address` — an exit not paying it is an error. */
+function payoutSatsForAddress(
+  rawCoopExitTransaction: Uint8Array,
+  address: string,
+  network: SparkNetwork,
+): number {
+  const expectedScript = OutScript.encode(Address(btcNetwork(network)).decode(address));
+  const tx = parseTransaction(rawCoopExitTransaction);
+  for (let i = 0; i < tx.outputsLength; i++) {
+    const output = tx.getOutput(i);
+    if (
+      output.script !== undefined &&
+      output.amount !== undefined &&
+      equalBytes(output.script, expectedScript)
+    ) {
+      return u64ToSats(output.amount, "coop exit payout");
+    }
+  }
+  throw new SparkInputError("coop exit: payout transaction does not pay the withdrawal address");
+}
+
 /**
  * `coop_exit_fee_quote` for the leaves an exit would use: every spendable leaf when `amountSats` is
  * omitted, otherwise the exact-amount selection (which may swap). `selectLeaves` is the client's
@@ -191,6 +217,74 @@ async function completeWithRetries(
 }
 
 /**
+ * Resumes an exit whose transfer already committed under `options.transferId`: the SSP request is
+ * re-created for the committed leaf ids — the SSP dedupes on `userOutboundTransferExternalId`, so a
+ * live request resolves to itself and an expired one is re-created — then validated and completed.
+ * `maxFeeSats` does not gate this path: the fee was already committed on the first call. A payout
+ * that does not pay `options.address` means the id was reused with different terms — that fails
+ * rather than riding along.
+ */
+async function resumeCommittedExit(
+  deps: CoopExitDeps & {
+    readonly deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
+  },
+  options: { readonly address: string; readonly speed: SspCoopExitSpeed },
+  transfer: SparkTransfer,
+): Promise<CooperativeExitResult> {
+  const { ssp, sspIdentityPublicKey, signer, network } = deps;
+  const identityPublicKey = await signer.identityPublicKey();
+  assertCommittedTransfer(
+    transfer,
+    {
+      type: TransferType.COOPERATIVE_EXIT,
+      senderIdentityPublicKey: identityPublicKey,
+      receiverIdentityPublicKeys: [sspIdentityPublicKey],
+    },
+    "coop exit",
+  );
+
+  // The transfer committed in an earlier call — deleting its old chains needs no lock: a
+  // leaves() sync only re-stores chains for leaves it just queried, and these are gone.
+  await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
+
+  const request = await ssp.requestCoopExit({
+    leafIds: transfer.leaves.map((leaf) => leaf.leaf.id),
+    withdrawalAddress: options.address,
+    exitSpeed: options.speed,
+    withdrawAll: true,
+    userOutboundTransferExternalId: transfer.id,
+  });
+  if (COOP_EXIT_FAILED.has(request.status)) {
+    throw new SparkError(`coop exit: ssp request for transfer ${transfer.id} is ${request.status}`);
+  }
+
+  const payoutSats = payoutSatsForAddress(request.rawCoopExitTransaction, options.address, network);
+  validateCoopExitPayoutTransaction({
+    rawCoopExitTransaction: request.rawCoopExitTransaction,
+    expectedCoopExitTxid: request.coopExitTxid,
+    expectedPayoutAddress: options.address,
+    expectedPayoutAmountSats: payoutSats,
+    network,
+  });
+  const feeSats = transfer.totalValueSats - payoutSats;
+  if (feeSats < 0) {
+    throw new SparkError(
+      `coop exit: payout ${payoutSats} exceeds the committed ${transfer.totalValueSats} sats`,
+    );
+  }
+
+  const status = await completeWithRetries(deps, request.id, transfer.id);
+  return {
+    transferId: transfer.id,
+    requestId: request.id,
+    coopExitTxid: request.coopExitTxid,
+    payoutSats,
+    feeSats,
+    status,
+  };
+}
+
+/**
  * Withdraws `leaves` to an on-chain address: asks the SSP for the payout + connector transactions,
  * re-signs each leaf's three refunds with the connector output as second input, commits them in a
  * COOPERATIVE_EXIT transfer to the SSP and asks the SSP to complete the exit.
@@ -201,6 +295,12 @@ async function completeWithRetries(
  * ids were sent. On a lost `cooperative_exit_v2` response the transfer id doubles as the recovery
  * key; once the transfer commits, the old refund txs are deleted before the completion request so
  * an SSP failure cannot leave them usable.
+ *
+ * Retry semantics: the SSP request expires ~2 minutes after creation unless the transfer commits,
+ * so the request alone cannot be relied on across calls. A caller-supplied `transferId` probes the
+ * committed transfer first — on a hit, the payout is re-requested for the committed leaf ids and
+ * completed, skipping selection and signing. An uncommitted id whose request expired is burned:
+ * retry with a fresh `transferId`.
  *
  * `spendLeaves` hands `use` the selected leaves (all spendable ones when `amountSats` is undefined)
  * and keeps the client's leaf lock held until `use` resolves — selection, SSP quote, commit and
@@ -228,6 +328,19 @@ export async function cooperativeExit(
   checkAmountSats(options.amountSats);
   if (!Number.isSafeInteger(options.maxFeeSats) || options.maxFeeSats < 0) {
     throw new SparkInputError("coop exit: maxFeeSats must be a non-negative integer");
+  }
+
+  // A caller-supplied id is the idempotency handle: a committed exit under it means this call is
+  // a retry — probe before any leaf selection and resume with the committed leaves.
+  if (options.transferId !== undefined) {
+    const committed = await queryTransferById({
+      spark,
+      network,
+      transferId: options.transferId,
+    });
+    if (committed !== undefined) {
+      return resumeCommittedExit(deps, options, committed);
+    }
   }
 
   // Selection through the committed transfer's chain deletion is one critical section under the
@@ -263,6 +376,12 @@ export async function cooperativeExit(
       withdrawAll: true,
       userOutboundTransferExternalId: transferId,
     });
+    // Never commit against a dead request — an expired external id is burned, not retried.
+    if (COOP_EXIT_FAILED.has(request.status)) {
+      throw new SparkError(
+        `coop exit: ssp request for transfer ${transferId} is ${request.status}; retry with a new transferId`,
+      );
+    }
 
     // The payout tx must be the one the SSP claims it is and must pay out what the quote implied.
     validateCoopExitPayoutTransaction({

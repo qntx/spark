@@ -1307,6 +1307,37 @@ describe("lightningSendStatus", () => {
     expect(status.preimage).toBeUndefined();
   });
 
+  test.each([
+    ["LIGHTNING_PAYMENT_INITIATED", "pending"],
+    ["LIGHTNING_PAYMENT_FAILED", "failed"],
+    ["TRANSFER_FAILED", "failed"],
+    ["PREIMAGE_PROVIDING_FAILED", "failed"],
+    ["USER_TRANSFER_VALIDATION_FAILED", "failed"],
+    ["PENDING_USER_SWAP_RETURN", "failed"],
+    ["USER_SWAP_RETURN_FAILED", "failed"],
+    ["USER_SWAP_RETURNED", "returned"],
+    ["SOME_UNLISTED_STATUS", "pending"],
+  ] as const)("status %s maps to outcome %s", async (sspStatus, outcome) => {
+    const { ssp } = fakeSsp({
+      lightningSendRequest: () => ({ status: sspStatus, encodedInvoice: PAID_INVOICE }),
+    });
+    const result = await lightningSendStatus(ssp, request);
+    expect(result.status).toBe(sspStatus);
+    expect(result.outcome).toBe(outcome);
+  });
+
+  test("a verified preimage reports succeeded whatever the status says", async () => {
+    const { ssp } = fakeSsp({
+      lightningSendRequest: () => ({
+        status: "USER_SWAP_RETURN_FAILED",
+        encodedInvoice: PAID_INVOICE,
+        paymentPreimage: PREIMAGE,
+      }),
+    });
+    const result = await lightningSendStatus(ssp, request);
+    expect(result.outcome).toBe("succeeded");
+  });
+
   test("rejects a preimage that does not hash to the paid payment hash", async () => {
     const { ssp } = fakeSsp({
       lightningSendRequest: () => ({
