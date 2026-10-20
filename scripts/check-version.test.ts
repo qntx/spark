@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 
-import { checkVersion, peerRange } from "./check-version.ts";
+import { checkVersion, peerRange, updatePeerRange } from "./check-version.ts";
 
 const CARGO_TOML = `[workspace]
 members = ["crates/spark-crypto", "crates/spark-ffi"]
@@ -136,5 +136,26 @@ describe("check-version", () => {
     expect(peerRange("0.3.0")).toBe("^0.3.0");
     expect(peerRange("1.8.0")).toBe("^1.0.0");
     expect(peerRange("2.0.0")).toBe("^2.0.0");
+  });
+
+  test("updatePeerRange rewrites the @qntx/spark peer to the lockstep caret", () => {
+    const pkg: Record<string, unknown> = {
+      name: "@qntx/spark-wasm",
+      peerDependencies: { "@qntx/spark": "^0.0.0", "react-native": "*" },
+    };
+    updatePeerRange(pkg, "0.3.0");
+    expect(pkg["peerDependencies"]).toStrictEqual({
+      "@qntx/spark": "^0.3.0",
+      "react-native": "*",
+    });
+  });
+
+  test("updatePeerRange throws without an @qntx/spark peer", () => {
+    expect(() => updatePeerRange({ name: "@qntx/spark" }, "0.3.0")).toThrow(
+      'missing "@qntx/spark" peerDependency',
+    );
+    expect(() => updatePeerRange({ dependencies: { "@qntx/spark": "^0.0.0" } }, "0.3.0")).toThrow(
+      'missing "@qntx/spark" peerDependency',
+    );
   });
 });
