@@ -1,0 +1,23 @@
+{
+  "name": "@qntx/lnurl-server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference Lightning Address server over @qntx/spark/server (LUD-06/12/16/21, NIP-57)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "vp test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@qntx/nostr": "0.13.0",
+    "@qntx/spark": "workspace:*",
+    "@qntx/spark-wasm": "workspace:*",
+    "hono": "4.13.13"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
