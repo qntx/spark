@@ -33,7 +33,7 @@ import type { SparkTokenOutput } from "./model.ts";
 // broadcastTokenTransactionV3Detailed.
 
 /** Upstream cap on inputs per token transaction (`MAX_TOKEN_OUTPUTS_TX`). */
-const MAX_TOKEN_OUTPUTS_TX = 500;
+export const MAX_TOKEN_OUTPUTS_TX = 500;
 const TOKEN_AMOUNT_LENGTH = 16;
 const TOKEN_VERSION = 3;
 

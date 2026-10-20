@@ -141,6 +141,34 @@ async function balanceUntil(
   }
 }
 
+async function outputsUntil(
+  client: {
+    tokens: {
+      outputs: (options?: {
+        tokenIdentifier?: string;
+      }) => Promise<ReadonlyArray<{ amount: bigint; ownerPublicKey: Uint8Array }>>;
+    };
+  },
+  tokenIdentifier: string,
+  expected: number,
+  deadlineMs = Date.now() + DEADLINE_MS,
+) {
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- polling is sequential by definition
+    const outputs = await client.tokens.outputs({ tokenIdentifier });
+    if (outputs.length === expected) {
+      return outputs;
+    }
+    if (Date.now() > deadlineMs) {
+      throw new SparkError(
+        `timed out waiting for ${expected} token outputs (have ${outputs.length})`,
+      );
+    }
+    // oxlint-disable-next-line no-await-in-loop -- polling is sequential by definition
+    await sleep(1000);
+  }
+}
+
 function requiredIdentifier(value: Uint8Array | undefined): Uint8Array {
   if (value === undefined) {
     throw new SparkError("create broadcast did not return a token identifier");
@@ -194,5 +222,41 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO tokens", () =>
     const bOutputsAfter = await walletB.client.tokens.outputs({ tokenIdentifier });
     expect(bOutputsAfter).toHaveLength(1);
     expect(bOutputsAfter[0]?.amount).toBe(250n);
+  });
+
+  test("consolidate merges several outputs into one", { timeout: 300_000 }, async () => {
+    const walletA = await localWallet(randomBytes(32));
+    const walletB = await localWallet(randomBytes(32));
+    const issuer = await walletA.signer.identityPublicKey();
+    const receiver = await walletB.signer.identityPublicKey();
+    const now = () => Date.now();
+
+    const created = await broadcast(walletA.signer, createPartial(issuer, now));
+    const rawIdentifier = requiredIdentifier(created.tokenIdentifier);
+    const tokenIdentifier = encodeTokenIdentifier(rawIdentifier, "regtest");
+    await broadcast(walletA.signer, mintPartial(issuer, rawIdentifier, 1000n, now));
+    await balanceUntil(walletA.client, tokenIdentifier, 1000n, Date.now() + DEADLINE_MS);
+
+    // Three separate transfers give B three distinct outputs.
+    for (const amount of [100n, 200n, 300n]) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential transfers by design
+      await walletA.client.tokens.transfer({ tokenIdentifier, amount, receiver });
+    }
+    await balanceUntil(walletB.client, tokenIdentifier, 600n, Date.now() + DEADLINE_MS);
+    const outputsBefore = await outputsUntil(walletB.client, tokenIdentifier, 3);
+    expect(
+      outputsBefore.map((output) => output.amount).toSorted((x, y) => Number(x - y)),
+    ).toStrictEqual([100n, 200n, 300n]);
+
+    const consolidated = await walletB.client.tokens.consolidate({ tokenIdentifier });
+    expect(consolidated?.transactionHash).toMatch(/^[0-9a-f]{64}$/);
+    const outputsAfter = await outputsUntil(walletB.client, tokenIdentifier, 1);
+    expect(outputsAfter).toHaveLength(1);
+    expect(outputsAfter[0]?.amount).toBe(600n);
+    expect(outputsAfter[0]?.ownerPublicKey).toStrictEqual(receiver);
+    await balanceUntil(walletB.client, tokenIdentifier, 600n, Date.now() + DEADLINE_MS);
+
+    // Nothing left to merge: a second call is a no-op.
+    await expect(walletB.client.tokens.consolidate({ tokenIdentifier })).resolves.toBeUndefined();
   });
 });

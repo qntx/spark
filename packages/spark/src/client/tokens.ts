@@ -1,6 +1,7 @@
 import {
   buildTransferPartial,
   broadcastPartialTokenTransaction,
+  MAX_TOKEN_OUTPUTS_TX,
   queryTokenOutputs,
   selectTokenOutputs,
   tokenBalances,
@@ -87,6 +88,52 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
         receiver: context.receiverIdentityKey(transferOptions.receiver),
       });
       return transactionHash;
+    },
+    consolidate: async (consolidateOptions) => {
+      const tokenIdentifier = context.tokenIdentifierForNetwork(consolidateOptions.tokenIdentifier);
+      return context.tokenLock.run(async () => {
+        const { operators, config, now } = context;
+        const identityPublicKey = await signer.identityPublicKey();
+        const owned = await queryTokenOutputs({
+          token,
+          ownerPublicKey: identityPublicKey,
+          network,
+          tokenIdentifiers: [tokenIdentifier],
+        });
+        // Smallest-first, capped like upstream optimizeTokenOutputs: one transaction merges at
+        // most MAX_TOKEN_OUTPUTS_TX inputs, so dust consolidates first.
+        const available = owned
+          .filter((output) => output.status !== "pending-outbound")
+          .sort((a, b) => (a.amount < b.amount ? -1 : a.amount > b.amount ? 1 : 0))
+          .slice(0, MAX_TOKEN_OUTPUTS_TX);
+        if (available.length <= 1) {
+          return undefined;
+        }
+        let total = 0n;
+        for (const output of available) {
+          total += output.amount;
+        }
+        const partial = buildTransferPartial({
+          selectedOutputs: available,
+          receiverPublicKey: identityPublicKey,
+          tokenIdentifier,
+          amount: total,
+          senderPublicKey: identityPublicKey,
+          network,
+          operators,
+          tokens: config.tokens,
+          now,
+        });
+        const { transactionHash } = await broadcastPartialTokenTransaction({
+          token,
+          signer,
+          partial,
+          network,
+          operators,
+          tokens: config.tokens,
+        });
+        return { transactionHash };
+      });
     },
   };
 }

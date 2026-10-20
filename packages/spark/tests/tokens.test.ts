@@ -35,12 +35,20 @@ import type {
 import {
   buildTransferPartial,
   broadcastPartialTokenTransaction,
+  MAX_TOKEN_OUTPUTS_TX,
   selectTokenOutputs,
 } from "../src/tokens/index.ts";
 import type { SparkTokenOutput, TokenNetworkParams } from "../src/tokens/index.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 type BroadcastTxInit = MessageInitShape<typeof BroadcastTransactionRequestSchema>;
+
+function required<T>(value: T | undefined, name: string): T {
+  if (value === undefined) {
+    throw new Error(`expected ${name}`);
+  }
+  return value;
+}
 
 function byteCompare(a: Uint8Array, b: Uint8Array): number {
   const shared = Math.min(a.length, b.length);
@@ -570,6 +578,128 @@ describe("client.tokens", () => {
         receiver: RECEIVER,
       }),
     ).rejects.toThrow(SparkInputError);
+    client.close();
+  });
+
+  test("consolidate merges the outputs into a single self-owned output", async () => {
+    let broadcastRequest: BroadcastTransactionRequest | undefined;
+    const client = clientWith({
+      query: () => ({
+        $typeName: "spark_token.QueryTokenOutputsResponse",
+        outputsWithPreviousTransactionData: [tokenRow("o1", 30n), tokenRow("o2", 20n)],
+      }),
+      broadcast: (req) => {
+        broadcastRequest = req;
+        return {
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+          finalTokenTransaction: finalFor(req.partialTokenTransaction!),
+        };
+      },
+    });
+    const result = await client.tokens.consolidate({ tokenIdentifier: identifier });
+    expect(result?.transactionHash).toMatch(/^[0-9a-f]{64}$/);
+    const partial = required(broadcastRequest, "broadcast request").partialTokenTransaction;
+    expect(spentOutputs(required(partial, "partial"))).toHaveLength(2);
+    const outputs = required(partial, "partial").partialTokenOutputs;
+    expect(outputs).toHaveLength(1);
+    expect(bytesToHex(required(outputs[0], "output").ownerPublicKey)).toBe(bytesToHex(owner));
+    expect(required(outputs[0], "output").tokenAmount).toStrictEqual(numberToBytesBE(50n, 16));
+    client.close();
+  });
+
+  test("consolidate returns undefined with one or fewer available outputs", async () => {
+    let broadcasts = 0;
+    const client = clientWith({
+      query: () => ({
+        $typeName: "spark_token.QueryTokenOutputsResponse",
+        outputsWithPreviousTransactionData: [
+          tokenRow("o1", 30n),
+          tokenRow("o2", 20n, rawIdentifier, TokenOutputStatus.PENDING_OUTBOUND),
+        ],
+      }),
+      broadcast: () => {
+        broadcasts += 1;
+        return {
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+        };
+      },
+    });
+    await expect(
+      client.tokens.consolidate({ tokenIdentifier: identifier }),
+    ).resolves.toBeUndefined();
+    expect(broadcasts).toBe(0);
+    client.close();
+  });
+
+  test("consolidate caps the inputs at MAX_TOKEN_OUTPUTS_TX", async () => {
+    let broadcastRequest: BroadcastTransactionRequest | undefined;
+    const rows = Array.from({ length: MAX_TOKEN_OUTPUTS_TX + 2 }, (_, index) =>
+      tokenRow(`o${index}`, 1n),
+    );
+    const client = clientWith({
+      query: () => ({
+        $typeName: "spark_token.QueryTokenOutputsResponse",
+        outputsWithPreviousTransactionData: rows,
+      }),
+      broadcast: (req) => {
+        broadcastRequest = req;
+        return {
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+          finalTokenTransaction: finalFor(req.partialTokenTransaction!),
+        };
+      },
+    });
+    const result = await client.tokens.consolidate({ tokenIdentifier: identifier });
+    expect(result?.transactionHash).toMatch(/^[0-9a-f]{64}$/);
+    const partial = required(
+      required(broadcastRequest, "broadcast").partialTokenTransaction,
+      "partial",
+    );
+    expect(spentOutputs(partial)).toHaveLength(MAX_TOKEN_OUTPUTS_TX);
+    expect(required(partial.partialTokenOutputs[0], "output").tokenAmount).toStrictEqual(
+      numberToBytesBE(BigInt(MAX_TOKEN_OUTPUTS_TX), 16),
+    );
+    client.close();
+  });
+
+  test("two concurrent consolidates are serialized under the token lock", async () => {
+    const rows = [tokenRow("o1", 30n), tokenRow("o2", 20n)];
+    const spent = new Set<string>();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const client = clientWith({
+      query: () => ({
+        $typeName: "spark_token.QueryTokenOutputsResponse",
+        outputsWithPreviousTransactionData: rows.filter((row) => !spent.has(row.output.id)),
+      }),
+      broadcast: async (req) => {
+        spentOutputs(req.partialTokenTransaction!);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 15);
+        });
+        inFlight -= 1;
+        for (const row of rows) {
+          spent.add(row.output.id);
+        }
+        return {
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+          finalTokenTransaction: finalFor(req.partialTokenTransaction!),
+        };
+      },
+    });
+    const [first, second] = await Promise.all([
+      client.tokens.consolidate({ tokenIdentifier: identifier }),
+      client.tokens.consolidate({ tokenIdentifier: identifier }),
+    ]);
+    expect(maxInFlight).toBe(1);
+    // The second run finds the outputs spent and has nothing to merge.
+    expect([first, second].filter((result) => result !== undefined)).toHaveLength(1);
     client.close();
   });
 });
