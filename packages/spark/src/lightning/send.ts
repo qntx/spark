@@ -76,12 +76,17 @@ export function lightningInvoiceAmount(
  * the SSP to settle the invoice. On a lost `initiate_preimage_swap_v3` response the transfer id
  * doubles as the idempotency key, so a committed swap is picked up instead of retried blind.
  *
- * `selectLeaves` must return AVAILABLE leaves summing exactly to the requested amount; the client
- * injects the shared select/swap/renew path it uses for ordinary sends.
+ * `spendLeaves` hands `use` AVAILABLE leaves summing exactly to the requested amount and keeps the
+ * client's leaf lock held until `use` resolves — package build, commit and chain cleanup inside
+ * `use` cannot interleave with another spend; the client injects the shared select/swap/renew path
+ * it uses for ordinary sends.
  */
 export async function payLightningInvoice(
   deps: LightningDeps & {
-    readonly selectLeaves: (amountSats: number) => Promise<ReadonlyArray<SparkLeaf>>;
+    readonly spendLeaves: <T>(
+      amountSats: number,
+      use: (leaves: ReadonlyArray<SparkLeaf>) => Promise<T>,
+    ) => Promise<T>;
     readonly deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
   },
   options: {
@@ -133,6 +138,18 @@ export async function payLightningInvoice(
         `lightning pay: fee estimate ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
       );
     }
+    // Selection through commit and the spent leaves' chain deletion runs under the client's leaf
+    // lock: a concurrent spend sees the committed leaves gone from its own sync.
+    transfer = await deps.spendLeaves(amountSats + feeSats, async (leaves) => {
+      const committed = await initiatePreimageSwap(leaves);
+      assertCommittedTransfer(committed, expected, "lightning pay");
+      // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
+      // failure on the SSP call below. The returned transfer — not the locally selected list —
+      // decides which leaves left the wallet: on a retry the SO may report the first-attempt
+      // leaves.
+      await deps.deleteExitChains(committed.leaves.map((leaf) => leaf.leaf.id));
+      return committed;
+    });
   } else {
     assertCommittedTransfer(transfer, expected, "lightning pay");
     // The swap commits amount + fee as the transfer total; the committed total is the fee source.
@@ -142,12 +159,13 @@ export async function payLightningInvoice(
         `lightning pay: committed transfer fee ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
       );
     }
+    // The transfer committed in an earlier call — deleting its old chains needs no lock: a
+    // leaves() sync only re-stores chains for leaves it just queried, and these are gone.
+    await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
   }
 
-  /** Selects `amount + fee` of leaves, wraps their refunds in HTLCs and commits the swap. */
-  async function initiatePreimageSwap(): Promise<SparkTransfer> {
-    const leaves = await deps.selectLeaves(amountSats + feeSats);
-
+  /** Wraps `leaves`' refunds in HTLCs and commits the preimage-swap transfer. */
+  async function initiatePreimageSwap(leaves: ReadonlyArray<SparkLeaf>): Promise<SparkTransfer> {
     // Hash-locked to the SSP (preimage path) and sequence-locked back to us (refund path);
     // sequences decrement from each leaf's current refund sequence per the HTLC offsets.
     const transferPackage = await prepareTransferPackage({
@@ -225,14 +243,6 @@ export async function payLightningInvoice(
       return recovered;
     }
   }
-
-  transfer ??= await initiatePreimageSwap();
-  assertCommittedTransfer(transfer, expected, "lightning pay");
-
-  // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
-  // failure on the SSP call below. The returned transfer — not the locally selected list —
-  // decides which leaves left the wallet: on a retry the SO may report the first-attempt leaves.
-  await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
 
   // The SSP refuses `idempotency_key` alongside the external id; the transfer id keys the request.
   const sendRequest = await ssp.requestLightningSend({

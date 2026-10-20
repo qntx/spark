@@ -19,6 +19,7 @@ import {
   txIdBytes,
   parseTransaction,
 } from "../src/core/bitcoin/index.ts";
+import { createMutex } from "../src/core/mutex.ts";
 import { sparkNetworkConfig } from "../src/core/network.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
@@ -469,6 +470,8 @@ type Setup = {
   statusReads: string[];
   deleted: string[][];
   sleeps: number[];
+  /** The `amountSats` each `spendLeaves` call selected for (undefined = all leaves). */
+  spendAmounts: Array<number | undefined>;
   events: string[];
   frostJobs: FrostSignJob[][];
   payoutTx: Uint8Array;
@@ -552,8 +555,12 @@ async function exitDeps(overrides: {
   });
   const deleted: string[][] = [];
   const sleeps: number[] = [];
+  const spendAmounts: Array<number | undefined> = [];
   const deps: CoopExitDeps & {
-    selectLeaves: (amountSats?: number) => Promise<ReadonlyArray<SparkLeaf>>;
+    spendLeaves: <T>(
+      amountSats: number | undefined,
+      use: (leaves: ReadonlyArray<SparkLeaf>) => Promise<T>,
+    ) => Promise<T>;
     deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
   } = {
     spark,
@@ -569,7 +576,15 @@ async function exitDeps(overrides: {
       sleeps.push(ms);
       return Promise.resolve();
     },
-    selectLeaves: async () => Promise.resolve(overrides.leaves),
+    spendLeaves: async <T>(
+      amountSats: number | undefined,
+      use: (leaves: ReadonlyArray<SparkLeaf>) => Promise<T>,
+    ): Promise<T> => {
+      spendAmounts.push(amountSats);
+      const result = await use(overrides.leaves);
+      events.push("use-resolved");
+      return result;
+    },
     deleteExitChains: async (leafIds) => {
       events.push("delete");
       deleted.push([...leafIds]);
@@ -584,6 +599,7 @@ async function exitDeps(overrides: {
     statusReads,
     deleted,
     sleeps,
+    spendAmounts,
     events,
     frostJobs,
     payoutTx,
@@ -662,6 +678,7 @@ describe("cooperativeExit", () => {
       exitRequests,
       completions,
       deleted,
+      spendAmounts,
       events,
       frostJobs,
       payoutTx,
@@ -750,8 +767,10 @@ describe("cooperativeExit", () => {
       p2trScriptFromPublicKey(SSP_IDENTITY, "regtest"),
     );
 
-    // Chains go right after commit, before complete; the transfer's own leaf ids are deleted.
-    expect(events).toStrictEqual(["commit", "delete", "complete"]);
+    // The exit committed inside `use` (under the client's lock), chains went right after, and
+    // the SSP completion ran only once `use` resolved — with all leaves selected (no amount).
+    expect(spendAmounts).toStrictEqual([undefined]);
+    expect(events).toStrictEqual(["commit", "delete", "use-resolved", "complete"]);
     expect(deleted).toStrictEqual([["leaf-1", "leaf-2"]]);
     expect(completions).toStrictEqual([
       { coopExitRequestId: "exit-1", userOutboundTransferExternalId: result.transferId },
@@ -1122,7 +1141,10 @@ describe("cooperativeExit", () => {
         coordinatorIdentifier: required(OPERATORS[0], "coordinator").identifier,
       },
       sspClient: ssp,
+      leafLock: createMutex(),
+      tokenLock: createMutex(),
       storeChainsFor: async () => Promise.resolve(),
+      syncLeaves: async () => Promise.resolve([staleLeaf]),
       leaves: async () => Promise.resolve([staleLeaf]),
       receiverIdentityKey: () => {
         throw new Error("receiverIdentityKey not stubbed");

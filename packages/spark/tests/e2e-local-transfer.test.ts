@@ -9,8 +9,10 @@ import {
   claimPendingUntil,
   claimUntilAccepted,
   leavesUntil,
+  leavesUntilCount,
   localWallet,
   pendingUntil,
+  pendingUntilCount,
   requiredTransfer,
 } from "./support/local.ts";
 
@@ -158,6 +160,12 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO multi-receiver
     const leaf50k = await fundAndClaim(clientA, 0.0005, minerAddress);
     console.log("A claimed leaves:", leaf100k.id, leaf50k.id);
 
+    // A leaf is spendable only once every operator reports it — wait for both.
+    const spendable = await leavesUntilCount(clientA, 2, Date.now() + CLAIM_DEADLINE_MS);
+    expect(spendable.map((leaf) => leaf.id).toSorted()).toStrictEqual(
+      [leaf100k.id, leaf50k.id].toSorted(),
+    );
+
     const transfer = await clientA.transfers.sendMany({
       receivers: [
         { receiver: await signerB.identityPublicKey(), amountSats: 100_000 },
@@ -192,5 +200,47 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO multi-receiver
     signerA.dispose();
     signerB.dispose();
     signerC.dispose();
+  }, 300_000);
+});
+
+describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO concurrent sends", () => {
+  test("two concurrent sends take disjoint leaves and B claims both", async () => {
+    const { signer: signerA, client: clientA } = await localWallet(randomBytes(32));
+    const { signer: signerB, client: clientB } = await localWallet(randomBytes(32));
+    const minerAddress = (await bitcoinRpc("getnewaddress", [])) as string;
+
+    // Two deposits → two exact leaves; no SSP locally, so each send must pick its own leaf.
+    const leaf1 = await fundAndClaim(clientA, 0.0005, minerAddress);
+    const leaf2 = await fundAndClaim(clientA, 0.0005, minerAddress);
+    console.log("A funded leaves:", leaf1.id, leaf2.id);
+
+    // A leaf is spendable only once every operator reports it — wait for both.
+    const spendable = await leavesUntilCount(clientA, 2, Date.now() + CLAIM_DEADLINE_MS);
+    expect(spendable.map((leaf) => leaf.id).toSorted()).toStrictEqual(
+      [leaf1.id, leaf2.id].toSorted(),
+    );
+
+    const receiver = await signerB.identityPublicKey();
+    const [first, second] = await Promise.all([
+      clientA.transfers.send({ receiver, amountSats: 50_000 }),
+      clientA.transfers.send({ receiver, amountSats: 50_000 }),
+    ]);
+    expect(first.id).not.toBe(second.id);
+    const secondLeafIds = new Set(second.leaves.map((leaf) => leaf.leaf.id));
+    expect(first.leaves.every((leaf) => !secondLeafIds.has(leaf.leaf.id))).toBe(true);
+    console.log("concurrent sends committed:", first.id, second.id);
+    await expect(clientA.balance()).resolves.toBe(0);
+
+    const pending = await pendingUntilCount(clientB, 2, Date.now() + CLAIM_DEADLINE_MS);
+    expect(pending).toHaveLength(2);
+    const claimed = await clientB.transfers.claimPending();
+    expect(claimed.reduce((sum, leaf) => sum + leaf.valueSats, 0)).toBe(100_000);
+    await expect(clientB.balance()).resolves.toBe(100_000);
+    console.log("B claimed:", claimed.map((leaf) => `${leaf.id}=${leaf.valueSats}`).join(", "));
+
+    clientA.close();
+    clientB.close();
+    signerA.dispose();
+    signerB.dispose();
   }, 300_000);
 });

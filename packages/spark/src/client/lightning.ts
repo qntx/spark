@@ -28,13 +28,14 @@ export function createLightning(context: ClientContext): SparkClient["lightning"
       payLightningInvoice(
         {
           ...deps,
-          selectLeaves: async (amountSats) => {
-            const [group] = await selectSendLeaves(context, [amountSats]);
-            if (group === undefined) {
-              throw new SparkError("lightning pay: leaf selection returned no group");
-            }
-            return group;
-          },
+          spendLeaves: async (amountSats, use) =>
+            context.leafLock.run(async () => {
+              const [group] = await selectSendLeaves(context, [amountSats]);
+              if (group === undefined) {
+                throw new SparkError("lightning pay: leaf selection returned no group");
+              }
+              return use(group);
+            }),
           deleteExitChains: async (leafIds) => context.store.deleteExitChains(leafIds),
         },
         options,

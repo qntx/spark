@@ -283,6 +283,12 @@ export type SparkClientSeams = {
   readonly transportFactory?: ConnectionDeps["transportFactory"];
 };
 
+/**
+ * Builds a Spark client over one operator set. All spend paths are concurrency-safe within one
+ * client instance — sends, swaps, lightning payments, exits and claims serialize leaf selection and
+ * exit-chain bookkeeping on an internal lock, and token transfers likewise — but several client
+ * instances or devices on one identity are not coordinated: the SO rejects the conflicting spend.
+ */
 export function createSparkClient(options: SparkClientOptions): SparkClient {
   return createSparkClientWith(options, {});
 }

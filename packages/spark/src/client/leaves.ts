@@ -8,7 +8,7 @@ import type { ClientContext } from "./context.ts";
 
 /**
  * Renews every leaf whose refund timelock is spent, in order, before the leaves leave the wallet —
- * used by sends, swaps, lightning payments and cooperative exits alike.
+ * used by sends, swaps, lightning payments and cooperative exits alike. Caller holds `leafLock`.
  */
 export async function renewStaleLeaves(
   context: ClientContext,
@@ -33,6 +33,8 @@ export async function renewStaleLeaves(
  * they all exist, otherwise an SSP leaves swap minted for all amounts at once — with stale-input
  * renewals on both paths and exit-chain bookkeeping (swap inputs dropped, swapped-in leaves
  * stored). Shared by `transfers.send`/`sendMany`, `invoices.pay`, `lightning.pay` and coop exits.
+ * Caller holds `leafLock` — selection through swap-minted re-selection must not interleave with
+ * another spend.
  */
 export async function selectSendLeaves(
   context: ClientContext,
@@ -40,7 +42,7 @@ export async function selectSendLeaves(
 ): Promise<SparkLeaf[][]> {
   const { store, random, now } = context;
 
-  const selection = selectLeaves(await context.leaves(), amounts);
+  const selection = selectLeaves(await context.syncLeaves(), amounts);
   if (selection.kind === "exact") {
     const renewed: SparkLeaf[][] = [];
     for (const group of selection.groups) {
