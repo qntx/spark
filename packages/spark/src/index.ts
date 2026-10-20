@@ -47,6 +47,7 @@ export type {
   CooperativeExitSpeed,
   CooperativeExitStatus,
 } from "./exit/coop.ts";
+export type { WatchtowerExitedLeaf } from "./exit/watchtower.ts";
 export { createMemorySparkStore } from "./exit/store.ts";
 export type { SparkExitChain, SparkStore } from "./exit/store.ts";
 export type { SparkLeaf } from "./tree/index.ts";

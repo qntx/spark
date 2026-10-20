@@ -14,6 +14,7 @@ import type {
 import { createMemorySparkStore } from "../exit/store.ts";
 import type { SparkStore } from "../exit/store.ts";
 import type { ExitTransaction } from "../exit/unilateral.ts";
+import type { WatchtowerExitedLeaf } from "../exit/watchtower.ts";
 import type {
   LightningInvoice,
   LightningPayment,
@@ -248,6 +249,24 @@ export type SparkClient = {
     }) => Promise<CooperativeExitResult>;
     /** The SSP's status for a cooperative-exit request id. */
     readonly cooperativeExitStatus: (requestId: string) => Promise<CooperativeExitStatus>;
+    /**
+     * The leaves a watchtower exit cut off from their exit path, each with the confirmed ancestor
+     * output it can still spend when one resolves. Entries stay listed after a recovery — the SE
+     * never sees the broadcast, so check the chain for whether a recovery landed.
+     */
+    readonly watchtowerExitedLeaves: () => Promise<ReadonlyArray<WatchtowerExitedLeaf>>;
+    /**
+     * Co-signs a transaction spending the on-chain output a watchtower exit stranded under
+     * `leafId`, returned signed but NOT broadcast. Re-call with a higher fee to re-sign the same
+     * outpoint — at most one recovery can confirm.
+     */
+    readonly recoverWatchtowerExit: (options: {
+      readonly leafId: string;
+      readonly destinationScript: Uint8Array;
+      readonly feeRateSatPerVbyte: number;
+      readonly recoveryTxid?: string;
+      readonly outputIndex?: number;
+    }) => Promise<{ readonly transaction: Uint8Array; readonly txid: string }>;
     /**
      * Signed key-path sweep of a confirmed refund output (any of the leaf's refund variants, output 0)
      * to `destinationScript`.

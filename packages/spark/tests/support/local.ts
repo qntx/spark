@@ -339,6 +339,12 @@ export async function broadcastExitPackage(
   return submission;
 }
 
+/** Mines one block carrying `txsHex` directly — zero-fee node txs cannot relay, only mine. */
+export async function generateBlockWith(txsHex: ReadonlyArray<string>): Promise<void> {
+  const address = (await bitcoinRpc("getnewaddress", [])) as string;
+  await bitcoinRpc("generateblock", [address, [...txsHex]]);
+}
+
 // generatetoaddress in chunks: a multi-thousand-block call outlives the
 // undici headers timeout.
 export async function mine(blocks: number): Promise<void> {

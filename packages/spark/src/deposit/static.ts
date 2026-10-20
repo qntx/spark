@@ -20,6 +20,7 @@ import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.
 import { HashVariant, SigningJobSchema } from "../proto/gen/spark_pb.ts";
 import type { SigningTarget } from "../signer/types.ts";
 import type { SspClient } from "../ssp/index.ts";
+import { cosignSingleJob } from "../tree/signing.ts";
 import { depositAddressScript, depositScript, validateDepositAddress } from "./index.ts";
 import type { DepositCoordinator } from "./index.ts";
 
@@ -451,36 +452,14 @@ export async function refundStaticDeposit(
   }
 
   const key = { type: "static-deposit", index: STATIC_DEPOSIT_INDEX } as const;
-  const operatorCommitments = Object.entries(result.signingNonceCommitments).map(
-    ([identifier, commitment]) => ({ identifier, commitment }),
-  );
-  const [signatureShare] = await signer.signFrost([
-    { key, target, verifyingKey, commitment, operatorCommitments },
-  ]);
-  if (signatureShare === undefined) {
-    throw new SparkError("refundStatic: signer returned no signature share");
-  }
-  const [signature] = await signer.aggregateFrost([
-    {
-      key,
-      target,
-      verifyingKey,
-      commitment,
-      signatureShare,
-      operators: Object.keys(result.signatureShares).map((identifier) => {
-        const operatorCommitment = result.signingNonceCommitments[identifier];
-        const share = result.signatureShares[identifier];
-        const publicKey = result.publicKeys[identifier];
-        if (operatorCommitment === undefined || share === undefined || publicKey === undefined) {
-          throw new SparkError(`refundStatic: missing operator ${identifier} signing data`);
-        }
-        return { identifier, commitment: operatorCommitment, signatureShare: share, publicKey };
-      }),
-    },
-  ]);
-  if (signature === undefined) {
-    throw new SparkError("refundStatic: signer returned no aggregate signature");
-  }
+  const signature = await cosignSingleJob(signer, {
+    key,
+    target,
+    verifyingKey,
+    commitment,
+    result,
+    context: "refundStatic",
+  });
 
   const signed = finalizeKeySpend(transaction, signature);
   if (!verifyFinalizedTaprootSignature(signed, taprootKeySpendSighash(target), verifyingKey, 0)) {

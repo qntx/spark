@@ -2,8 +2,18 @@ import { create } from "@bufbuild/protobuf";
 
 import { SparkError } from "../errors/index.ts";
 import { UserSignedTxSigningJobSchema } from "../proto/gen/spark_pb.ts";
-import type { RequestedSigningCommitments, UserSignedTxSigningJob } from "../proto/gen/spark_pb.ts";
-import type { OperatorCommitment, SigningTarget, SparkKey, SparkSigner } from "../signer/types.ts";
+import type {
+  RequestedSigningCommitments,
+  SigningResult,
+  UserSignedTxSigningJob,
+} from "../proto/gen/spark_pb.ts";
+import type {
+  OperatorCommitment,
+  SigningCommitment,
+  SigningTarget,
+  SparkKey,
+  SparkSigner,
+} from "../signer/types.ts";
 
 /**
  * One user-side FROST signing job for an SO request: the key inside the signer, the wire
@@ -77,4 +87,57 @@ export async function signUserJobs(
       signingCommitments: { signingCommitments: spec.commitments.signingNonceCommitments },
     });
   });
+}
+
+/**
+ * Completes one SO co-signing round for a caller-built job: `signFrost` the user's share over the
+ * SO's `SigningResult` commitments, then `aggregateFrost` all shares into the 64-byte signature the
+ * spend's witness carries. `commitment` is the user's `newCommitments(1)` nonce sent on the
+ * request; `result` is the returned `SigningResult`. Shared by the static-deposit refund and the
+ * watchtower-exit recovery, which both finish a single key-path input this way.
+ */
+export async function cosignSingleJob(
+  signer: SparkSigner,
+  job: {
+    readonly key: SparkKey;
+    readonly target: SigningTarget;
+    readonly verifyingKey: Uint8Array;
+    readonly commitment: SigningCommitment;
+    readonly result: SigningResult;
+    /** Error-message prefix, e.g. `"refundStatic"`. */
+    readonly context: string;
+  },
+): Promise<Uint8Array> {
+  const { key, target, verifyingKey, commitment, result, context } = job;
+  const operatorCommitments = Object.entries(result.signingNonceCommitments).map(
+    ([identifier, commitment]) => ({ identifier, commitment }),
+  );
+  const [signatureShare] = await signer.signFrost([
+    { key, target, verifyingKey, commitment, operatorCommitments },
+  ]);
+  if (signatureShare === undefined) {
+    throw new SparkError(`${context}: signer returned no signature share`);
+  }
+  const [signature] = await signer.aggregateFrost([
+    {
+      key,
+      target,
+      verifyingKey,
+      commitment,
+      signatureShare,
+      operators: Object.keys(result.signatureShares).map((identifier) => {
+        const operatorCommitment = result.signingNonceCommitments[identifier];
+        const share = result.signatureShares[identifier];
+        const publicKey = result.publicKeys[identifier];
+        if (operatorCommitment === undefined || share === undefined || publicKey === undefined) {
+          throw new SparkError(`${context}: missing operator ${identifier} signing data`);
+        }
+        return { identifier, commitment: operatorCommitment, signatureShare: share, publicKey };
+      }),
+    },
+  ]);
+  if (signature === undefined) {
+    throw new SparkError(`${context}: signer returned no aggregate signature`);
+  }
+  return signature;
 }
