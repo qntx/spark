@@ -58,10 +58,8 @@ jobs:
           path: staging
           retention-days: 1
 
-  # Pinned to the feat/publish-npm-artifact head for the `artifact` input;
-  # switch back to @v2 once qntx/workflows releases it.
   spark:
-    uses: qntx/workflows/.github/workflows/publish-npm.yml@472e8a857e0eeccee1274392470d9d26b2a5fbfb # v2 + artifact input
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
       id-token: write
@@ -73,7 +71,7 @@ jobs:
 
   spark-wasm:
     needs: spark
-    uses: qntx/workflows/.github/workflows/publish-npm.yml@472e8a857e0eeccee1274392470d9d26b2a5fbfb # v2 + artifact input
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
       id-token: write
@@ -85,7 +83,7 @@ jobs:
 
   spark-native:
     needs: [spark, native-artifact]
-    uses: qntx/workflows/.github/workflows/publish-npm.yml@472e8a857e0eeccee1274392470d9d26b2a5fbfb # v2 + artifact input
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
       id-token: write
