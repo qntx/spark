@@ -193,7 +193,11 @@ export type SparkClient = {
      * reappear in `leaves()` on the next sync).
      */
     readonly sendStatus: (request: LightningSendStatusRequest) => Promise<LightningSendStatus>;
-    /** `user_request` status of a receive, with the inbound transfer id once present. */
+    /**
+     * `user_request` status of a receive, with the inbound transfer id once present and the settled
+     * `preimage` once the SSP reports it — returned only after `sha256(preimage)` checks out
+     * against the request invoice's payment hash (a mismatch throws).
+     */
     readonly receiveStatus: (requestId: string) => Promise<LightningReceiveStatus>;
   };
   readonly deposits: {
