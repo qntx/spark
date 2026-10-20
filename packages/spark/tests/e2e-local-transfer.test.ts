@@ -15,6 +15,7 @@ import {
   pendingUntil,
   pendingUntilCount,
   requiredTransfer,
+  sleep,
 } from "./support/local.ts";
 
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO transfer flow", () => {
@@ -233,6 +234,120 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO multi-receiver
     signerB.dispose();
     signerC.dispose();
   }, 300_000);
+});
+
+type DecodedVout = {
+  n: number;
+  scriptPubKey: { address?: string; addresses?: string[] };
+};
+
+/** The output index paying `address` in a decoded deposit transaction. */
+function depositVout(vouts: ReadonlyArray<DecodedVout>, address: string): number {
+  const output = vouts.find(
+    (entry) =>
+      entry.scriptPubKey.address === address ||
+      entry.scriptPubKey.addresses?.includes(address) === true,
+  );
+  if (output === undefined) {
+    throw new Error(`deposit tx has no output paying ${address}`);
+  }
+  return output.n;
+}
+
+/** Polls `deposits.claim` for one output of a multi-output deposit tx (bounded). */
+async function claimVoutUntilAccepted(
+  client: Awaited<ReturnType<typeof localWallet>>["client"],
+  transaction: Uint8Array,
+  vout: number,
+  deadline: number,
+): Promise<void> {
+  try {
+    await client.deposits.claim({ transaction, vout });
+  } catch (error) {
+    if (Date.now() > deadline) {
+      throw error;
+    }
+    await sleep(3000);
+    return claimVoutUntilAccepted(client, transaction, vout, deadline);
+  }
+}
+
+/**
+ * Generates `wave` single-use deposit addresses, pays them all in one sendmany, mines a block and
+ * claims each output (which frees its unused-address slot for the next wave).
+ */
+async function fundWave(
+  client: Awaited<ReturnType<typeof localWallet>>["client"],
+  minerAddress: string,
+  wave: number,
+): Promise<void> {
+  const addresses: string[] = [];
+  for (let batch = 0; batch < wave; batch += 8) {
+    // oxlint-disable-next-line no-await-in-loop -- bound the operators' DB connections
+    const batchAddresses = await Promise.all(
+      Array.from({ length: Math.min(8, wave - batch) }, async () => client.deposits.newAddress()),
+    );
+    addresses.push(...batchAddresses);
+  }
+  const txid = (await bitcoinRpc("sendmany", [
+    "",
+    Object.fromEntries(addresses.map((address) => [address, 0.00002])),
+  ])) as string;
+  await bitcoinRpc("generatetoaddress", [1, minerAddress]);
+  const decoded = (await bitcoinRpc("getrawtransaction", [txid, true])) as {
+    vout: ReadonlyArray<DecodedVout>;
+  };
+  const transaction = hexToBytes((await bitcoinRpc("getrawtransaction", [txid])) as string);
+  for (const address of addresses) {
+    // oxlint-disable-next-line no-await-in-loop -- claims are sequential under the leaf lock
+    await claimVoutUntilAccepted(
+      client,
+      transaction,
+      depositVout(decoded.vout, address),
+      Date.now() + CLAIM_DEADLINE_MS,
+    );
+  }
+}
+
+describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO many-leaf send", () => {
+  test("a wallet holding 140 leaves sends its whole balance in one transfer", async () => {
+    const { signer: signerA, client: clientA } = await localWallet(randomBytes(32));
+    const { signer: signerB, client: clientB } = await localWallet(randomBytes(32));
+    const minerAddress = (await bitcoinRpc("getnewaddress", [])) as string;
+
+    // 140 single-use deposits claim into 140 leaves — enough that a whole-balance send's
+    // refund jobs (two per leaf) exceed the signer's 256-job per-call cap and must be split
+    // into sequential batches. The SO caps unused deposit addresses at 64 per user, so the
+    // leaves are funded in 48-leaf waves.
+    const LEAF_COUNT = 140;
+    for (let claimed = 0; claimed < LEAF_COUNT;) {
+      const wave = Math.min(48, LEAF_COUNT - claimed);
+      // oxlint-disable-next-line no-await-in-loop -- a wave's claims free the next wave's slots
+      await fundWave(clientA, minerAddress, wave);
+      claimed += wave;
+      console.log("funded wave ending at leaf", claimed, "of", LEAF_COUNT);
+    }
+    const spendable = await leavesUntilCount(clientA, LEAF_COUNT, Date.now() + CLAIM_DEADLINE_MS);
+    expect(spendable).toHaveLength(LEAF_COUNT);
+    const balance = await clientA.balance();
+    console.log("A holds", spendable.length, "leaves,", balance, "sats");
+
+    const transfer = await clientA.transfers.send({
+      receiver: await signerB.identityPublicKey(),
+      amountSats: balance,
+    });
+    console.log("many-leaf send:", transfer.id, transfer.status);
+
+    const claimed = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    expect(claimed).toHaveLength(LEAF_COUNT);
+    await expect(clientB.balance()).resolves.toBe(balance);
+    await expect(clientA.balance()).resolves.toBe(0);
+
+    clientA.close();
+    clientB.close();
+    signerA.dispose();
+    signerB.dispose();
+  }, 900_000);
 });
 
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO concurrent sends", () => {

@@ -8,12 +8,64 @@ import type {
   UserSignedTxSigningJob,
 } from "../proto/gen/spark_pb.ts";
 import type {
+  FrostAggregateJob,
   OperatorCommitment,
   SigningCommitment,
   SigningTarget,
   SparkKey,
+  SparkLeafKey,
   SparkSigner,
 } from "../signer/types.ts";
+
+/**
+ * The signer's per-call job limit (signer/backend.ts `MAX_JOBS` — services only hold the
+ * `SparkSigner` type, so the client-side constant lives here). Signer calls whose input scales with
+ * leaf count must chunk through the helpers below; a unit test keeps this equal to `MAX_JOBS`.
+ */
+export const SIGNER_BATCH_LIMIT = 256;
+
+function chunks<T>(items: ReadonlyArray<T>, size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    result.push(items.slice(i, i + size));
+  }
+  return result;
+}
+
+/** `signer.publicKeys` over any number of keys, at most `SIGNER_BATCH_LIMIT` per call. */
+export async function batchedPublicKeys(
+  signer: SparkSigner,
+  keys: ReadonlyArray<SparkLeafKey>,
+): Promise<Uint8Array[]> {
+  const parts = await Promise.all(
+    chunks([...keys], SIGNER_BATCH_LIMIT).map(async (chunk) => signer.publicKeys(chunk)),
+  );
+  return parts.flat();
+}
+
+/** `signer.receivedPublicKeys` over any number of ciphers, chunked like `batchedPublicKeys`. */
+export async function batchedReceivedPublicKeys(
+  signer: SparkSigner,
+  secretCiphers: ReadonlyArray<Uint8Array>,
+): Promise<Uint8Array[]> {
+  const parts = await Promise.all(
+    chunks([...secretCiphers], SIGNER_BATCH_LIMIT).map(async (chunk) =>
+      signer.receivedPublicKeys(chunk),
+    ),
+  );
+  return parts.flat();
+}
+
+/** `signer.aggregateFrost` over any number of jobs, chunked like `batchedPublicKeys`. */
+export async function batchedAggregateFrost(
+  signer: SparkSigner,
+  jobs: ReadonlyArray<FrostAggregateJob>,
+): Promise<Uint8Array[]> {
+  const parts = await Promise.all(
+    chunks([...jobs], SIGNER_BATCH_LIMIT).map(async (chunk) => signer.aggregateFrost(chunk)),
+  );
+  return parts.flat();
+}
 
 /**
  * One user-side FROST signing job for an SO request: the key inside the signer, the wire
@@ -42,51 +94,63 @@ function operatorCommitments(
 }
 
 /**
- * Signs every spec in one `newCommitments`/`signFrost` round — user commitment at index `i` signs
- * spec `i` — and returns the wire `UserSignedTxSigningJob`s in the same order.
+ * Signs every spec in `newCommitments`/`signFrost` rounds of at most `SIGNER_BATCH_LIMIT` — user
+ * commitment at index `i` signs spec `i` — and returns the wire `UserSignedTxSigningJob`s in the
+ * same order. Chunks are sequential so outstanding nonces never exceed the limit; a leaf needs
+ * three refund jobs, so a 1000-leaf transfer still fits the signer's per-call cap.
  */
 export async function signUserJobs(
   signer: SparkSigner,
   specs: ReadonlyArray<UserSigningSpec>,
 ): Promise<UserSignedTxSigningJob[]> {
-  const commitments = await signer.newCommitments(specs.length);
-  if (commitments.length !== specs.length) {
-    throw new SparkError("signUserJobs: signer returned fewer commitments than requested");
-  }
-  const shares = await signer.signFrost(
-    specs.map((spec, index) => {
-      const commitment = commitments[index];
-      if (commitment === undefined) {
-        throw new SparkError("signUserJobs: commitment bookkeeping failure");
-      }
-      return {
-        key: spec.key,
-        target: spec.target,
-        verifyingKey: spec.verifyingKey,
-        commitment,
-        operatorCommitments: operatorCommitments(spec.commitments),
-        ...(spec.adaptorPublicKey === undefined ? {} : { adaptorPublicKey: spec.adaptorPublicKey }),
-      };
-    }),
-  );
-  if (shares.length !== specs.length) {
-    throw new SparkError("signUserJobs: signer returned fewer shares than requested");
-  }
-  return specs.map((spec, index) => {
-    const commitment = commitments[index];
-    const share = shares[index];
-    if (commitment === undefined || share === undefined) {
-      throw new SparkError("signUserJobs: signing job bookkeeping failure");
+  const jobs: UserSignedTxSigningJob[] = [];
+  for (const chunk of chunks([...specs], SIGNER_BATCH_LIMIT)) {
+    // oxlint-disable-next-line no-await-in-loop -- chunks are sequential to bound outstanding nonces
+    const commitments = await signer.newCommitments(chunk.length);
+    if (commitments.length !== chunk.length) {
+      throw new SparkError("signUserJobs: signer returned fewer commitments than requested");
     }
-    return create(UserSignedTxSigningJobSchema, {
-      ...(spec.leafId === undefined ? {} : { leafId: spec.leafId }),
-      signingPublicKey: spec.signingPublicKey,
-      rawTx: spec.target.transaction,
-      signingNonceCommitment: commitment,
-      userSignature: share,
-      signingCommitments: { signingCommitments: spec.commitments.signingNonceCommitments },
-    });
-  });
+    // oxlint-disable-next-line no-await-in-loop -- chunks are sequential to bound outstanding nonces
+    const shares = await signer.signFrost(
+      chunk.map((spec, index) => {
+        const commitment = commitments[index];
+        if (commitment === undefined) {
+          throw new SparkError("signUserJobs: commitment bookkeeping failure");
+        }
+        return {
+          key: spec.key,
+          target: spec.target,
+          verifyingKey: spec.verifyingKey,
+          commitment,
+          operatorCommitments: operatorCommitments(spec.commitments),
+          ...(spec.adaptorPublicKey === undefined
+            ? {}
+            : { adaptorPublicKey: spec.adaptorPublicKey }),
+        };
+      }),
+    );
+    if (shares.length !== chunk.length) {
+      throw new SparkError("signUserJobs: signer returned fewer shares than requested");
+    }
+    for (const [index, spec] of chunk.entries()) {
+      const commitment = commitments[index];
+      const share = shares[index];
+      if (commitment === undefined || share === undefined) {
+        throw new SparkError("signUserJobs: signing job bookkeeping failure");
+      }
+      jobs.push(
+        create(UserSignedTxSigningJobSchema, {
+          ...(spec.leafId === undefined ? {} : { leafId: spec.leafId }),
+          signingPublicKey: spec.signingPublicKey,
+          rawTx: spec.target.transaction,
+          signingNonceCommitment: commitment,
+          userSignature: share,
+          signingCommitments: { signingCommitments: spec.commitments.signingNonceCommitments },
+        }),
+      );
+    }
+  }
+  return jobs;
 }
 
 /**

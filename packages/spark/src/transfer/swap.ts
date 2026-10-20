@@ -13,7 +13,7 @@ import {
 import type { SspClient } from "../ssp/index.ts";
 import { selectExactMany } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
-import { signUserJobs } from "../tree/signing.ts";
+import { batchedAggregateFrost, batchedPublicKeys, signUserJobs } from "../tree/signing.ts";
 import { claimTransfer } from "./claim.ts";
 import type { TransferCoordinator } from "./model.ts";
 import { mapTransfer } from "./model.ts";
@@ -84,7 +84,8 @@ export async function swapLeaves(
     options.call,
   );
 
-  const signingPublicKeys = await signer.publicKeys(
+  const signingPublicKeys = await batchedPublicKeys(
+    signer,
     options.leaves.map((leaf) => ({ type: "leaf", leafId: leaf.id })),
   );
 
@@ -203,7 +204,7 @@ export async function swapLeaves(
       adaptorPublicKey,
     };
   });
-  const adaptorAddedSignatures = await signer.aggregateFrost(aggregateJobs);
+  const adaptorAddedSignatures = await batchedAggregateFrost(signer, aggregateJobs);
   if (adaptorAddedSignatures.length !== response.signingResults.length) {
     throw new SparkError("swapLeaves: signer returned fewer adaptor signatures than requested");
   }
