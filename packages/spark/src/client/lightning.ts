@@ -23,7 +23,13 @@ export function createLightning(context: ClientContext): SparkClient["lightning"
     now: context.now,
   };
   return {
-    createInvoice: async (options) => createLightningInvoice(deps, options),
+    createInvoice: async (options) =>
+      createLightningInvoice(deps, {
+        ...options,
+        ...(options.receiver === undefined
+          ? {}
+          : { receiverIdentityPublicKey: context.receiverIdentityKey(options.receiver) }),
+      }),
     pay: async (options) =>
       payLightningInvoice(
         {

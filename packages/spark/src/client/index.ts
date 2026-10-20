@@ -150,7 +150,9 @@ export type SparkClient = {
     /**
      * Asks the SSP for a BOLT-11 invoice paying this identity. `amountSats` of 0 requests an
      * amountless invoice; `includeSparkAddress` embeds a Spark fallback address payers can settle
-     * directly. The returned invoice is verified field-by-field before it is handed out.
+     * directly. `receiver` (a spark address string or 33-byte identity key) creates the invoice for
+     * another identity instead — the SSP routes its payment there and the payee claims it. The
+     * returned invoice is verified field-by-field before it is handed out.
      */
     readonly createInvoice: (options: {
       readonly amountSats: number;
@@ -158,6 +160,7 @@ export type SparkClient = {
       readonly descriptionHash?: Uint8Array;
       readonly expirySecs?: number;
       readonly includeSparkAddress?: boolean;
+      readonly receiver?: string | Uint8Array;
     }) => Promise<LightningInvoice>;
     /**
      * Pays a BOLT-11 invoice via a preimage swap with the SSP. `amountSats` is required for

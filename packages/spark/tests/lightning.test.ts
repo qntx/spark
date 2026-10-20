@@ -247,7 +247,7 @@ function fakeSpark(handlers: {
     input: Record<string, unknown>,
   ) => Promise<{ transfer?: Transfer }> | { transfer?: Transfer };
   query_transfers_by_id?: (input: Record<string, unknown>) => { transfers?: Transfer[] };
-  store_preimage_share_v2?: () => void;
+  store_preimage_share_v2?: (input: Record<string, unknown>) => void;
 }): { spark: ReturnType<typeof createClient<typeof SparkService>>; calls: CapturedCall[] } {
   const calls: CapturedCall[] = [];
   const respond = async (method: { name: string }, message: unknown) =>
@@ -304,7 +304,7 @@ function fakeSpark(handlers: {
           );
         }
         case "store_preimage_share_v2":
-          handlers.store_preimage_share_v2?.();
+          handlers.store_preimage_share_v2?.(input as Record<string, unknown>);
           return respond(method, create(EmptySchema));
 
         default:
@@ -495,6 +495,55 @@ describe("createLightningInvoice", () => {
     expect(stored.count).toBe(1);
   });
 
+  test("a receiver creates the invoice for another identity", async () => {
+    const signer = await testSigner();
+    const ownIdentity = await signer.identityPublicKey();
+    const payee = secp256k1.getPublicKey(new Uint8Array(32).fill(77), true);
+    const stored: Array<Record<string, unknown>> = [];
+    const { spark } = fakeSpark({
+      store_preimage_share_v2: (input) => stored.push(input),
+    });
+    const { ssp, receiveRequests } = fakeSsp({
+      // The SSP embeds the PAYEE's spark address — the invoice routes payment to the payee.
+      requestLightningReceive: (req) => ({
+        invoice: sspInvoice(req, req.receiverIdentityPublicKey),
+      }),
+    });
+    const deps = await lightningDeps({ ssp, spark });
+    const invoice = await createLightningInvoice(deps, {
+      amountSats: 1000,
+      includeSparkAddress: true,
+      receiverIdentityPublicKey: payee,
+    });
+    const request = required(receiveRequests[0], "receive request");
+    expect(bytesToHex(request.receiverIdentityPublicKey)).toBe(bytesToHex(payee));
+    const storeRequest = required(stored[0], "preimage share store");
+    expect(bytesToHex(storeRequest["userIdentityPublicKey"] as Uint8Array)).toBe(bytesToHex(payee));
+    expect(invoice.invoice.startsWith("lnbcrt")).toBe(true);
+    expect(bytesToHex(ownIdentity)).not.toBe(bytesToHex(payee));
+  });
+
+  test("a receiver invoice whose spark address is ours, not the payee's, is rejected", async () => {
+    const signer = await testSigner();
+    const ownIdentity = await signer.identityPublicKey();
+    const payee = secp256k1.getPublicKey(new Uint8Array(32).fill(77), true);
+    const stored = { count: 0 };
+    const { spark } = fakeSpark({ store_preimage_share_v2: () => stored.count++ });
+    const { ssp } = fakeSsp({
+      // The SSP answers with OUR spark address — it must be the payee's instead.
+      requestLightningReceive: (req) => ({ invoice: sspInvoice(req, ownIdentity) }),
+    });
+    const deps = await lightningDeps({ ssp, spark });
+    await expect(
+      createLightningInvoice(deps, {
+        amountSats: 1000,
+        includeSparkAddress: true,
+        receiverIdentityPublicKey: payee,
+      }),
+    ).rejects.toThrow("does not match the payee identity");
+    expect(stored.count).toBe(0);
+  });
+
   const failures: Array<{
     name: string;
     create: Parameters<typeof createLightningInvoice>[1];
@@ -578,13 +627,14 @@ describe("createLightningInvoice", () => {
           ],
         ];
       },
-      error: "does not match our identity",
+      error: "does not match the payee identity",
     },
     {
       name: "a second spark hop belongs to another identity",
       create: { amountSats: 1000, includeSparkAddress: true },
       mutate: (o) => {
-        // Our hop comes first — a first-match scan would accept this; every hop must be ours.
+        // The payee's hop comes first — a first-match scan would accept this; every hop must
+        // be the payee's.
         o.routeHints = [
           [
             ...required(o.routeHints?.[0], "spark hint"),
@@ -595,7 +645,7 @@ describe("createLightningInvoice", () => {
           ],
         ];
       },
-      error: "does not match our identity",
+      error: "does not match the payee identity",
     },
   ];
 
@@ -617,6 +667,12 @@ describe("createLightningInvoice", () => {
     await expect(createLightningInvoice(deps, { amountSats: 1000, expirySecs: 0 })).rejects.toThrow(
       SparkInputError,
     );
+    await expect(
+      createLightningInvoice(deps, {
+        amountSats: 1000,
+        receiverIdentityPublicKey: new Uint8Array(31),
+      }),
+    ).rejects.toThrow("receiver identity public key must be 33 bytes");
     expect(receiveRequests).toHaveLength(0);
     expect(stored.count).toBe(0);
   });

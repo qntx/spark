@@ -88,6 +88,37 @@ async function esplora(
   return response;
 }
 
+/**
+ * Terminal send-request statuses per upstream SparkLightningSendRequestStatus. A same-SSP
+ * ("internal") lightning payment converges to TRANSFER_COMPLETED rather than
+ * LIGHTNING_PAYMENT_SUCCEEDED — upstream's integration test asserts exactly that. The hosted SSP
+ * still surfaces payment_preimage on the send request, which sendStatus verifies.
+ */
+export const SEND_DONE = new Set<string>([
+  "TRANSFER_COMPLETED",
+  "TRANSFER_FAILED",
+  "LIGHTNING_PAYMENT_SUCCEEDED",
+  "LIGHTNING_PAYMENT_FAILED",
+  "USER_TRANSFER_VALIDATION_FAILED",
+  "USER_SWAP_RETURNED",
+  "USER_SWAP_RETURN_FAILED",
+]);
+export const SEND_OK = new Set<string>(["TRANSFER_COMPLETED", "LIGHTNING_PAYMENT_SUCCEEDED"]);
+
+/** Polls `lightning.sendStatus` until the request reaches a terminal status. */
+export async function sendStatusUntil(
+  client: HostedWallet["client"],
+  payment: { requestId: string; paymentHash: Uint8Array },
+  deadline: number,
+): Promise<{ status: string; outcome: string; preimage?: Uint8Array }> {
+  const status = await client.lightning.sendStatus(payment);
+  if (SEND_DONE.has(status.status) || Date.now() > deadline) {
+    return status;
+  }
+  await sleep(5000);
+  return sendStatusUntil(client, payment, deadline);
+}
+
 export type EsploraTxStatus = {
   readonly confirmed: boolean;
   readonly block_height?: number;
