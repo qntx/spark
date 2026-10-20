@@ -160,7 +160,10 @@ export function createLightningAddressServer(options: {
   readonly invoiceExpirySecs?: number;
   /**
    * Pending (unsettled, unexpired) invoices one payee may hold — an unauthenticated callback is a
-   * write, so without a cap a name's quota is a free database row each. Default 100.
+   * write, so without a cap a name's quota is a free database row each. Default 100. The cap is a
+   * storage bound, not abuse protection: anyone can fill one name's quota with unpaid invoices for
+   * up to `invoiceExpirySecs`, temporarily blocking that name's payments — operators should add
+   * per-IP rate limiting at the reverse proxy.
    */
   readonly maxPendingInvoicesPerUser?: number;
   /** Pending invoices the whole server holds; default 10_000. */

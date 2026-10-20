@@ -70,6 +70,11 @@ unsettled invoices, settled invoices past `LNURL_SETTLED_RETENTION_MS`, publishe
 older than 7 days, and receipts that exhausted their attempts are pruned every
 `LNURL_PRUNE_EVERY_ROUNDS` settle rounds.
 
+The per-payee quota is a storage bound, not abuse protection: the invoice callback is
+unauthenticated, so anyone can fill one name's `LNURL_MAX_PENDING_INVOICES_PER_USER` slots with
+invoices they never pay — for up to `LNURL_INVOICE_EXPIRY_SECS` each — and that name cannot be
+paid until a slot frees. Put per-IP rate limiting on the invoice route at your reverse proxy.
+
 ## Layout
 
 - `src/config.ts` — environment parsing, fail fast, no secret echoing
