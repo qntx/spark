@@ -223,7 +223,14 @@ export type SparkClient = {
     }) => Promise<StaticDepositRefund>;
   };
   readonly withdrawals: {
-    /** Pre-signed exit transactions for the given leaves, root first (see ExitTransaction). */
+    /**
+     * Pre-signed exit transactions for the given leaves, root first (see ExitTransaction). Each
+     * carries a hard deadline: once its parent confirms and its relative timelock has passed, it
+     * must confirm within DIRECT_TIMELOCK_OFFSET blocks or the SO watchtower publishes the self-fee
+     * direct variant — stranding descendants as WATCHTOWER_EXITED, or, for a zero-timelock-renewed
+     * leaf's node tx, stranding the funds under the leaf's aggregated key with no public recovery
+     * path.
+     */
     readonly unilateralExit: (
       leafIds: ReadonlyArray<string>,
     ) => Promise<ReadonlyArray<ExitTransaction>>;
@@ -269,7 +276,8 @@ export type SparkClient = {
     }) => Promise<{ readonly transaction: Uint8Array; readonly txid: string }>;
     /**
      * Signed key-path sweep of a confirmed refund output (any of the leaf's refund variants, output 0)
-     * to `destinationScript`.
+     * to `destinationScript`. `refundTx` may be the stored witness-less `directFromCpfpRefundTx`
+     * template — only its txid and output 0 are read.
      */
     readonly sweepRefund: (options: {
       readonly leafId: string;

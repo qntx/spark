@@ -231,6 +231,25 @@ describe("buildKeySpendSweep + finalizeKeySpend", () => {
     expect(txId(signed)).toBe(txId(transaction));
   });
 
+  test("a witness-stripped refund template sweeps the same outpoint as the signed tx", () => {
+    // The SO serves direct_* transactions with witnesses stripped; txid never covers
+    // witness data, so the template still names the confirmed output correctly.
+    const signed = new Transaction({ version: 2, allowUnknownOutputs: true });
+    signed.addInput({ txid: new Uint8Array(32).fill(3), index: 0, sequence: 0 });
+    signed.addOutput({ script: P2TR_SCRIPT, amount: 50_000n });
+    signed.updateInput(0, { finalScriptWitness: [new Uint8Array(64).fill(0xaa)] });
+    const signedBytes = signed.toBytes(true, true);
+    const strippedBytes = signed.toBytes(true, false);
+    expect(strippedBytes.length).toBeLessThan(signedBytes.length);
+    expect(txId(strippedBytes)).toBe(txId(signedBytes));
+
+    const options = { vout: 0, destinationScript: P2WPKH_SCRIPT, feeRateSatPerVbyte: 2 };
+    const fromSigned = buildKeySpendSweep({ ...options, prevTx: signedBytes });
+    const fromStripped = buildKeySpendSweep({ ...options, prevTx: strippedBytes });
+    expect(fromStripped.transaction).toStrictEqual(fromSigned.transaction);
+    expect(fromStripped.target).toStrictEqual(fromSigned.target);
+  });
+
   test("rejects sub-dust sweeps and malformed signatures", () => {
     const prev = new Transaction({ version: 2, allowUnknownOutputs: true });
     prev.addInput({ txid: new Uint8Array(32).fill(3), index: 0, sequence: 0 });

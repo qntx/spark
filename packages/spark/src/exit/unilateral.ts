@@ -15,7 +15,31 @@ import type { SparkExitChain } from "./store.ts";
 // zero-fee v3 (TRUC) transaction with a P2A anchor; the caller fee-bumps each via
 // a CPFP child built with `buildCpfpChild` and submits them as packages.
 
-/** A pre-signed exit transaction plus the context needed to broadcast it. */
+// Every pre-signed transaction carries a hard deadline. Once its parent has
+// confirmed and the transaction's own relative timelock has passed, it must
+// confirm within DIRECT_TIMELOCK_OFFSET blocks or the SO watchtower publishes
+// the self-fee "direct" variant it holds — a same-outpoint transaction whose
+// witness never leaves the SO. What that means per transaction kind:
+//   - an intermediate node's node tx: the direct node tx kills the child's
+//     pre-signed package; every descendant leaf becomes WATCHTOWER_EXITED and is
+//     recoverable only while the SO is online (`recoverWatchtowerExit`).
+//   - a zero-timelock-renewed leaf's node tx: the funds land in the leaf's
+//     direct_tx output under the aggregated key, and the public SO code exposes
+//     no co-signing path that accepts an ON_CHAIN leaf — an upstream gap. The
+//     renewal clears `directRefundTx`, so no pre-signed fallback exists.
+//   - a refund tx: the watchtower publishes `direct_from_cpfp_refund_tx`, whose
+//     output still pays the leaf's key-path script — sweep it with
+//     `withdrawals.sweepRefund`.
+// TRUC admits only one unconfirmed ancestor, so the CPFP path can advance just
+// one level per confirmation; pick fee rates that land each package well inside
+// the DIRECT_TIMELOCK_OFFSET window.
+
+/**
+ * A pre-signed exit transaction plus the context needed to broadcast it. Broadcasting is
+ * deadline-bound: once `parentTxid` confirms and `relativeTimelock` blocks pass, this must confirm
+ * within DIRECT_TIMELOCK_OFFSET blocks or the SO watchtower replaces it with the direct variant
+ * (see the module doc).
+ */
 export type ExitTransaction = {
   /** The tree node this transaction belongs to (the leaf's id for refunds). */
   readonly nodeId: string;
@@ -236,6 +260,9 @@ function exitTransaction(
 /**
  * Flattens stored chains into broadcast order: for each leaf's chain root→leaf, ancestor node txs
  * deduplicated by node id at first use, then that leaf's refund right after its leaf node tx.
+ * Broadcast strictly in this order — each transaction's deadline is its parent's confirmation
+ * height plus its own relative timelock plus DIRECT_TIMELOCK_OFFSET, so a stalled package endangers
+ * every transaction below it.
  */
 export function exitTransactions(chains: ReadonlyArray<SparkExitChain>): ExitTransaction[] {
   const out: ExitTransaction[] = [];
@@ -311,7 +338,8 @@ export async function queryExitChains(options: {
 /**
  * One `query_nodes` (with parents) for the requested leaves' ids, then the exit chains and their
  * broadcast-flattened transactions. A requested id that the query does not return or that carries
- * no refund is a `SparkInputError`.
+ * no refund is a `SparkInputError`. The returned transactions are owner-broadcastable; the direct
+ * variants stored alongside them in the chains are witness-stripped templates and are not.
  */
 export async function unilateralExitTransactions(options: {
   readonly spark: Client<typeof SparkService>;
