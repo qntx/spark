@@ -78,7 +78,7 @@ jobs:
           SUITE: ${{ steps.suite.outputs.suite }}
         run: |
           set -euo pipefail
-          files="tests/e2e-hosted-swap.test.ts tests/e2e-hosted-multi-send.test.ts tests/e2e-hosted-lightning.test.ts tests/e2e-hosted-lightning-failure.test.ts tests/e2e-hosted-settings-and-delegated-invoice.test.ts tests/e2e-hosted-lightning-address.test.ts"
+          files="tests/e2e-hosted-swap.test.ts tests/e2e-hosted-multi-send.test.ts tests/e2e-hosted-lightning.test.ts tests/e2e-hosted-lightning-failure.test.ts tests/e2e-hosted-settings-and-delegated-invoice.test.ts tests/e2e-hosted-lightning-address.test.ts tests/e2e-hosted-optimize.test.ts"
           if [ "$SUITE" = "full" ]; then
             files="$files tests/e2e-hosted-coop-exit.test.ts tests/e2e-hosted-static-deposit.test.ts tests/e2e-hosted-static-refund.test.ts tests/e2e-hosted-multi-deposit.test.ts"
           fi
