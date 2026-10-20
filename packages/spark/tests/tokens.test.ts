@@ -11,7 +11,7 @@ import { createSparkClientWith } from "../src/client/index.ts";
 import { encodeSparkAddress } from "../src/core/address.ts";
 import { hashFinalTokenTransaction } from "../src/core/hashing/token.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
-import { SparkError, SparkInputError } from "../src/errors/index.ts";
+import { SparkError, SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import {
   ChallengeSchema,
   ProtectedChallengeSchema,
@@ -23,6 +23,7 @@ import {
   QueryTokenOutputsResponseSchema,
   SparkTokenService,
   TokenOutputStatus,
+  TokenTransactionStatus,
 } from "../src/proto/gen/spark_token_pb.ts";
 import type {
   BroadcastTransactionResponse,
@@ -30,6 +31,9 @@ import type {
   PartialTokenOutput,
   PartialTokenTransaction,
   QueryTokenOutputsResponse,
+  TokenOutput,
+  TokenTransaction,
+  TokenTransactionWithStatus,
   BroadcastTransactionRequestSchema,
   BroadcastTransactionRequest,
 } from "../src/proto/gen/spark_token_pb.ts";
@@ -353,6 +357,249 @@ describe("broadcastPartialTokenTransaction", () => {
         tokens: TOKENS,
       }),
     ).rejects.toThrow(SparkError);
+  });
+});
+
+/** Builds the V2-shape committed transaction `query_token_transactions` would return. */
+function v2TxFor(
+  partial: PartialTokenTransaction,
+  mutate?: (output: PartialTokenOutput) => PartialTokenOutput,
+): TokenTransaction {
+  const metadata = required(partial.tokenTransactionMetadata, "metadata");
+  return {
+    $typeName: "spark_token.TokenTransaction",
+    version: partial.version,
+    tokenInputs: partial.tokenInputs,
+    tokenOutputs: partial.partialTokenOutputs.map((output) => {
+      const resolved = mutate === undefined ? output : mutate(output);
+      const tokenOutput: TokenOutput = {
+        $typeName: "spark_token.TokenOutput",
+        ownerPublicKey: resolved.ownerPublicKey,
+        tokenIdentifier: resolved.tokenIdentifier,
+        tokenAmount: resolved.tokenAmount,
+        withdrawBondSats: resolved.withdrawBondSats,
+        withdrawRelativeBlockLocktime: resolved.withdrawRelativeBlockLocktime,
+      };
+      return tokenOutput;
+    }),
+    sparkOperatorIdentityPublicKeys: metadata.sparkOperatorIdentityPublicKeys,
+    network: metadata.network,
+    clientCreatedTimestamp: metadata.clientCreatedTimestamp,
+    validityDurationSeconds: metadata.validityDurationSeconds,
+    invoiceAttachments: metadata.invoiceAttachments,
+  };
+}
+
+function statusRow(
+  tx: TokenTransaction,
+  status: (typeof TokenTransactionStatus)[keyof typeof TokenTransactionStatus],
+  hash: Uint8Array,
+): TokenTransactionWithStatus {
+  return {
+    $typeName: "spark_token.TokenTransactionWithStatus",
+    tokenTransaction: tx,
+    status,
+    tokenTransactionHash: hash,
+  };
+}
+
+function recoverableTokenClient(handlers: {
+  readonly broadcasts: ReadonlyArray<() => BroadcastTransactionResponse>;
+  readonly rows?: ReadonlyArray<TokenTransactionWithStatus>;
+}): {
+  client: Client<typeof SparkTokenService>;
+  broadcastCalls: () => number;
+  queryCalls: () => number;
+} {
+  let broadcastCalls = 0;
+  let queryCalls = 0;
+  const client = {
+    broadcast_transaction: async () => {
+      await Promise.resolve();
+      const behavior =
+        handlers.broadcasts[Math.min(broadcastCalls, handlers.broadcasts.length - 1)];
+      broadcastCalls += 1;
+      return required(behavior, "broadcast behavior")();
+    },
+    query_token_transactions: async () => {
+      await Promise.resolve();
+      queryCalls += 1;
+      return {
+        $typeName: "spark_token.QueryTokenTransactionsResponse",
+        tokenTransactionsWithStatus: [...(handlers.rows ?? [])],
+        offset: 0n,
+      };
+    },
+  } as unknown as Client<typeof SparkTokenService>;
+  return { client, broadcastCalls: () => broadcastCalls, queryCalls: () => queryCalls };
+}
+
+const LOST = () => {
+  throw new SparkRequestError("connection lost mid-response", { code: "unavailable" });
+};
+
+describe("broadcastPartialTokenTransaction recovery", () => {
+  const inputs = [makeOutput("out-1", 60n), makeOutput("out-2", 40n)];
+  const partial = makeTransferPartial({ inputs, amount: 70n });
+  const inputIds = inputs.map((output) => output.id);
+  const committedHash = hexToBytes("11".repeat(32));
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const broadcastOptions = {
+    signer,
+    partial,
+    network: "regtest" as const,
+    operators: OPERATORS,
+    tokens: TOKENS,
+    inputOutputIds: inputIds,
+  };
+
+  test("retries the identical partial once and returns on success", async () => {
+    const final = finalFor(partial);
+    const { client, broadcastCalls, queryCalls } = recoverableTokenClient({
+      broadcasts: [
+        LOST,
+        () => ({
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+          finalTokenTransaction: final,
+        }),
+      ],
+    });
+    const { transactionHash } = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    });
+    expect(transactionHash).toBe(bytesToHex(hashFinalTokenTransaction(final)));
+    expect(broadcastCalls()).toBe(2);
+    expect(queryCalls()).toBe(0);
+  });
+
+  test("lost response: probe finds the committed transaction and returns its hash", async () => {
+    const { client, broadcastCalls, queryCalls } = recoverableTokenClient({
+      broadcasts: [LOST],
+      rows: [
+        // The output-ids filter also returns the mint that created the input — it must be skipped.
+        statusRow(
+          {
+            $typeName: "spark_token.TokenTransaction",
+            version: 3,
+            tokenInputs: {
+              case: "mintInput",
+              value: {
+                $typeName: "spark_token.TokenMintInput",
+                issuerPublicKey: OWNER,
+                tokenIdentifier: TOKEN_ID,
+              },
+            },
+            tokenOutputs: [],
+            sparkOperatorIdentityPublicKeys: [],
+            network: Network.REGTEST,
+            invoiceAttachments: [],
+          },
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          hexToBytes("22".repeat(32)),
+        ),
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          committedHash,
+        ),
+      ],
+    });
+    const { transactionHash } = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    });
+    expect(transactionHash).toBe(bytesToHex(committedHash));
+    expect(broadcastCalls()).toBe(2);
+    expect(queryCalls()).toBe(1);
+  });
+
+  test("probe finding a different transaction over the same inputs throws", async () => {
+    const foreign = v2TxFor(partial, (output) => ({
+      ...output,
+      tokenAmount: numberToBytesBE(1n, 16),
+    }));
+    const { client } = recoverableTokenClient({
+      broadcasts: [LOST],
+      rows: [statusRow(foreign, TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED, committedHash)],
+    });
+    await expect(
+      broadcastPartialTokenTransaction({ token: client, ...broadcastOptions }),
+    ).rejects.toThrow(/consumed by a different token transaction/);
+  });
+
+  test("lost response with no committed transaction throws naming the input ids", async () => {
+    const { client } = recoverableTokenClient({ broadcasts: [LOST], rows: [] });
+    const failure = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SparkRequestError);
+    expect((failure as Error).message).toContain("out-1");
+    expect((failure as Error).message).toContain("out-2");
+  });
+
+  test("a cancelled transaction over the inputs does not count as committed", async () => {
+    const { client } = recoverableTokenClient({
+      broadcasts: [LOST],
+      rows: [
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_SIGNED_CANCELLED,
+          committedHash,
+        ),
+      ],
+    });
+    await expect(
+      broadcastPartialTokenTransaction({ token: client, ...broadcastOptions }),
+    ).rejects.toThrow(SparkRequestError);
+  });
+
+  test("definitive rejections are rethrown without retry or probe", async () => {
+    const rejected = () => {
+      throw new SparkRequestError("invalid signature", { code: "invalid_argument" });
+    };
+    const { client, broadcastCalls, queryCalls } = recoverableTokenClient({
+      broadcasts: [rejected],
+      rows: [
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          committedHash,
+        ),
+      ],
+    });
+    await expect(
+      broadcastPartialTokenTransaction({ token: client, ...broadcastOptions }),
+    ).rejects.toThrow("invalid signature");
+    expect(broadcastCalls()).toBe(1);
+    expect(queryCalls()).toBe(0);
+  });
+
+  test("without input output ids a failure propagates without recovery", async () => {
+    const { client, broadcastCalls, queryCalls } = recoverableTokenClient({
+      broadcasts: [LOST],
+      rows: [
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          committedHash,
+        ),
+      ],
+    });
+    await expect(
+      broadcastPartialTokenTransaction({
+        token: client,
+        signer,
+        partial,
+        network: "regtest",
+        operators: OPERATORS,
+        tokens: TOKENS,
+      }),
+    ).rejects.toThrow("connection lost mid-response");
+    expect(broadcastCalls()).toBe(1);
+    expect(queryCalls()).toBe(0);
   });
 });
 

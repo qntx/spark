@@ -5,18 +5,23 @@ import { equalBytes, numberToBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 import { compareBytes } from "../core/bytes.ts";
-import { hashFinalTokenTransaction } from "../core/hashing/token.ts";
+import { hashFinalTokenTransaction, hashTokenTransactionV3 } from "../core/hashing/token.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
-import { SparkError, SparkInputError } from "../errors/index.ts";
+import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.ts";
+import { Order } from "../proto/gen/spark_pb.ts";
 import type {
+  BroadcastTransactionResponse,
   FinalTokenTransaction,
   PartialTokenOutput,
   PartialTokenTransaction,
   SignatureWithIndex,
   SparkTokenService,
+  TokenOutputToSpend,
+  TokenTransaction,
 } from "../proto/gen/spark_token_pb.ts";
 import {
+  TokenTransactionStatus,
   InvoiceAttachmentSchema,
   PartialTokenOutputSchema,
   PartialTokenTransactionSchema,
@@ -266,12 +271,186 @@ function sameInvoiceAttachments(
 }
 
 /**
+ * Errors the SO raises only when the broadcast cannot have committed. Everything else — transport
+ * failures, deadlines, `aborted` preemption races, malformed responses — may follow a server-side
+ * commit and is recovered by re-broadcast + probe.
+ */
+const DEFINITIVE_BROADCAST_CODES: ReadonlySet<string> = new Set([
+  "invalid_argument",
+  "failed_precondition",
+  "already_exists",
+  "not_found",
+  "unauthenticated",
+  "permission_denied",
+  "out_of_range",
+  "unimplemented",
+]);
+
+function isDefinitiveBroadcastRejection(error: unknown): boolean {
+  return error instanceof SparkRequestError && DEFINITIVE_BROADCAST_CODES.has(error.code ?? "");
+}
+
+function assertFinalMatchesPartial(
+  final: FinalTokenTransaction | undefined,
+  partial: PartialTokenTransaction,
+): asserts final is FinalTokenTransaction {
+  if (final === undefined) {
+    throw new SparkError("broadcast_transaction: response missing final token transaction");
+  }
+  const metadata = partial.tokenTransactionMetadata;
+  const finalMetadata = final.tokenTransactionMetadata;
+  if (
+    final.version !== partial.version ||
+    !sameInputs(final, partial) ||
+    !sameOutputs(final, partial) ||
+    !sameInvoiceAttachments(final, partial) ||
+    metadata === undefined ||
+    finalMetadata === undefined ||
+    finalMetadata.network !== metadata.network ||
+    finalMetadata.validityDurationSeconds !== metadata.validityDurationSeconds ||
+    finalMetadata.sparkOperatorIdentityPublicKeys.length !==
+      metadata.sparkOperatorIdentityPublicKeys.length ||
+    !metadata.sparkOperatorIdentityPublicKeys.every((key, index) =>
+      equalBytes(key, finalMetadata.sparkOperatorIdentityPublicKeys[index] ?? new Uint8Array()),
+    )
+  ) {
+    throw new SparkError(
+      `broadcast_transaction: final transaction ${bytesToHex(
+        hashFinalTokenTransaction(final),
+      )} does not match the submitted partial`,
+    );
+  }
+}
+
+/** Multiset equality over (prev hash, vout) — order-insensitive. */
+function sameInputSet(
+  actual: ReadonlyArray<TokenOutputToSpend>,
+  expected: ReadonlyArray<TokenOutputToSpend>,
+): boolean {
+  if (actual.length !== expected.length) {
+    return false;
+  }
+  const remaining = [...actual];
+  for (const input of expected) {
+    const index = remaining.findIndex(
+      (candidate) =>
+        equalBytes(candidate.prevTokenTransactionHash, input.prevTokenTransactionHash) &&
+        candidate.prevTokenTransactionVout === input.prevTokenTransactionVout,
+    );
+    if (index === -1) {
+      return false;
+    }
+    remaining.splice(index, 1);
+  }
+  return true;
+}
+
+/** `sameOutputs` over the V2 `TokenOutput` shape a committed transaction carries. */
+function sameV2Outputs(tx: TokenTransaction, partial: PartialTokenTransaction): boolean {
+  if (tx.tokenOutputs.length !== partial.partialTokenOutputs.length) {
+    return false;
+  }
+  return partial.partialTokenOutputs.every((expected, index) => {
+    const actual = tx.tokenOutputs[index];
+    return (
+      actual !== undefined &&
+      equalBytes(actual.ownerPublicKey, expected.ownerPublicKey) &&
+      equalBytes(actual.tokenIdentifier ?? new Uint8Array(), expected.tokenIdentifier) &&
+      equalBytes(actual.tokenAmount, expected.tokenAmount) &&
+      (actual.withdrawBondSats ?? 0n) === expected.withdrawBondSats &&
+      (actual.withdrawRelativeBlockLocktime ?? 0n) === expected.withdrawRelativeBlockLocktime
+    );
+  });
+}
+
+/**
+ * `query_token_transactions` probe for a broadcast whose response may have been lost: the
+ * output-ids filter returns transactions that spent OR created the given outputs, so candidates
+ * must be live (non-cancelled) transfers whose input set equals the partial's. A live match with
+ * different outputs means an unknown transaction consumed the inputs — fail loudly rather than let
+ * a retry double-pay.
+ */
+async function probeCommittedTransfer(options: {
+  readonly token: Client<typeof SparkTokenService>;
+  readonly partial: PartialTokenTransaction;
+  readonly inputOutputIds: ReadonlyArray<string>;
+  readonly call?: CallOptions;
+}): Promise<{ transactionHash: string } | undefined> {
+  const inputs = options.partial.tokenInputs;
+  if (inputs.case !== "transferInput") {
+    return undefined;
+  }
+  const expectedInputs = inputs.value.outputsToSpend;
+  const response = await options.token.query_token_transactions(
+    {
+      queryType: {
+        case: "byFilters",
+        value: { outputIds: [...options.inputOutputIds] },
+      },
+      outputIds: [],
+      ownerPublicKeys: [],
+      issuerPublicKeys: [],
+      tokenIdentifiers: [],
+      tokenTransactionHashes: [],
+      order: Order.DESCENDING,
+      limit: 128n,
+      offset: 0n,
+    },
+    options.call,
+  );
+  for (const row of response.tokenTransactionsWithStatus) {
+    if (
+      row.status === TokenTransactionStatus.TOKEN_TRANSACTION_STARTED_CANCELLED ||
+      row.status === TokenTransactionStatus.TOKEN_TRANSACTION_SIGNED_CANCELLED
+    ) {
+      continue;
+    }
+    const tx = row.tokenTransaction;
+    if (tx === undefined || tx.tokenInputs.case !== "transferInput") {
+      continue;
+    }
+    const actualInputs = tx.tokenInputs.value.outputsToSpend;
+    const spendsOurs = actualInputs.some((actual) =>
+      expectedInputs.some(
+        (expected) =>
+          equalBytes(expected.prevTokenTransactionHash, actual.prevTokenTransactionHash) &&
+          expected.prevTokenTransactionVout === actual.prevTokenTransactionVout,
+      ),
+    );
+    if (!spendsOurs) {
+      continue;
+    }
+    const hash =
+      row.tokenTransactionHash.length > 0
+        ? bytesToHex(row.tokenTransactionHash)
+        : bytesToHex(hashTokenTransactionV3(tx));
+    if (sameInputSet(actualInputs, expectedInputs) && sameV2Outputs(tx, options.partial)) {
+      return { transactionHash: hash };
+    }
+    throw new SparkError(
+      `broadcast_transaction: inputs were consumed by a different token transaction ${hash}`,
+    );
+  }
+  return undefined;
+}
+
+/**
  * `broadcast_transaction` — signs the partial transaction's hash once per input index with the
  * identity key (BIP-340), submits it to the coordinator, and verifies the returned final
  * transaction carries the same inputs, outputs (order, owner, identifier, amount, withdraw
  * bond/locktime), invoice attachments, network, operator set, and validity duration. Returns the
  * hex `hashFinalTokenTransaction` plus the raw token identifier the SO returns on create
  * transactions.
+ *
+ * When `inputOutputIds` carries the ids of the spent outputs (`SparkTokenOutput.id`) a
+ * non-definitive broadcast failure recovers instead of losing the transaction: the identical
+ * partial is re-broadcast once — the SO dedups by partial-transaction hash
+ * (`handleExistingTransaction`, spark/so/handler/tokens/broadcast_token_handler.go) — and if that
+ * also fails, `query_token_transactions` is probed for a committed transaction spending exactly
+ * those inputs. Matching receiver/change outputs return the committed hash; a live transaction
+ * spending them with different outputs throws. When neither resolves the failure the thrown
+ * {@link SparkRequestError} names the input output ids — check `tokens.outputs()` before retrying,
+ * because a fresh call would select different outputs and pay twice.
  */
 export async function broadcastPartialTokenTransaction(options: {
   readonly token: Client<typeof SparkTokenService>;
@@ -281,6 +460,8 @@ export async function broadcastPartialTokenTransaction(options: {
   readonly operators: ReadonlyArray<SparkOperatorConfig>;
   readonly tokens: TokenNetworkParams;
   readonly call?: CallOptions;
+  /** Output ids of the spent inputs; enables lost-response recovery (transfers only). */
+  readonly inputOutputIds?: ReadonlyArray<string>;
 }): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
   const { partial } = options;
   const metadata = partial.tokenTransactionMetadata;
@@ -300,44 +481,72 @@ export async function broadcastPartialTokenTransaction(options: {
     ownerSignatures.push(create(SignatureWithIndexSchema, { signature, inputIndex: index }));
   }
 
-  const response = await options.token.broadcast_transaction(
-    {
-      identityPublicKey: await options.signer.identityPublicKey(),
-      partialTokenTransaction: partial,
-      tokenTransactionOwnerSignatures: ownerSignatures,
-    },
-    options.call,
-  );
+  const request = {
+    identityPublicKey: await options.signer.identityPublicKey(),
+    partialTokenTransaction: partial,
+    tokenTransactionOwnerSignatures: ownerSignatures,
+  };
+  const attempt = async (): Promise<{
+    response: BroadcastTransactionResponse;
+    final: FinalTokenTransaction;
+  }> => {
+    const response = await options.token.broadcast_transaction(request, options.call);
+    const final = response.finalTokenTransaction;
+    assertFinalMatchesPartial(final, partial);
+    return { response, final };
+  };
 
-  const final = response.finalTokenTransaction;
-  if (final === undefined) {
-    throw new SparkError("broadcast_transaction: response missing final token transaction");
+  let committed: { response: BroadcastTransactionResponse; final: FinalTokenTransaction };
+  try {
+    committed = await attempt();
+  } catch (error) {
+    const { inputOutputIds } = options;
+    if (
+      inputOutputIds === undefined ||
+      partial.tokenInputs.case !== "transferInput" ||
+      isDefinitiveBroadcastRejection(error)
+    ) {
+      throw error;
+    }
+    try {
+      committed = await attempt();
+    } catch (retryError) {
+      if (isDefinitiveBroadcastRejection(retryError)) {
+        throw retryError;
+      }
+      const recovered = await probeCommittedTransfer({
+        token: options.token,
+        partial,
+        inputOutputIds,
+        ...(options.call === undefined ? {} : { call: options.call }),
+      });
+      if (recovered !== undefined) {
+        return recovered;
+      }
+      const requestOptions: ErrorOptions & { code?: string; operator?: string } = {
+        cause: error,
+      };
+      if (error instanceof SparkRequestError) {
+        if (error.code !== undefined) {
+          requestOptions.code = error.code;
+        }
+        if (error.operator !== undefined) {
+          requestOptions.operator = error.operator;
+        }
+      }
+      throw new SparkRequestError(
+        `broadcast_transaction may have committed; check tokens.outputs() for input output ids ${inputOutputIds.join(
+          ",",
+        )} before retrying`,
+        requestOptions,
+      );
+    }
   }
-  const finalMetadata = final.tokenTransactionMetadata;
-  if (
-    final.version !== partial.version ||
-    !sameInputs(final, partial) ||
-    !sameOutputs(final, partial) ||
-    !sameInvoiceAttachments(final, partial) ||
-    finalMetadata === undefined ||
-    finalMetadata.network !== metadata.network ||
-    finalMetadata.validityDurationSeconds !== metadata.validityDurationSeconds ||
-    finalMetadata.sparkOperatorIdentityPublicKeys.length !==
-      metadata.sparkOperatorIdentityPublicKeys.length ||
-    !metadata.sparkOperatorIdentityPublicKeys.every((key, index) =>
-      equalBytes(key, finalMetadata.sparkOperatorIdentityPublicKeys[index] ?? new Uint8Array()),
-    )
-  ) {
-    throw new SparkError(
-      `broadcast_transaction: final transaction ${bytesToHex(
-        hashFinalTokenTransaction(final),
-      )} does not match the submitted partial`,
-    );
-  }
+
   return {
-    transactionHash: bytesToHex(hashFinalTokenTransaction(final)),
-    ...(response.tokenIdentifier === undefined
+    transactionHash: bytesToHex(hashFinalTokenTransaction(committed.final)),
+    ...(committed.response.tokenIdentifier === undefined
       ? {}
-      : { tokenIdentifier: response.tokenIdentifier }),
+      : { tokenIdentifier: committed.response.tokenIdentifier }),
   };
 }

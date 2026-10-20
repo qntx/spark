@@ -111,7 +111,10 @@ export type LocalWallet = {
 };
 
 /** Signer + client + memory store over one seed (two calls with the same seed = two devices). */
-export async function localWallet(seed: Uint8Array): Promise<LocalWallet> {
+export async function localWallet(
+  seed: Uint8Array,
+  options?: { fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> },
+): Promise<LocalWallet> {
   const crypto = await loadWasmBackend();
   const signer = createSparkSigner({
     crypto,
@@ -123,7 +126,7 @@ export async function localWallet(seed: Uint8Array): Promise<LocalWallet> {
   const client = createSparkClient({
     network: "regtest",
     signer,
-    fetch: localFetch(),
+    fetch: options?.fetch ?? localFetch(),
     operators: LOCAL_OPERATORS,
     store,
   });

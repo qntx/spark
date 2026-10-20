@@ -52,6 +52,7 @@ export async function sendTokens(
       network,
       operators,
       tokens: config.tokens,
+      inputOutputIds: selected.map((output) => output.id),
     });
   });
 }
@@ -131,6 +132,7 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
           network,
           operators,
           tokens: config.tokens,
+          inputOutputIds: available.map((output) => output.id),
         });
         return { transactionHash };
       });
