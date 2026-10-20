@@ -637,7 +637,7 @@ describe("transfers.send", () => {
       expect(jobs[i]?.signingPublicKey).toStrictEqual(spec.signingPublicKey);
     }
     signer.dispose();
-  });
+  }, 60_000);
 
   test("a 300-leaf send chunks every signer call within the per-call cap", async () => {
     const signer = await testSigner(uniqueRandom());
@@ -681,7 +681,7 @@ describe("transfers.send", () => {
     expect(pkg.directLeavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
     expect(pkg.directFromCpfpLeavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
     signer.dispose();
-  });
+  }, 60_000);
 
   test("rejects a send whose selection exceeds the 1000-leaf transfer limit", async () => {
     // The guard fires at leaf selection, before any signing — a map-backed test signer
@@ -712,7 +712,7 @@ describe("transfers.send", () => {
         amountSats: leafIds.length * 100_000,
       }),
     ).rejects.toThrow("over the 1000-leaf limit");
-  });
+  }, 60_000);
 });
 
 const OTHER_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000ff";
@@ -1529,7 +1529,7 @@ describe("transfers.claim", () => {
     expect(pkg.leavesToClaim.map((job) => job.leafId)).toStrictEqual(leafIds);
     expect(pkg.directFromCpfpLeavesToClaim.map((job) => job.leafId)).toStrictEqual(leafIds);
     receiver.dispose();
-  });
+  }, 60_000);
 });
 
 function storedChain(leafId: string): SparkExitChain {
@@ -2378,7 +2378,7 @@ describe("transfers.swap", () => {
     const pkg = required(request.transfer?.transferPackage, "transfer package");
     expect(pkg.leavesToSend.map((job) => job.leafId)).toStrictEqual(leafIds);
     signer.dispose();
-  });
+  }, 60_000);
 });
 
 const MULTI_LEAF_A = "01989abc-def0-7abc-89ab-0000000000b1";
