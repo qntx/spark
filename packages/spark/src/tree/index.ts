@@ -72,40 +72,57 @@ export function mapTreeNode(node: TreeNode): SparkLeaf {
 }
 
 /**
- * Pages through `query_nodes` for the owner's `AVAILABLE` leaves — the same source/status filter
- * the upstream leaf-manager uses (`include_parents=false`, batches of 50 until a short page).
+ * Pages through `query_nodes` for the owner's nodes in `statuses` — the same source filter and
+ * short-page termination the upstream leaf-manager uses, in batches of 50. `includeParents`
+ * additionally returns the matched nodes' ancestors (needed by the watchtower-exit listing, whose
+ * recoverable output lives on a parent's direct tx).
  */
-export async function queryLeaves(options: {
+export async function queryOwnerNodes(options: {
   readonly spark: Client<typeof SparkService>;
   readonly ownerIdentityPublicKey: Uint8Array;
   readonly network: SparkNetwork;
+  readonly statuses: ReadonlyArray<TreeNodeStatus>;
+  readonly includeParents: boolean;
   readonly call?: CallOptions;
-}): Promise<SparkLeaf[]> {
-  const fetchPage = async (offset: number): Promise<SparkLeaf[]> => {
+}): Promise<TreeNode[]> {
+  const fetchPage = async (offset: number): Promise<TreeNode[]> => {
     const response = await options.spark.query_nodes(
       {
         source: {
           case: "ownerIdentityPubkey",
           value: options.ownerIdentityPublicKey,
         },
-        includeParents: false,
+        includeParents: options.includeParents,
         limit: BigInt(LEAF_PAGE_SIZE),
         offset: BigInt(offset),
         network: sparkNetworkProto(options.network),
-        statuses: [TreeNodeStatus.AVAILABLE],
+        statuses: [...options.statuses],
       },
       options.call,
     );
-    const page = Object.values(response.nodes)
-      .filter((node) => node.status === "AVAILABLE")
-      .map((node) => mapTreeNode(node));
-    if (Object.keys(response.nodes).length < LEAF_PAGE_SIZE) {
+    const page = Object.values(response.nodes);
+    if (page.length < LEAF_PAGE_SIZE) {
       return page;
     }
     const rest = await fetchPage(Number(response.offset));
     return [...page, ...rest];
   };
   return fetchPage(0);
+}
+
+/** Pages through `query_nodes` for the owner's `AVAILABLE` leaves via {@link queryOwnerNodes}. */
+export async function queryLeaves(options: {
+  readonly spark: Client<typeof SparkService>;
+  readonly ownerIdentityPublicKey: Uint8Array;
+  readonly network: SparkNetwork;
+  readonly call?: CallOptions;
+}): Promise<SparkLeaf[]> {
+  const nodes = await queryOwnerNodes({
+    ...options,
+    statuses: [TreeNodeStatus.AVAILABLE],
+    includeParents: false,
+  });
+  return nodes.filter((node) => node.status === "AVAILABLE").map((node) => mapTreeNode(node));
 }
 
 export function leavesBalance(leaves: ReadonlyArray<SparkLeaf>): number {

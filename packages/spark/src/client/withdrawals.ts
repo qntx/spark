@@ -9,6 +9,7 @@ import {
 import { SparkInputError } from "../errors/index.ts";
 import { cooperativeExit, cooperativeExitStatus, quoteCooperativeExit } from "../exit/coop.ts";
 import { unilateralExitTransactions } from "../exit/unilateral.ts";
+import { queryWatchtowerExitedLeaves, recoverWatchtowerExit } from "../exit/watchtower.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
 import { renewStaleLeaves, selectSendLeaves } from "./leaves.ts";
@@ -69,6 +70,14 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
         await store.putExitChains(chains);
         return transactions;
       }),
+    watchtowerExitedLeaves: async () =>
+      queryWatchtowerExitedLeaves({
+        spark: coordinatorConnection.spark,
+        identityPublicKey: await signer.identityPublicKey(),
+        network,
+      }),
+    recoverWatchtowerExit: async (options) =>
+      recoverWatchtowerExit({ spark: coordinatorConnection.spark, signer, network }, options),
     sweepRefund: async ({ leafId, refundTx, destinationScript, feeRateSatPerVbyte }) => {
       const key = { type: "leaf" as const, leafId };
       const [publicKey] = await signer.publicKeys([key]);
