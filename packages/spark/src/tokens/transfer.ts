@@ -514,12 +514,23 @@ export async function broadcastPartialTokenTransaction(options: {
       if (isDefinitiveBroadcastRejection(retryError)) {
         throw retryError;
       }
-      const recovered = await probeCommittedTransfer({
-        token: options.token,
-        partial,
-        inputOutputIds,
-        ...(options.call === undefined ? {} : { call: options.call }),
-      });
+      let recovered: { transactionHash: string } | undefined;
+      try {
+        recovered = await probeCommittedTransfer({
+          token: options.token,
+          partial,
+          inputOutputIds,
+          ...(options.call === undefined ? {} : { call: options.call }),
+        });
+      } catch (probeError) {
+        // A failed query tells us nothing — fall through to the error that carries the input
+        // output ids. The probe's own verdict (inputs consumed by a different transaction) is a
+        // SparkError and must still propagate.
+        if (!(probeError instanceof SparkRequestError)) {
+          throw probeError;
+        }
+        recovered = undefined;
+      }
       if (recovered !== undefined) {
         return recovered;
       }

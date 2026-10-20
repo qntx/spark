@@ -406,6 +406,7 @@ function statusRow(
 function recoverableTokenClient(handlers: {
   readonly broadcasts: ReadonlyArray<() => BroadcastTransactionResponse>;
   readonly rows?: ReadonlyArray<TokenTransactionWithStatus>;
+  readonly queryError?: SparkRequestError;
 }): {
   client: Client<typeof SparkTokenService>;
   broadcastCalls: () => number;
@@ -424,6 +425,9 @@ function recoverableTokenClient(handlers: {
     query_token_transactions: async () => {
       await Promise.resolve();
       queryCalls += 1;
+      if (handlers.queryError !== undefined) {
+        throw handlers.queryError;
+      }
       return {
         $typeName: "spark_token.QueryTokenTransactionsResponse",
         tokenTransactionsWithStatus: [...(handlers.rows ?? [])],
@@ -538,6 +542,19 @@ describe("broadcastPartialTokenTransaction recovery", () => {
     expect(failure).toBeInstanceOf(SparkRequestError);
     expect((failure as Error).message).toContain("out-1");
     expect((failure as Error).message).toContain("out-2");
+  });
+
+  test("a failed probe still names the input output ids", async () => {
+    const { client } = recoverableTokenClient({
+      broadcasts: [LOST],
+      queryError: new SparkRequestError("still down", { code: "unavailable" }),
+    });
+    const failure = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SparkRequestError);
+    expect((failure as Error).message).toContain("out-1");
   });
 
   test("a cancelled transaction over the inputs does not count as committed", async () => {
