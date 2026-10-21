@@ -70,6 +70,7 @@ export function buildCpfpChild(options: {
   readonly parent: Uint8Array;
   readonly funding: ReadonlyArray<FundingInput>;
   readonly changeScript: Uint8Array;
+  /** Fee rate in sats per virtual byte; no upper cap is enforced — the caller picks the value. */
   readonly feeRateSatPerVbyte: number;
 }): { readonly psbt: Uint8Array; readonly feeSats: number; readonly vsize: number } {
   const { parent, funding, changeScript, feeRateSatPerVbyte } = options;
@@ -167,6 +168,7 @@ export function buildKeySpendSweep(options: {
   readonly prevTx: Uint8Array;
   readonly vout: number;
   readonly destinationScript: Uint8Array;
+  /** Fee rate in sats per virtual byte; no upper cap is enforced — the caller picks the value. */
   readonly feeRateSatPerVbyte: number;
 }): { readonly transaction: Uint8Array; readonly target: SigningTarget; readonly feeSats: number } {
   const { prevTx, vout, destinationScript, feeRateSatPerVbyte } = options;
