@@ -580,15 +580,32 @@ describe("FROST commitments", () => {
   });
 
   // 1024 FROST nonce derivations take ~2 s alone, past the 5 s default under a parallel run.
-  test("newCommitments bounds outstanding nonces at 1024", async () => {
+  test("newCommitments evicts the oldest outstanding nonces past 1024", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const first = await signer.newCommitments(256);
     await signer.newCommitments(256);
     await signer.newCommitments(256);
     await signer.newCommitments(256);
-    await signer.newCommitments(256);
-    await expect(signer.newCommitments(1)).rejects.toThrow(
-      "newCommitments: too many outstanding signing commitments",
+    // A valid count is never refused: the oldest outstanding nonces are evicted (wiped) instead.
+    const extra = await signer.newCommitments(8);
+    expect(extra).toHaveLength(8);
+    const job = (commitment: (typeof first)[number]) => ({
+      key: { type: "static-deposit", index: 0 } as const,
+      target: TARGET,
+      verifyingKey: Point.BASE.toBytes(true),
+      commitment,
+      operatorCommitments: [
+        {
+          identifier: bytesToHex(be32(1n)),
+          commitment: { hiding: Point.BASE.toBytes(true), binding: Point.BASE.toBytes(true) },
+        },
+      ],
+    });
+    // The evicted commitment is gone for good; one that survived still reaches the backend.
+    await expect(signer.signFrost([job(first[0]!)])).rejects.toThrow(
+      "unknown or already-consumed signing commitment",
     );
+    await expect(signer.signFrost([job(first[8]!)])).resolves.toHaveLength(1);
     signer.dispose();
   }, 30_000);
 
@@ -966,14 +983,14 @@ describe("prepareTransfer", () => {
 
   test("rejects empty leaves and operators", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const operators = [testOperator(0, 101n)];
+    const operators = [testOperator(0, 101n), testOperator(1, 102n)];
     const receiver = Point.BASE.toBytes(true);
     await expect(
       signer.prepareTransfer({
         transferId: TRANSFER_ID,
         leaves: [],
         operators,
-        threshold: 1,
+        threshold: 2,
       }),
     ).rejects.toThrow(SparkInputError);
     await expect(
@@ -987,7 +1004,7 @@ describe("prepareTransfer", () => {
           },
         ],
         operators: [],
-        threshold: 1,
+        threshold: 2,
       }),
     ).rejects.toThrow(SparkInputError);
     signer.dispose();
@@ -1006,8 +1023,8 @@ describe("prepareTransfer", () => {
             receiverIdentityPublicKey: new Uint8Array(32),
           },
         ],
-        operators: [testOperator(0, 101n)],
-        threshold: 1,
+        operators: [testOperator(0, 101n), testOperator(1, 102n)],
+        threshold: 2,
       }),
     ).rejects.toThrow(SparkInputError);
     signer.dispose();
@@ -1082,7 +1099,7 @@ describe("prepareClaim", () => {
 });
 
 describe("threshold validation", () => {
-  test.each([2.5, 0, 4, 2 ** 32 + 3])(
+  test.each([2.5, 0, 1, 4, 2 ** 32 + 3])(
     "rejects threshold %s on VSS-splitting prepare calls",
     async (threshold) => {
       const signer = await signerFor(derivation.cases[0]!.seed_hex);

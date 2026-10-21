@@ -33,9 +33,9 @@ inside the `SparkSigner` implementation; the client never holds them. No signer
 method returns plaintext private key material — `claimStaticDeposit` returns the
 static-deposit key ECIES-sealed to the SSP identity.
 
-| Threat                                         | Severity | Mitigation                                                                                            |
-| ---------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------- |
-| Private key leaves the signer boundary         | High     | Keys never cross the `SparkCrypto` C ABI unsealed; `SparkSigner` returns only public/derived material |
-| FROST nonce reuse                              | High     | Nonces are derived from a signer-held hedge secret plus injected randomness                           |
-| Untrusted operator input in protobuf/ABI calls | High     | Fixed error codes, no input bytes in error messages, bounds checked in `spark-ffi`                    |
-| Backend ABI mismatch                           | Medium   | `abiVersion` checked at signer construction                                                           |
+| Threat                                         | Severity | Mitigation                                                                                                                                                                                                                                  |
+| ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private key leaves the signer boundary         | High     | Keys never cross the `SparkCrypto` C ABI unsealed; `SparkSigner` returns only public/derived material                                                                                                                                       |
+| FROST nonce reuse                              | High     | Single-use nonces consumed before signing; per-call hedge HMAC(key, tag‖counter) plus injected randomness — a repeating RNG within one signer instance cannot repeat nonces; a repeating RNG across restarts is the caller's responsibility |
+| Untrusted operator input in protobuf/ABI calls | High     | Fixed error codes, no input bytes in error messages, bounds checked in `spark-ffi`                                                                                                                                                          |
+| Backend ABI mismatch                           | Medium   | `abiVersion` checked at signer construction                                                                                                                                                                                                 |
