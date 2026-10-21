@@ -48,19 +48,33 @@ type MoneyFields = {
   readonly ids?: LedgerIds;
 };
 
-/** Records a settled money-moving step; throws LedgerMismatchError when the delta is wrong. */
-async function record(deps: TrialDeps, fields: MoneyFields): Promise<void> {
+/**
+ * Records a settled money-moving step; throws LedgerMismatchError when the delta is wrong.
+ * `idempotentRetry` marks a command re-invoked with an explicit transfer id: a successful call that
+ * moved nothing means the earlier attempt already settled, so the expected delta is 0.
+ */
+async function record(
+  deps: TrialDeps,
+  fields: MoneyFields,
+  options?: { readonly idempotentRetry?: boolean },
+): Promise<void> {
   const balanceAfter = await deps.client.balance();
   const actualDelta = balanceAfter - fields.balanceBefore;
+  const replayed = options?.idempotentRetry === true && actualDelta === 0;
+  const expectedDelta = replayed ? 0 : fields.expectedDelta;
+  if (replayed) {
+    deps.out("balance unchanged — the request id was already settled (idempotent replay)");
+  }
   append(deps, {
     ...fields,
     balanceAfter,
     actualDelta,
-    status: actualDelta === fields.expectedDelta ? "ok" : "mismatch",
+    expectedDelta,
+    status: actualDelta === expectedDelta ? "ok" : "mismatch",
   });
-  if (actualDelta !== fields.expectedDelta) {
+  if (actualDelta !== expectedDelta) {
     throw new LedgerMismatchError(
-      `STOP: ${fields.command} moved the balance ${actualDelta} sats, expected ${fields.expectedDelta} — ` +
+      `STOP: ${fields.command} moved the balance ${actualDelta} sats, expected ${expectedDelta} — ` +
         "keep the state directory and investigate before continuing",
     );
   }
@@ -278,13 +292,17 @@ export async function cmdSend(
   deps.out(`sending ${options.amountSats} sats to ${receiver}`);
   const balanceBefore = await deps.client.balance();
   await deps.client.transfers.send({ receiver, amountSats: options.amountSats, transferId });
-  await record(deps, {
-    command: "send",
-    balanceBefore,
-    expectedDelta: -options.amountSats,
-    amountSats: options.amountSats,
-    ids: { transferId },
-  });
+  await record(
+    deps,
+    {
+      command: "send",
+      balanceBefore,
+      expectedDelta: -options.amountSats,
+      amountSats: options.amountSats,
+      ids: { transferId },
+    },
+    { idempotentRetry: options.transferId !== undefined },
+  );
   deps.out("sent");
 }
 
@@ -347,13 +365,14 @@ async function payBolt11(
     await recordPending(deps, fields);
     return;
   }
+  const idempotentRetry = { idempotentRetry: options.transferId !== undefined };
   if (status.outcome === "returned") {
     deps.out("payment returned — the swap was undone, funds are back");
-    await record(deps, { ...fields, expectedDelta: 0 });
+    await record(deps, { ...fields, expectedDelta: 0 }, idempotentRetry);
     return;
   }
   deps.out("paid");
-  await record(deps, fields);
+  await record(deps, fields, idempotentRetry);
 }
 
 export async function cmdPay(
@@ -469,13 +488,14 @@ export async function cmdCoopExit(
     await recordPending(deps, fields);
     return;
   }
+  const idempotentRetry = { idempotentRetry: options.transferId !== undefined };
   if (status.status !== "SUCCEEDED") {
     deps.out(`cooperative exit ended with status ${status.status} — funds should return`);
-    await record(deps, { ...fields, expectedDelta: 0 });
+    await record(deps, { ...fields, expectedDelta: 0 }, idempotentRetry);
     return;
   }
   deps.out("exited");
-  await record(deps, fields);
+  await record(deps, fields, idempotentRetry);
 }
 
 export async function cmdExitPackage(
