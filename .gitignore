@@ -16,6 +16,9 @@ dist
 # Hermes smoke bundle (built by packages/spark/scripts/hermes-smoke.ts)
 .hermes-smoke*
 
+# Mainnet trial state (packages/spark/scripts/mainnet-trial/)
+.mainnet-trial/
+
 # Rust
 /target
 /fuzz/target
