@@ -26,7 +26,9 @@ export type SparkCrypto = {
    * `hedge` is a 32-byte signer-private hedge secret; `random` is `n`×32 bytes. Returns `n`×130
    * bytes: per item `hiding‖binding` nonces (64) followed by the compressed `hiding‖binding`
    * commitments (66). Each item runs frost `SigningNonces::new(hedge,
-   * ChaCha20Rng::from_seed(random_i))`; nonces stay unique even if the random source fails.
+   * ChaCha20Rng::from_seed(random_i))`. The hedge makes weak entropy safe, but nonce uniqueness
+   * still requires a fresh seed every call — the same seed under the same hedge reproduces the same
+   * nonces. The signer's `NonceStore` additionally rejects reuse of a commitment.
    */
   frostCommit: (hedge: Uint8Array, random: Uint8Array) => Uint8Array;
 
