@@ -1,7 +1,6 @@
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 import { describe, expect, test } from "vite-plus/test";
 
-import { exitTransactions } from "../src/index.ts";
 import {
   bitcoinRpc,
   broadcastExitPackage,
@@ -20,7 +19,7 @@ import {
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO unilateral exit", () => {
   test("unilateral exit: node+refund packages confirm on-chain, refund sweeps to wallet", async () => {
     const { signer: signerA, client: clientA } = await localWallet(randomBytes(32));
-    const { signer: signerB, store: storeB, client: clientB } = await localWallet(randomBytes(32));
+    const { signer: signerB, client: clientB } = await localWallet(randomBytes(32));
 
     // A deposits, sends to B, B claims — B's leaf is the exit chain's tail.
     const address = await clientA.deposits.newAddress();
@@ -38,10 +37,14 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO unilateral exi
     await leavesUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
     console.log("exit leaf:", leafB.id);
 
-    // The claim already stored B's exit chain; derive the broadcast set from it
-    // instead of issuing a second SO query.
-    const stored = await storeB.exitChains();
-    const exits = exitTransactions(stored.filter((chain) => chain.leafId === leafB.id));
+    // The offline path builds the same broadcast list from the claim's stored exit chain as
+    // the live query does — no network needed once the chain is stored.
+    const [live, offline] = await Promise.all([
+      clientB.withdrawals.unilateralExit([leafB.id]),
+      clientB.withdrawals.offlineExitTransactions([leafB.id]),
+    ]);
+    expect(offline.map((tx) => tx.txid)).toStrictEqual(live.map((tx) => tx.txid));
+    const exits = offline;
     expect(exits.map((e) => e.kind)).toStrictEqual(["node", "refund"]);
     const nodeExit = requiredTransfer(exits[0]);
     const refundExit = requiredTransfer(exits[1]);

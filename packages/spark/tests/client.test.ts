@@ -925,3 +925,46 @@ test("unilateralExit persists the queried exit chain in the store", async () => 
   expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-exit"]);
   expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["leaf-exit"]);
 });
+
+test("offlineExitTransactions serves stored chains without touching the network", async () => {
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([["leaf-exit", leafSecret(0)]]),
+  );
+  const nodeTx = txSpending(fakeTxid(0x50), 0);
+  const refundTx = txSpending(
+    hexToBytes(txId(nodeTx)),
+    500,
+    secp256k1.getPublicKey(leafSecret(0), true),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([
+    { leafId: "leaf-exit", nodes: [{ nodeId: "leaf-exit", nodeTx }], refundTx },
+  ]);
+  let networkCalls = 0;
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => {
+        networkCalls += 1;
+        throw new ConnectError("operators unreachable", Code.Unavailable);
+      },
+    },
+    store,
+  );
+  const txs = await client.withdrawals.offlineExitTransactions(["leaf-exit"]);
+  expect(networkCalls).toBe(0);
+  expect(txs.map((tx) => tx.kind)).toStrictEqual(["node", "refund"]);
+  expect(txs[0]?.txid).toBe(txId(nodeTx));
+  expect(txs[1]?.txid).toBe(txId(refundTx));
+});
+
+test("offlineExitTransactions names a leaf with no stored chain", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1")]);
+  const client = makeClient(signer, { query_nodes: () => ({ nodes: {}, offset: -1n }) }, store);
+  await expect(client.withdrawals.offlineExitTransactions(["leaf-1", "ghost"])).rejects.toThrow(
+    /no stored exit chain for leaf ghost/,
+  );
+});
