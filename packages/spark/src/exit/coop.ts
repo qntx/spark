@@ -2,7 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import type { Client } from "@connectrpc/connect";
 import { equalBytes } from "@noble/curves/utils.js";
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Address, OutScript } from "@scure/btc-signer";
 
 import { u64ToSats } from "../core/assert.ts";
@@ -218,12 +218,61 @@ async function completeWithRetries(
 }
 
 /**
+ * The connector transaction the committed refunds were signed against: input 1 of every
+ * intermediate refund carries a connector outpoint, so the committed transfer itself names the
+ * connector txid the SO bound at commit. Fails closed when the transfer carries no intermediate
+ * refund to compare against.
+ */
+function requireConnectorMatchesCommittedRefunds(
+  transfer: SparkTransfer,
+  rawConnectorTransaction: Uint8Array,
+): void {
+  const connectorTxid = txId(rawConnectorTransaction);
+  const connector = parseTransaction(rawConnectorTransaction);
+  let checked = 0;
+  for (const transferLeaf of transfer.leaves) {
+    const leafId = transferLeaf.leaf.id;
+    const variants: ReadonlyArray<readonly [string, Uint8Array]> = [
+      ["refund", transferLeaf.intermediateRefundTx],
+      ["direct refund", transferLeaf.intermediateDirectRefundTx],
+      ["direct-from-cpfp refund", transferLeaf.intermediateDirectFromCpfpRefundTx],
+    ];
+    for (const [variant, txBytes] of variants) {
+      if (txBytes.length === 0) {
+        continue;
+      }
+      const refund = parseTransaction(txBytes);
+      const input = refund.inputsLength > 1 ? refund.getInput(1) : undefined;
+      if (
+        input?.txid === undefined ||
+        input.index === undefined ||
+        bytesToHex(input.txid) !== connectorTxid ||
+        input.index >= connector.outputsLength
+      ) {
+        throw new SparkError(
+          `coop exit: committed ${variant} of leaf ${leafId} does not spend ` +
+            "the ssp connector transaction",
+        );
+      }
+      checked += 1;
+    }
+  }
+  if (checked === 0) {
+    throw new SparkError(
+      `coop exit: transfer ${transfer.id} carries no intermediate refund transactions`,
+    );
+  }
+}
+
+/**
  * Resumes an exit whose transfer already committed under `options.transferId`: the SSP request is
  * re-created for the committed leaf ids — the SSP dedupes on `userOutboundTransferExternalId`, so a
  * live request resolves to itself and an expired one is re-created — then validated and completed.
- * `maxFeeSats` does not gate this path: the fee was already committed on the first call. A payout
- * that does not pay `options.address` means the id was reused with different terms — that fails
- * rather than riding along.
+ * Before anything completes, the request is bound to the committed transfer: its connector must be
+ * the transaction the committed intermediate refunds spend, and that connector must spend
+ * `coopExitTxid` — so the fee and payout are the ones the first call priced and validated, which is
+ * why `maxFeeSats` does not gate this path. A payout that does not pay `options.address` means the
+ * id was reused with different terms — that fails rather than riding along.
  */
 async function resumeCommittedExit(
   deps: CoopExitDeps & {
@@ -268,6 +317,15 @@ async function resumeCommittedExit(
         `not the committed ${transfer.id}`,
     );
   }
+
+  // Bind the request to the committed transfer: the committed refunds carry their connector as
+  // input 1, so the request's connector must be exactly that transaction — and its input 0 must
+  // spend `coopExitTxid`, making the payout below the exit the first call signed for.
+  requireConnectorMatchesCommittedRefunds(transfer, request.rawConnectorTransaction);
+  validateConnectorTxBindsToCoopExitTxid(
+    request.rawConnectorTransaction,
+    hexToBytes(request.coopExitTxid).reverse(),
+  );
 
   const payoutSats = payoutSatsForAddress(request.rawCoopExitTransaction, options.address, network);
   validateCoopExitPayoutTransaction({
