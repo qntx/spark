@@ -1,6 +1,6 @@
 {
   "name": "@qntx/spark-wasm",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "spark.wasm SparkCrypto backend — C ABI from crates/spark-ffi, platform-neutral and browser-first",
   "keywords": [
     "bitcoin",
@@ -60,7 +60,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@qntx/spark": "0.0.0",
+    "@qntx/spark": "0.1.0",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.5",
     "publint": "0.3.25",
@@ -68,6 +68,6 @@
     "vite-plus": "1.2.0"
   },
   "peerDependencies": {
-    "@qntx/spark": "^0.0.0"
+    "@qntx/spark": "^0.1.0"
   }
 }

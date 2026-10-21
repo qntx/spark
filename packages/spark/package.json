@@ -1,6 +1,6 @@
 {
   "name": "@qntx/spark",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Spark Bitcoin L2 protocol for TypeScript: platform-neutral client, signer and crypto-backend interfaces.",
   "keywords": [
     "bitcoin",
@@ -79,7 +79,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@qntx/spark-wasm": "0.0.0",
+    "@qntx/spark-wasm": "0.1.0",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.5",
     "publint": "0.3.25",
