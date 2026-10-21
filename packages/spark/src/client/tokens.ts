@@ -43,6 +43,7 @@ export async function sendTokens(
         ...(options.invoiceAttachments === undefined
           ? {}
           : { invoiceAttachments: options.invoiceAttachments }),
+        ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
       });
     }
     const owned = await queryTokenOutputs({
@@ -74,6 +75,7 @@ export async function sendTokens(
       operators,
       tokens: config.tokens,
       inputOutputIds: selected.map((output) => output.id),
+      ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
     });
   });
 }
@@ -136,6 +138,7 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
             receiverPublicKey: identityPublicKey,
             senderPublicKey: identityPublicKey,
             inputOutputIds: consolidateOptions.inputOutputIds,
+            ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
           });
           return { transactionHash };
         }
@@ -177,6 +180,7 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
           operators,
           tokens: config.tokens,
           inputOutputIds: available.map((output) => output.id),
+          ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
         });
         return { transactionHash };
       });
