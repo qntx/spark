@@ -32,8 +32,9 @@ describe("SparkCrypto binding", () => {
     expect(crypto.abiVersion).toBe(1);
   });
 
-  test("a RuntimeError poisons the instance", async () => {
-    const crypto = bindSparkExports(trapExports(await instantiateSparkWasm(await readWasmBytes())));
+  test("a RuntimeError poisons the instance and zeroes its linear memory", async () => {
+    const exports = trapExports(await instantiateSparkWasm(await readWasmBytes()));
+    const crypto = bindSparkExports(exports);
     const request = new Uint8Array([0x0a, 0x00]);
     const first = syncThrow(() => crypto.frostSign(request));
     expect(first).toBeInstanceOf(WasmPoisonedError);
@@ -42,6 +43,10 @@ describe("SparkCrypto binding", () => {
     // Sticky: every later call on any method throws the same error.
     expect(syncThrow(() => crypto.frostSign(request))).toBe(first);
     expect(syncThrow(() => crypto.eciesDecrypt(new Uint8Array(32), new Uint8Array(1)))).toBe(first);
+
+    // The aborted instance's linear memory is zeroed — secret copies cannot linger in it.
+    const memory = new Uint8Array(exports.memory.buffer);
+    expect(memory.every((byte) => byte === 0)).toBe(true);
   });
 
   test("backend error codes surface as SparkCryptoError, not poison", async () => {
