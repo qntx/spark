@@ -13,6 +13,16 @@ updates:
       bun-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # Crypto and wire-format dependencies are supply-chain sensitive: routine
+    # version updates are bumped by hand, never auto-merged. (`ignore` only
+    # affects version updates; security updates still open PRs.) The auto-merge
+    # sweep's only per-PR discriminator is labels and dependabot cannot label
+    # per package, so `ignore` is the supported exclusion.
+    ignore:
+      - dependency-name: "@noble/*"
+      - dependency-name: "@scure/*"
+      - dependency-name: "@bufbuild/*"
+      - dependency-name: "@connectrpc/*"
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -23,27 +33,21 @@ updates:
       cargo-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
-    # These crates are pinned to frost 3.0 / upstream spark-frost compatibility;
-    # bump them only together with the upstream pin in scripts/lock.json.
+    # Crypto crates are pinned to frost 3.0 / upstream spark-frost compatibility
+    # and are supply-chain sensitive: every update type is bumped by hand
+    # together with the upstream pin in scripts/lock.json, never auto-merged —
+    # a patch-only hole would still reach auto-merge through the minor+patch
+    # group. Security updates still open PRs.
     ignore:
       - dependency-name: "k256"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "sha2"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "hkdf"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "aes-gcm"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "rand_core"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "rand_chacha"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "vsss-rs"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "zeroize"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "frost-*"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   # The interop lockfile mirrors upstream; it is bumped only together with
   # scripts/lock.json, never by dependabot.
   - package-ecosystem: "cargo"
