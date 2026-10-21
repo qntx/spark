@@ -4,6 +4,7 @@ import { expect, test } from "vite-plus/test";
 import { createSparkClient } from "../src/client/index.ts";
 import { connectOperator } from "../src/connection/index.ts";
 import { sparkNetworkConfig } from "../src/core/network.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 // Live smoke test against the real operators; opt-in via env since it needs network access.
@@ -34,7 +35,12 @@ test.skipIf(process.env["SPARK_E2E_MAINNET"] !== "1")(
       expect(response.nodes).toStrictEqual({});
     }
 
-    const client = createSparkClient({ network: "mainnet", signer, fetch: globalThis.fetch });
+    const client = createSparkClient({
+      network: "mainnet",
+      signer,
+      fetch: globalThis.fetch,
+      store: createMemorySparkStore(),
+    });
     await expect(client.balance()).resolves.toBe(0);
     await expect(client.leaves()).resolves.toStrictEqual([]);
     await expect(client.transfers.pending()).resolves.toStrictEqual([]);

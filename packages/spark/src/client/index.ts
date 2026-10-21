@@ -11,7 +11,6 @@ import type {
   CooperativeExitSpeed,
   CooperativeExitStatus,
 } from "../exit/coop.ts";
-import { createMemorySparkStore } from "../exit/store.ts";
 import type { SparkStore } from "../exit/store.ts";
 import type { ExitTransaction } from "../exit/unilateral.ts";
 import type { WatchtowerExitedLeaf } from "../exit/watchtower.ts";
@@ -456,8 +455,12 @@ export type SparkClientOptions = {
    * cannot work with it.
    */
   readonly fetch: typeof globalThis.fetch;
-  /** Exit-chain persistence; defaults to an in-memory store. */
-  readonly store?: SparkStore;
+  /**
+   * Exit-chain persistence (e.g. `createMemorySparkStore()`). Required: stored chains are the
+   * wallet's unilateral-exit data, so durability is a caller decision — a silent in-memory default
+   * would lose them on restart.
+   */
+  readonly store: SparkStore;
   readonly random?: (length: number) => Uint8Array;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -497,7 +500,14 @@ export function createSparkClientWith(
       return crypto.getRandomValues(new Uint8Array(length));
     });
   const abort = new AbortController();
-  const store = options.store ?? createMemorySparkStore();
+  // Runtime guard for untyped (JS) callers: the store is required — it holds the wallet's
+  // unilateral-exit chains, and a silent default decided durability for the caller.
+  const store = options.store as SparkStore | undefined;
+  if (store === undefined) {
+    throw new SparkInputError(
+      "options.store is required: pass createMemorySparkStore() or a persistent SparkStore",
+    );
+  }
   const now = options.now ?? (() => Date.now());
 
   const deps: ConnectionDeps = {

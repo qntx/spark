@@ -17,6 +17,7 @@ import {
   SparkRequestError,
   SparkTokenBroadcastError,
 } from "../src/errors/index.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
 import {
   ChallengeSchema,
   ProtectedChallengeSchema,
@@ -1145,6 +1146,7 @@ describe("client.tokens", () => {
         random: (length) => new Uint8Array(length).fill(1),
         sleep: async () => Promise.resolve(),
         operators: OPERATORS,
+        store: createMemorySparkStore(),
       },
       {
         transportFactory: (interceptors) =>
