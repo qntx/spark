@@ -17,7 +17,8 @@ First public pre-release. The workspace ships three packages with lockstep versi
 - Spark transfers: single- and multi-receiver sends, idempotent `transferId`, and
   incoming-transfer claims.
 - Deposits: single-use and multi-UTXO addresses, static deposits with refunds.
-- Lightning: send and receive, delegated receivers, swaps and leaf optimization.
+- Lightning: send and receive, including delegated receivers.
+- Leaves: SSP swaps, leaf optimization and renewal.
 - Exits: cooperative exit, unilateral exit (live `unilateralExit` and
   `offlineExitTransactions` from stored chains), and watchtower recovery.
 - Tokens: create, mint, transfer and consolidate, including explicit-input retry.
