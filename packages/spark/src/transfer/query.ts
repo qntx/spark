@@ -17,24 +17,49 @@ import type { SparkTransfer } from "./model.ts";
  */
 const TERMINAL_TRANSFER_STATUSES: ReadonlySet<string> = new Set(["RETURNED", "EXPIRED"]);
 
-/** `query_pending_transfers` — transfers awaiting this identity as receiver. */
+/** The SO caps `query_pending_transfers` pages at 100 (upstream maxTransferPageSize). */
+const PENDING_PAGE_SIZE = 100;
+const PENDING_MAX_PAGES = 1000;
+
+/**
+ * `query_pending_transfers` — transfers awaiting this identity as receiver. Pages the whole set:
+ * the SO caps a page at 100 and reports `-1` on the last page, so a full page must carry a strictly
+ * advancing offset; the walk is bounded like `queryOwnerNodes`.
+ */
 export async function queryPendingTransfers(options: {
   readonly spark: Client<typeof SparkService>;
   readonly identityPublicKey: Uint8Array;
   readonly network: SparkNetwork;
   readonly call?: CallOptions;
 }): Promise<SparkTransfer[]> {
-  const response = await options.spark.query_pending_transfers(
-    {
-      participant: {
-        case: "receiverIdentityPublicKey",
-        value: options.identityPublicKey,
+  const transfers: SparkTransfer[] = [];
+  let offset = 0;
+  for (let pageIndex = 0; pageIndex < PENDING_MAX_PAGES; pageIndex++) {
+    // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
+    const response = await options.spark.query_pending_transfers(
+      {
+        participant: {
+          case: "receiverIdentityPublicKey",
+          value: options.identityPublicKey,
+        },
+        network: sparkNetworkProto(options.network),
+        limit: BigInt(PENDING_PAGE_SIZE),
+        offset: BigInt(offset),
       },
-      network: sparkNetworkProto(options.network),
-    },
-    options.call,
-  );
-  return response.transfers.map(mapTransfer);
+      options.call,
+    );
+    const page = response.transfers;
+    transfers.push(...page.map(mapTransfer));
+    if (page.length < PENDING_PAGE_SIZE) {
+      return transfers;
+    }
+    const nextOffset = Number(response.offset);
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+      throw new SparkError("query pending transfers: coordinator returned a non-advancing offset");
+    }
+    offset = nextOffset;
+  }
+  throw new SparkError("query pending transfers: coordinator did not stop returning full pages");
 }
 
 /** `query_transfers_by_id` — the raw transfers for the given ids (order may differ). */
