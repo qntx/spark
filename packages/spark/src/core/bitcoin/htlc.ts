@@ -104,6 +104,24 @@ function findLeafScript(
   throw new SparkInputError("htlc: leaf script not present in the taproot tree");
 }
 
+/**
+ * The HTLC refund transaction's output 0 script — the two-leaf NUMS-keyed P2TR every
+ * `createRefundTxsForLightning` variant carries, built exactly as `constructHtlcTransaction` builds
+ * it (hash-lock leaf first, `LIGHTNING_HTLC_SEQUENCE` CSV leaf second). Comparing it against a
+ * committed refund's output 0 binds the payment hash and both destination keys without rebuilding
+ * the whole transaction: the input sequence, prevout and fee never enter the script.
+ */
+export function lightningHtlcOutputScript(
+  paymentHash: Uint8Array,
+  hashLockPublicKey: Uint8Array,
+  sequenceLockPublicKey: Uint8Array,
+): Uint8Array {
+  return htlcP2tr(
+    createHashLockScript(paymentHash, hashLockPublicKey),
+    createSequenceLockScript(LIGHTNING_HTLC_SEQUENCE, sequenceLockPublicKey),
+  ).script;
+}
+
 export type HtlcSpend = ConstructedTransaction & {
   /** The tapscript leaf the input witnesses (hash-lock or sequence-lock script). */
   readonly script: Uint8Array;

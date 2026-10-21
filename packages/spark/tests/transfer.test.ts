@@ -2719,10 +2719,21 @@ describe("committed-transfer predicate", () => {
   }
 
   const expectation = {
+    transferId: TRANSFER_ID,
     type: TransferType.TRANSFER,
     senderIdentityPublicKey: keyA,
     receiverIdentityPublicKeys: [keyB],
   };
+
+  test("a transfer under another id never matches, whatever the terms", () => {
+    expect(() =>
+      assertCommittedTransfer(
+        transfer({ id: "01989abc-def0-7000-8000-abcdef000999" }),
+        expectation,
+        "test",
+      ),
+    ).toThrow(/not ours/);
+  });
 
   test("a terminal transfer never matches, whatever the terms", () => {
     for (const status of ["RETURNED", "EXPIRED"]) {

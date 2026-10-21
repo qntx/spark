@@ -77,6 +77,11 @@ export async function queryAllTransfers(options: {
 
 /** The terms a recovered or probed transfer must carry to be the one we signed for. */
 export type CommittedTransferExpectation = {
+  /**
+   * The id this call committed the transfer under — an echoed transfer under another id is not
+   * ours.
+   */
+  readonly transferId: string;
   readonly type: TransferType;
   readonly senderIdentityPublicKey: Uint8Array;
   /** Every receiver identity key this transfer must pay, as a set. */
@@ -93,9 +98,9 @@ export type CommittedTransferExpectation = {
 };
 
 /**
- * Whether `transfer` is exactly the one we signed for: same type, our sender key, and the expected
- * receiver set. A populated `receivers` list must carry exactly the expected identity keys (and,
- * when `receiverAmountsSats` is given, exactly the requested per-receiver amounts); an empty
+ * Whether `transfer` is exactly the one we signed for: our id, same type, our sender key, and the
+ * expected receiver set. A populated `receivers` list must carry exactly the expected identity keys
+ * (and, when `receiverAmountsSats` is given, exactly the requested per-receiver amounts); an empty
  * `receivers` list can only satisfy a single expected receiver via `receiverIdentityPublicKey`. A
  * terminal (RETURNED/EXPIRED) transfer can never be the committed one.
  */
@@ -104,6 +109,7 @@ function matchesCommittedTransfer(
   expected: CommittedTransferExpectation,
 ): boolean {
   if (
+    transfer.id !== expected.transferId ||
     TERMINAL_TRANSFER_STATUSES.has(transfer.status) ||
     transfer.type !== protoEnumName(TransferType, expected.type) ||
     !equalBytes(transfer.senderIdentityPublicKey, expected.senderIdentityPublicKey)

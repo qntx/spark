@@ -1,9 +1,12 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { equalBytes } from "@noble/curves/utils.js";
 
 import {
   createRefundTxsForLightning,
   getNextHTLCTransactionSequence,
+  lightningHtlcOutputScript,
+  parseTransaction,
 } from "../core/bitcoin/index.ts";
 import { decodeBolt11, isExpired } from "../core/bolt11.ts";
 import type { Bolt11Invoice } from "../core/bolt11.ts";
@@ -116,10 +119,19 @@ export async function payLightningInvoice(
 
   const identityPublicKey = await signer.identityPublicKey();
   const expected = {
+    transferId,
     type: TransferType.PREIMAGE_SWAP,
     senderIdentityPublicKey: identityPublicKey,
     receiverIdentityPublicKeys: [sspIdentityPublicKey],
   } as const;
+  // The output-0 script the fresh path writes into every HTLC refund variant (hash-lock → SSP,
+  // sequence-lock 2160 → our identity key). Used to bind a committed transfer to THIS invoice's
+  // payment hash — see {@link assertCommittedPaymentHash}.
+  const expectedHtlcScript = lightningHtlcOutputScript(
+    decoded.paymentHash,
+    sspIdentityPublicKey,
+    identityPublicKey,
+  );
 
   // A caller-supplied id is the idempotency handle: a committed swap under it means this call is
   // a retry — skip the fee estimate, leaf selection and package building, and continue with the
@@ -130,6 +142,57 @@ export async function payLightningInvoice(
     transfer = await queryTransferById({ spark, network, transferId });
     if (transfer !== undefined) {
       assertLiveTransfer(transfer);
+    }
+  }
+
+  /**
+   * The committed swap's HTLC refunds must lock to this invoice's payment hash — a retry naming a
+   * different invoice must not ride a transfer built for another payment. The expected output
+   * script is rebuilt exactly as the fresh path builds it (`constructHtlcTransaction`'s two-leaf
+   * NUMS tree); the input sequence, prevout and fee never enter the script, so comparing output 0
+   * of each intermediate refund variant is sufficient. A leaf with no intermediate refunds at all
+   * fails closed — the fresh path always produces at least the cpfp variant.
+   *
+   * A zero-amount invoice adds one caveat: the `invoiceAmount` the first call committed is stored
+   * server-side only, so the committed amount cannot be re-verified here beyond the `totalValueSats
+   * − amountSats` fee bound below — retry a zero-amount invoice only with the same amountSats.
+   */
+  function assertCommittedPaymentHash(transfer: SparkTransfer): void {
+    for (const transferLeaf of transfer.leaves) {
+      const variants: ReadonlyArray<readonly [string, Uint8Array]> = [
+        ["refund", transferLeaf.intermediateRefundTx],
+        ["direct refund", transferLeaf.intermediateDirectRefundTx],
+        ["direct-from-cpfp refund", transferLeaf.intermediateDirectFromCpfpRefundTx],
+      ];
+      let checked = 0;
+      for (const [variant, txBytes] of variants) {
+        if (txBytes.length === 0) {
+          continue;
+        }
+        checked += 1;
+        let output;
+        try {
+          output = parseTransaction(txBytes).getOutput(0);
+        } catch (error) {
+          throw new SparkError(
+            `lightning pay: committed transfer ${transfer.id} leaf ` +
+              `${transferLeaf.leaf.id} ${variant} tx does not parse`,
+            { cause: error },
+          );
+        }
+        if (output.script === undefined || !equalBytes(output.script, expectedHtlcScript)) {
+          throw new SparkError(
+            `lightning pay: committed transfer ${transfer.id} is locked to a ` +
+              "different payment hash",
+          );
+        }
+      }
+      if (checked === 0) {
+        throw new SparkError(
+          `lightning pay: committed transfer ${transfer.id} leaf ` +
+            `${transferLeaf.leaf.id} carries no intermediate refunds`,
+        );
+      }
     }
   }
 
@@ -147,6 +210,7 @@ export async function payLightningInvoice(
     transfer = await deps.spendLeaves(amountSats + feeSats, async (leaves) => {
       const committed = await initiatePreimageSwap(leaves);
       assertCommittedTransfer(committed, expected, "lightning pay");
+      assertCommittedPaymentHash(committed);
       // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
       // failure on the SSP call below. The returned transfer — not the locally selected list —
       // decides which leaves left the wallet: on a retry the SO may report the first-attempt
@@ -156,6 +220,7 @@ export async function payLightningInvoice(
     });
   } else {
     assertCommittedTransfer(transfer, expected, "lightning pay");
+    assertCommittedPaymentHash(transfer);
     // The swap commits amount + fee as the transfer total; the committed total is the fee source.
     feeSats = transfer.totalValueSats - amountSats;
     if (feeSats < 0 || feeSats > options.maxFeeSats) {
@@ -235,12 +300,7 @@ export async function payLightningInvoice(
     } catch (error) {
       // The swap can commit server-side and still lose its response. The committed transfer is
       // the only sound test — a retry must continue with it rather than fail or double-pay.
-      const recovered = await queryCommittedTransfer({
-        spark,
-        network,
-        transferId,
-        ...expected,
-      });
+      const recovered = await queryCommittedTransfer({ spark, network, ...expected });
       if (recovered === undefined) {
         throw error;
       }
@@ -256,6 +316,12 @@ export async function payLightningInvoice(
   });
   if (sendRequest.encodedInvoice.toLowerCase() !== invoice) {
     throw new SparkError("lightning pay: ssp send request is for a different invoice");
+  }
+  if (sendRequest.transferId !== undefined && sendRequest.transferId !== transfer.id) {
+    throw new SparkError(
+      `lightning pay: ssp send request is bound to transfer ${sendRequest.transferId}, ` +
+        `expected ${transfer.id}`,
+    );
   }
 
   return {
