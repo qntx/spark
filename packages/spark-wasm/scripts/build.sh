@@ -37,8 +37,24 @@ cdylib="${CARGO_TARGET_DIR:-${root}/target}/wasm32-unknown-unknown/wasm/spark_ff
 wasm-opt -Oz --enable-bulk-memory "${cdylib}" -o "${out}"
 
 digest="$(openssl dgst -sha256 -binary "${out}" | openssl base64 -A)"
-printf 'export const SPARK_WASM_INTEGRITY = "sha256-%s";\n' "${digest}" \
-  > "${pkg}/src/integrity.ts"
+# The emitted file must stay byte-identical to the committed integrity.ts —
+# the wasm CI job rebuilds it and diffs. Keep this TSDoc in sync with the file.
+cat > "${pkg}/src/integrity.ts" <<EOF
+/**
+ * Subresource Integrity hash (\`sha256-<base64>\`) of the shipped \`spark.wasm\`, regenerated whenever
+ * the artifact is rebuilt. Consumers that fetch the module themselves — for example a Wallet Worker
+ * — can pin it at fetch time and hand the verified bytes to \`loadSparkWasm\`:
+ *
+ * \`\`\`ts
+ * const res = await fetch(wasmUrl, { integrity: SPARK_WASM_INTEGRITY });
+ * const crypto = await loadSparkWasm({ module: await res.arrayBuffer() });
+ * \`\`\`
+ *
+ * \`loadSparkWasm()\` without \`module\` loads \`spark.wasm\` itself and does NOT verify this hash —
+ * callers that want SRI enforcement must fetch with \`integrity\` and pass \`module\`.
+ */
+export const SPARK_WASM_INTEGRITY = "sha256-${digest}";
+EOF
 
 raw_size="$(wc -c <"${out}" | tr -d ' ')"
 gz_size="$(gzip -cn "${out}" | wc -c | tr -d ' ')"

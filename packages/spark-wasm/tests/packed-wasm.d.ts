@@ -9,4 +9,5 @@ declare module "*.mjs" {
   ): Promise<import("@qntx/spark/crypto").SparkCrypto>;
   // oxlint-disable-next-line unicorn/custom-error-definition -- ambient declaration only
   export class WasmPoisonedError extends Error {}
+  export const SPARK_WASM_INTEGRITY: string;
 }
