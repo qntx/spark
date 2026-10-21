@@ -29,11 +29,13 @@ jobs:
     permissions:
       contents: read
 
-  # On tag pushes, fails unless every package version equals the tag. The called
-  # publish-npm workflow skips versions already on the registry but does not
-  # check that the tag matches package.json, so this job is the only guard
-  # against publishing 1.x under a 2.x tag. On PR/dispatch the check step is
-  # skipped and the job succeeds so dependents still run (as dry-runs).
+  # On tag pushes, fails unless every package version equals the tag and the
+  # tagged commit is an ancestor of origin/main. The called publish-npm
+  # workflow skips versions already on the registry but does not check that
+  # the tag matches package.json, so this job is the only guard against
+  # publishing 1.x under a 2.x tag or a commit that never landed on main. On
+  # PR/dispatch the check steps are skipped and the job succeeds so dependents
+  # still run (as dry-runs).
   verify:
     runs-on: ubuntu-latest
     permissions:
@@ -42,6 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Check tag matches package versions
         if: github.event_name == 'push'
         env:
@@ -57,6 +60,16 @@ jobs:
             fi
           done
           [ "${fail}" -eq 0 ]
+      - name: Check the tagged commit is on main
+        if: github.event_name == 'push'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::tag ${REF_NAME} points at a commit that is not an ancestor of origin/main"
+            exit 1
+          fi
 
   # Packages the iOS and Android native.yml artifacts into one upload-artifact
   # laid out relative to packages/spark-native — exactly the gitignored
@@ -82,8 +95,30 @@ jobs:
           path: staging
           retention-days: 1
 
+  # The checked-in spark.wasm (and its SRI integrity hash) is what publish
+  # ships: rebuild it in the pinned linux/amd64 image and byte-compare, the
+  # same check the CI wasm job runs, so a tag can never publish a module the
+  # toolchain did not produce.
+  wasm-reproducibility:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/spark-wasm build:wasm
+      - run: git diff --exit-code packages/spark-wasm/src/spark.wasm packages/spark-wasm/src/integrity.ts
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spark-wasm-rebuild
+          path: packages/spark-wasm/src/spark.wasm
+
   spark:
-    needs: [verify, native-artifact]
+    needs: [verify, native-artifact, wasm-reproducibility]
     uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
@@ -95,7 +130,7 @@ jobs:
       dry-run: ${{ github.event_name != 'push' }}
 
   spark-wasm:
-    needs: spark
+    needs: [spark, wasm-reproducibility]
     uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
@@ -107,7 +142,7 @@ jobs:
       dry-run: ${{ github.event_name != 'push' }}
 
   spark-native:
-    needs: [spark, native-artifact]
+    needs: [spark, native-artifact, wasm-reproducibility]
     uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
