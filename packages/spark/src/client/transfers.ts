@@ -133,17 +133,13 @@ export async function sendSats(
       }
       sent = recovered;
     }
-    // The returned transfer — fresh or recovered — must be the one we signed for: same id, type,
-    // sender and receiver set (the lightning-pay path asserts its fresh response the same way),
-    // and every other operator must serve it identically — a coordinator-fabricated response is
-    // neither a payment success nor a deletion witness.
+    // The returned transfer — fresh or recovered by this call — must be the one we signed for:
+    // same id, type, sender and receiver set (the lightning-pay path asserts its fresh response
+    // the same way). There is no cross-operator gate here: the commit already happened
+    // server-side, so an operator error or lag must not strand a spend the caller cannot undo —
+    // the gate applies only to probe hits, commits an earlier call made.
     assertCommittedTransfer(sent, expected, "send");
-    await verifyTransferAcrossOperators({
-      operators: context.otherConnections.map((connection) => connection.spark),
-      network,
-      transfer: sent,
-    });
-    // Only leaves this call both selected locally AND the verified transfer names may lose their
+    // Only leaves this call both selected locally AND the returned transfer names may lose their
     // chains — the coordinator cannot strip the exit data of leaves it merely lists (N-01). On a
     // retry the SO may report the first-attempt leaves; responses echoing no leaves fall back to
     // the selection (the send path always commits the leaves it built the package over).

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 
+import { SparkError, SparkRequestError } from "../src/errors/index.ts";
 import { TreeNodeStatus } from "../src/proto/gen/spark_pb.ts";
 import type { TreeNode } from "../src/proto/gen/spark_pb.ts";
 import {
@@ -73,9 +74,19 @@ describe("N-01/L-05: reported transfer leaf lists never delete unrelated chains"
       transferId: TRANSFER_ID,
     });
     await client.leaves();
-    await expect(
-      client.transfers.send({ receiver: RECEIVER, amountSats: 1000, transferId: TRANSFER_ID }),
-    ).rejects.toThrow(/differs across operators/);
+    // A genuinely differing operator row is a verdict, not a transient: SparkError, and the
+    // caller must not retry the id.
+    const mismatch = await client.transfers
+      .send({ receiver: RECEIVER, amountSats: 1000, transferId: TRANSFER_ID })
+      .then(
+        () => {
+          throw new Error("send unexpectedly resolved");
+        },
+        (error: unknown) => error,
+      );
+    expect(mismatch).toBeInstanceOf(SparkError);
+    expect(mismatch).not.toBeInstanceOf(SparkRequestError);
+    expect(String(mismatch)).toContain("differs across operators");
     expect(deleted).toStrictEqual([]);
     const chains = await store.exitChains();
     expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual([LEAF_A, LEAF_B]);
@@ -111,9 +122,10 @@ describe("N-01/L-05: reported transfer leaf lists never delete unrelated chains"
       transferId: TRANSFER_ID,
     });
     await client.leaves();
-    // The response was lost but the transfer committed server-side; every operator confirms it
-    // names both leaves. The send resolves and may delete only what this call selected AND the
-    // verified transfer commits — send-b's chain survives (N-01).
+    // The response was lost but the transfer committed server-side. The recovered row carries no
+    // cross-operator gate — the commit already happened and an operator hiccup must not strand
+    // the spend — so the send resolves and may delete only what this call selected AND the
+    // returned transfer commits — send-b's chain survives (N-01).
     const sent = await client.transfers.send({ receiver: RECEIVER, amountSats: 1000 });
     expect(sent.leaves.map((leaf) => leaf.leaf.id).toSorted()).toStrictEqual([LEAF_A, LEAF_B]);
     expect(deleted).toHaveLength(1);
@@ -124,8 +136,8 @@ describe("N-01/L-05: reported transfer leaf lists never delete unrelated chains"
     signer.dispose();
   });
 
-  test("a fresh commit whose leaf set differs across operators aborts before any deletion", async () => {
-    const { client, store, deleted, signer } = await sendHarness({
+  test("a fresh commit whose leaf set differs across operators still resolves", async () => {
+    const { client, store, deleted, signer, committed } = await sendHarness({
       mode: "fresh",
       operatorTransfers: "honest",
       sendLeafId: LEAF_A,
@@ -133,9 +145,34 @@ describe("N-01/L-05: reported transfer leaf lists never delete unrelated chains"
       transferId: TRANSFER_ID,
     });
     await client.leaves();
-    await expect(client.transfers.send({ receiver: RECEIVER, amountSats: 1000 })).rejects.toThrow(
-      /differs across operators/,
-    );
+    // The coordinator's fresh response inflates the leaf set while the other operators serve the
+    // honest row. This call's own commit is not gated on cross-operator agreement — an operator
+    // hiccup must not strand a payment already committed — so the send resolves on the
+    // coordinator's terms and deletes only selected ∩ reported.
+    const sent = await client.transfers.send({ receiver: RECEIVER, amountSats: 1000 });
+    expect(sent.id).toBe(committed.id);
+    expect(sent.leaves.map((leaf) => leaf.leaf.id).toSorted()).toStrictEqual([LEAF_A, LEAF_B]);
+    expect(deleted).toStrictEqual([LEAF_A]);
+    const chains = await store.exitChains();
+    expect(chains.map((chain) => chain.leafId)).toStrictEqual([LEAF_B]);
+    signer.dispose();
+  });
+
+  test("a probe hit one operator cannot answer is retryable, never a deletion witness", async () => {
+    const { client, store, deleted, signer } = await sendHarness({
+      mode: "resume",
+      operatorTransfers: "same",
+      sendLeafId: LEAF_A,
+      otherLeafId: LEAF_B,
+      transferId: TRANSFER_ID,
+      failingOps: [OP1],
+    });
+    await client.leaves();
+    // A transient operator failure on the probe-hit gate is SparkRequestError — the caller may
+    // retry the same id later; nothing resolves and nothing is deleted.
+    await expect(
+      client.transfers.send({ receiver: RECEIVER, amountSats: 1000, transferId: TRANSFER_ID }),
+    ).rejects.toThrow(SparkRequestError);
     expect(deleted).toStrictEqual([]);
     const chains = await store.exitChains();
     expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual([LEAF_A, LEAF_B]);

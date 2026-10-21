@@ -1,4 +1,4 @@
-import { create } from "@bufbuild/protobuf";
+import { clone, create } from "@bufbuild/protobuf";
 import { EmptySchema } from "@bufbuild/protobuf/wkt";
 import type { Transport } from "@connectrpc/connect";
 import { createClient } from "@connectrpc/connect";
@@ -442,10 +442,11 @@ const NOW_MS = 1_700_000_000_000;
 async function lightningDeps(options: {
   ssp: SspClient;
   spark?: LightningDeps["spark"];
+  operatorSparks?: LightningDeps["operatorSparks"];
 }): Promise<LightningDeps> {
   return {
     spark: options.spark ?? fakeSpark({}).spark,
-    operatorSparks: [],
+    operatorSparks: options.operatorSparks ?? [],
     ssp: options.ssp,
     sspIdentityPublicKey: SSP_IDENTITY,
     signer: await testSigner(),
@@ -749,6 +750,8 @@ async function sendDeps(overrides: {
   recoveredTransfer?: Transfer | (() => Transfer | undefined);
   /** Override the SSP send-request response (defaults to echoing the invoice back). */
   requestLightningSend?: (req: SspLightningSendRequest) => Partial<SspLightningSendResult>;
+  /** Non-coordinator operator clients for the probe-hit cross-check (default: none). */
+  operatorSparks?: LightningDeps["operatorSparks"];
   deleted?: string[][];
 }): Promise<{
   deps: Parameters<typeof payLightningInvoice>[0];
@@ -811,7 +814,11 @@ async function sendDeps(overrides: {
       return respond(req);
     },
   });
-  const deps = await lightningDeps({ ssp, spark });
+  const deps = await lightningDeps({
+    ssp,
+    spark,
+    ...(overrides.operatorSparks === undefined ? {} : { operatorSparks: overrides.operatorSparks }),
+  });
   const spendAmounts: number[] = [];
   return {
     deps: {
@@ -1159,6 +1166,121 @@ describe("payLightningInvoice", () => {
     expect(deleted).toStrictEqual([]);
     expect(payment.requestId).toBe("send-req-1");
     expect(payment.transferId).toBe("0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee");
+  });
+
+  test("a fresh pay an operator cannot verify still requests the SSP send", async () => {
+    const signer = await testSigner();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    // This call's own commit is not gated on cross-operator verification: a down or lagging
+    // operator must not strand a preimage swap that already committed (16-day expiry).
+    const operatorDown = fakeSpark({
+      query_transfers_by_id: () => {
+        throw new SparkRequestError("operator unreachable", { code: "unavailable" });
+      },
+    });
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      operatorSparks: [operatorDown.spark],
+    });
+    const payment = await payLightningInvoice(deps, { invoice, maxFeeSats: 200 });
+    expect(sendRequests).toHaveLength(1);
+    expect(payment.requestId).toBe("send-req-1");
+  });
+
+  test("a probed swap an operator serves differently is rejected as a verdict", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+      totalValue: 1007n,
+      intermediateRefundTx: htlcRefund(leaf, PAYMENT_HASH, identityPublicKey),
+    });
+    // The operator's copy records a different committed total — a real disagreement, not lag.
+    const divergent = clone(TransferSchema, committed);
+    divergent.totalValue = 9999n;
+    const operatorDivergent = fakeSpark({
+      query_transfers_by_id: () => ({ transfers: [divergent] }),
+    });
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      operatorSparks: [operatorDivergent.spark],
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run when the probe hits");
+      },
+    });
+    const error = await payLightningInvoice(deps, {
+      invoice,
+      maxFeeSats: 200,
+      transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+    }).then(
+      () => {
+        throw new Error("pay unexpectedly resolved");
+      },
+      (error: unknown) => error,
+    );
+    expect(error).toBeInstanceOf(SparkError);
+    expect(error).not.toBeInstanceOf(SparkRequestError);
+    expect(String(error)).toContain("differs across operators");
+    expect(sendRequests).toHaveLength(0);
+  });
+
+  test("a probed swap one operator cannot answer is retryable", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+      totalValue: 1007n,
+      intermediateRefundTx: htlcRefund(leaf, PAYMENT_HASH, identityPublicKey),
+    });
+    const operatorDown = fakeSpark({
+      query_transfers_by_id: () => {
+        throw new SparkRequestError("operator unreachable", { code: "unavailable" });
+      },
+    });
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      operatorSparks: [operatorDown.spark],
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run when the probe hits");
+      },
+    });
+    // A transport failure on the probe-hit gate is retryable — the caller may resume the same
+    // transferId later; the SSP send is not requested until the commit verifies.
+    await expect(
+      payLightningInvoice(deps, {
+        invoice,
+        maxFeeSats: 200,
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ).rejects.toThrow(SparkRequestError);
+    expect(sendRequests).toHaveLength(0);
   });
 
   test("a probed swap locked to a different payment hash is rejected", async () => {
