@@ -132,12 +132,15 @@ export function createLnurlAuthSigner(options: { readonly rootKey: Uint8Array })
       }
       const mac = hmac(sha256, hashingPrivate, utf8ToBytes(domain));
       let node = root;
-      for (let i = 0; i < 4; i += 1) {
-        node = node.deriveChild(pathElement(mac, i * 4));
-        nodes.push(node);
+      try {
+        for (let i = 0; i < 4; i += 1) {
+          node = node.deriveChild(pathElement(mac, i * 4));
+          nodes.push(node);
+        }
+        return nodes;
+      } finally {
+        mac.fill(0);
       }
-      mac.fill(0);
-      return nodes;
     } catch (error) {
       wipeNodes(nodes);
       throw error;
