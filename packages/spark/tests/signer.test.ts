@@ -122,13 +122,23 @@ function seededRandom(seed: Uint8Array): (length: number) => Uint8Array {
   };
 }
 
-async function signerFor(seedHex: string, account = 0, randomSeed = 1): Promise<SparkSigner> {
+async function signerFor(
+  seedHex: string,
+  account = 0,
+  randomSeed = 1,
+  binding?: {
+    readonly operators?: ReadonlyArray<SparkOperator>;
+    readonly threshold?: number;
+    readonly sspIdentityPublicKey?: Uint8Array;
+  },
+): Promise<SparkSigner> {
   const accountKey = sparkAccountKey(hexToBytes(seedHex), "regtest", account);
   return createSparkSigner({
     crypto: await backend(),
     accountKey,
     network: "regtest",
     random: seededRandom(new Uint8Array(32).fill(randomSeed)),
+    ...binding,
   });
 }
 
@@ -813,12 +823,13 @@ describe("backend randomness seeds", () => {
       accountKey,
       network: "regtest",
       random: recording,
+      operators: [testOperator(0, 0x21n), testOperator(1, 0x22n), testOperator(2, 0x23n)],
+      threshold: 2,
     });
     try {
       // frostCommit (nonces) then a VSS split + per-operator ECIES seals.
       await signer.newCommitments(2);
-      const operators = [testOperator(0, 0x21n), testOperator(1, 0x22n), testOperator(2, 0x23n)];
-      await signer.prepareLightningReceive({ operators, threshold: 2 });
+      await signer.prepareLightningReceive();
       expect(produced.length).toBeGreaterThan(0);
       for (const seed of produced) {
         expect(seed.every((byte) => byte === 0)).toBe(true);
@@ -1008,17 +1019,20 @@ function recoverSecret(pairs: ReadonlyArray<readonly [bigint, Uint8Array]>): Uin
 
 describe("prepareTransfer", () => {
   test("operator packages carry verifiable shares sealing old − new", async () => {
-    const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const crypto = await backend();
-    const identity = await signer.identityPublicKey();
-    const leafId = "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c";
-    const [oldPublicKey] = await signer.publicKeys([{ type: "leaf", leafId }]);
-
     const operatorSecrets = [101n, 202n, 303n];
     const operators = operatorSecrets.map((secret, i) => ({
       ...testOperator(i, secret),
       secret,
     }));
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      operators,
+      threshold: 2,
+    });
+    const crypto = await backend();
+    const identity = await signer.identityPublicKey();
+    const leafId = "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2c";
+    const [oldPublicKey] = await signer.publicKeys([{ type: "leaf", leafId }]);
+
     const receiverSecret = 0x0f00dn;
     const receiverPublicKey = Point.BASE.multiply(receiverSecret).toBytes(true);
 
@@ -1031,8 +1045,6 @@ describe("prepareTransfer", () => {
           receiverIdentityPublicKey: receiverPublicKey,
         },
       ],
-      operators,
-      threshold: 2,
     });
     expect(prepared.leaves).toHaveLength(1);
     const leaf = prepared.leaves[0]!;
@@ -1097,7 +1109,6 @@ describe("prepareTransfer", () => {
     const receiverPublicKeys = receiverSecrets.map((secret) =>
       Point.BASE.multiply(secret).toBytes(true),
     );
-    const operators = [101n, 202n, 303n].map((secret, i) => testOperator(i, secret));
 
     const prepared = await signer.prepareTransfer({
       transferId: TRANSFER_ID,
@@ -1106,8 +1117,6 @@ describe("prepareTransfer", () => {
         key: { type: "leaf" as const, leafId },
         receiverIdentityPublicKey: receiverPublicKeys[index]!,
       })),
-      operators,
-      threshold: 2,
     });
     expect(prepared.leaves).toHaveLength(2);
 
@@ -1125,33 +1134,18 @@ describe("prepareTransfer", () => {
     signer.dispose();
   });
 
-  test("rejects empty leaves and operators", async () => {
+  test("rejects empty leaves and an empty construction-time operator set", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const operators = [testOperator(0, 101n), testOperator(1, 102n)];
-    const receiver = Point.BASE.toBytes(true);
     await expect(
       signer.prepareTransfer({
         transferId: TRANSFER_ID,
         leaves: [],
-        operators,
-        threshold: 2,
-      }),
-    ).rejects.toThrow(SparkInputError);
-    await expect(
-      signer.prepareTransfer({
-        transferId: TRANSFER_ID,
-        leaves: [
-          {
-            leafId: "x",
-            key: { type: "leaf", leafId: "x" },
-            receiverIdentityPublicKey: receiver,
-          },
-        ],
-        operators: [],
-        threshold: 2,
       }),
     ).rejects.toThrow(SparkInputError);
     signer.dispose();
+    await expect(signerFor(derivation.cases[0]!.seed_hex, 0, 1, { operators: [] })).rejects.toThrow(
+      SparkInputError,
+    );
   });
 
   test("rejects a malformed per-leaf receiver identity key", async () => {
@@ -1167,8 +1161,6 @@ describe("prepareTransfer", () => {
             receiverIdentityPublicKey: new Uint8Array(32),
           },
         ],
-        operators: [testOperator(0, 101n), testOperator(1, 102n)],
-        threshold: 2,
       }),
     ).rejects.toThrow(SparkInputError);
     signer.dispose();
@@ -1177,7 +1169,15 @@ describe("prepareTransfer", () => {
 
 describe("prepareClaim", () => {
   test("operator packages carry verifiable shares sealing received − leaf", async () => {
-    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const operatorSecrets = [111n, 222n, 333n];
+    const operators = operatorSecrets.map((secret, i) => ({
+      ...testOperator(i, secret),
+      secret,
+    }));
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      operators,
+      threshold: 2,
+    });
     const crypto = await backend();
     const identity = await signer.identityPublicKey();
     const leafId = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
@@ -1191,16 +1191,9 @@ describe("prepareClaim", () => {
       new Uint8Array(32).fill(3),
     );
 
-    const operatorSecrets = [111n, 222n, 333n];
-    const operators = operatorSecrets.map((secret, i) => ({
-      ...testOperator(i, secret),
-      secret,
-    }));
     const prepared = await signer.prepareClaim({
       transferId: TRANSFER_ID,
       leaves: [{ leafId, secretCipher }],
-      operators,
-      threshold: 2,
     });
 
     const sharePairs: Array<[bigint, Uint8Array]> = [];
@@ -1244,58 +1237,29 @@ describe("prepareClaim", () => {
 
 describe("threshold validation", () => {
   test.each([2.5, 0, 1, 4, 2 ** 32 + 3])(
-    "rejects threshold %s on VSS-splitting prepare calls",
+    "rejects threshold %s at construction",
     async (threshold) => {
-      const signer = await signerFor(derivation.cases[0]!.seed_hex);
-      const crypto = await backend();
       const operators = [testOperator(0, 101n), testOperator(1, 102n), testOperator(2, 103n)];
-      const leafId = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
-      const receiver = Point.BASE.toBytes(true);
-      const secretCipher = crypto.eciesEncrypt(
-        await signer.identityPublicKey(),
-        be32(0xabcd1234n),
-        new Uint8Array(32).fill(3),
-      );
       await expect(
-        signer.prepareTransfer({
-          transferId: TRANSFER_ID,
-          leaves: [
-            {
-              leafId,
-              key: { type: "leaf", leafId },
-              receiverIdentityPublicKey: receiver,
-            },
-          ],
-          operators,
-          threshold,
-        }),
+        signerFor(derivation.cases[0]!.seed_hex, 0, 1, { operators, threshold }),
       ).rejects.toThrow(SparkInputError);
-      await expect(
-        signer.prepareClaim({
-          transferId: TRANSFER_ID,
-          leaves: [{ leafId, secretCipher }],
-          operators,
-          threshold,
-        }),
-      ).rejects.toThrow(SparkInputError);
-      await expect(signer.prepareLightningReceive({ operators, threshold })).rejects.toThrow(
-        SparkInputError,
-      );
-      signer.dispose();
     },
   );
 });
 
 describe("prepareLightningReceive", () => {
   test("payment hash is sha256 of the VSS-recovered preimage", async () => {
-    const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const crypto = await backend();
     const operatorSecrets = [41n, 42n, 43n];
     const operators = operatorSecrets.map((secret, i) => ({
       ...testOperator(i, secret),
       secret,
     }));
-    const prepared = await signer.prepareLightningReceive({ operators, threshold: 2 });
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      operators,
+      threshold: 2,
+    });
+    const crypto = await backend();
+    const prepared = await signer.prepareLightningReceive();
     expect(prepared.paymentHash).toHaveLength(32);
     const sharePairs: Array<[bigint, Uint8Array]> = [];
     for (const [i, operator] of operators.entries()) {
@@ -1321,7 +1285,9 @@ describe("claimStaticDeposit + receivedPublicKeys", () => {
 
   test("seals the static-deposit secret to the SSP and signs the claim statement", async () => {
     const c = derivation.cases[0]!;
-    const signer = await signerFor(c.seed_hex);
+    const signer = await signerFor(c.seed_hex, c.account, 1, {
+      sspIdentityPublicKey: SSP_IDENTITY,
+    });
     const identity = await signer.identityPublicKey();
     const txid = new Uint8Array(32).fill(9);
     const statement = {
@@ -1335,7 +1301,6 @@ describe("claimStaticDeposit + receivedPublicKeys", () => {
     const result = await signer.claimStaticDeposit({
       index: 0,
       statement,
-      sspIdentityPublicKey: SSP_IDENTITY,
     });
     // Only the SSP identity key can open the sealed deposit key.
     const crypto = await backend();
@@ -1363,30 +1328,13 @@ describe("claimStaticDeposit + receivedPublicKeys", () => {
   });
 
   test("rejects an sspIdentityPublicKey that is not a 33-byte point", async () => {
-    const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const statement = {
-      kind: "static-deposit-claim",
-      network: "regtest",
-      txid: new Uint8Array(32).fill(9),
-      vout: 0,
-      creditAmountSats: 10_000,
-      sspSignature: hexToBytes("ff00"),
-    } as const;
+    const seed = derivation.cases[0]!.seed_hex;
     await expect(
-      signer.claimStaticDeposit({
-        index: 0,
-        statement,
-        sspIdentityPublicKey: new Uint8Array(32),
-      }),
+      signerFor(seed, 0, 1, { sspIdentityPublicKey: new Uint8Array(32) }),
     ).rejects.toThrow(SparkInputError);
     await expect(
-      signer.claimStaticDeposit({
-        index: 0,
-        statement,
-        sspIdentityPublicKey: new Uint8Array(33).fill(4),
-      }),
+      signerFor(seed, 0, 1, { sspIdentityPublicKey: new Uint8Array(33).fill(4) }),
     ).rejects.toThrow(SparkInputError);
-    signer.dispose();
   });
 
   test("receivedPublicKeys decrypts sealed secrets to their public keys", async () => {

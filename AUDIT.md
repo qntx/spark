@@ -133,7 +133,11 @@ identifiers are authoritative.
 - **P1 — Key custody.** No private key ever leaves `SparkSigner`: the client
   sees only public keys, signatures, and ECIES-sealed material;
   `claimStaticDeposit` returns the static-deposit key ECIES-sealed to the SSP
-  identity (`packages/spark/src/signer/types.ts`, `signer/local.ts`,
+  identity bound at signer construction. The operator set, VSS threshold and
+  SSP identity are fixed by `createSparkSigner` (network-config defaults,
+  overridable for a local stack); no request carries them, so key-tweak
+  shares and the deposit secret can only be sealed to the configured
+  destinations (`packages/spark/src/signer/types.ts`, `signer/local.ts`,
   `deposit/static.ts`).
 - **P2 — No sign-arbitrary-hash.** `SparkSigner` computes every digest it
   signs from full protocol content inside the signer; no method accepts a
@@ -308,8 +312,8 @@ Ranked by risk:
   construction and validation (P4); callers must not use the signer as a
   policy oracle.
 - `claimStaticDeposit` releases the static-deposit child key ECIES-sealed to
-  the SSP identity, so the SSP can hold the key for that deposit; the
-  static-deposit key is derived at fixed index 0.
+  the SSP identity bound at signer construction, so the SSP can hold the key
+  for that deposit; the static-deposit key is derived at fixed index 0.
 - Spending requires every operator online and in agreement: leaf selection,
   sync and exit-chain verification query all operators and fail closed on a
   missing or disagreeing row — one offline or dissenting operator blocks the
@@ -659,22 +663,25 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 
 ### `SparkSigner` method table
 
-| Method                    | Signs / derives                                              | Digest computed inside signer | Inputs validated                    |
-| ------------------------- | ------------------------------------------------------------ | ----------------------------- | ----------------------------------- |
-| `identityPublicKey`       | —                                                            | —                             | —                                   |
-| `publicKeys`              | compressed pubkeys for `SparkLeafKey`s                       | —                             | key descriptors                     |
-| `receivedPublicKeys`      | pubkeys of ECIES-sealed keys                                 | —                             | 32-byte plaintext after decrypt     |
-| `newCommitments`          | FROST commitment pairs; nonces stored keyed by commitment    | —                             | `count` ≤ `MAX_JOBS`                |
-| `signFrost`               | per-job FROST signature shares                               | full job content              | commitment consumed before signing  |
-| `aggregateFrost`          | 64-byte aggregated FROST sigs                                | full job content              | resolved private key inside signer  |
-| `signIdentity`            | protocol statement (DER ECDSA / BIP-340 for `spark-invoice`) | statement content             | statement shape                     |
-| `signKeySpend`            | BIP-341 key-path sig over target sighash                     | target sighash                | `SparkKey` + `SigningTarget`        |
-| `signHtlcTimeout`         | BIP-342 script-path sig over the HTLC sequence-lock leaf     | prevout + leaf sighash        | single-input shape, CSV sequence    |
-| `prepareTransfer`         | sender transfer package (fresh keys, VSS tweaks, ECIES)      | —                             | leaf ids, operators, threshold      |
-| `prepareClaim`            | receiver claim package (VSS `received − LEAF{id}` tweaks)    | —                             | leaf ids, operators                 |
-| `prepareLightningReceive` | preimage + VSS `SecretShare` per operator                    | —                             | operators, threshold                |
-| `claimStaticDeposit`      | child key ECIES-sealed to `sspIdentityPublicKey` + DER sig   | claim statement               | SSP identity pubkey, request fields |
-| `dispose`                 | wipes keys, cached secrets, unused nonces                    | —                             | —                                   |
+The operator set, VSS threshold and SSP identity are bound at construction;
+no row below takes them as inputs.
+
+| Method                    | Signs / derives                                              | Digest computed inside signer | Inputs validated                   |
+| ------------------------- | ------------------------------------------------------------ | ----------------------------- | ---------------------------------- |
+| `identityPublicKey`       | —                                                            | —                             | —                                  |
+| `publicKeys`              | compressed pubkeys for `SparkLeafKey`s                       | —                             | key descriptors                    |
+| `receivedPublicKeys`      | pubkeys of ECIES-sealed keys                                 | —                             | 32-byte plaintext after decrypt    |
+| `newCommitments`          | FROST commitment pairs; nonces stored keyed by commitment    | —                             | `count` ≤ `MAX_JOBS`               |
+| `signFrost`               | per-job FROST signature shares                               | full job content              | commitment consumed before signing |
+| `aggregateFrost`          | 64-byte aggregated FROST sigs                                | full job content              | resolved private key inside signer |
+| `signIdentity`            | protocol statement (DER ECDSA / BIP-340 for `spark-invoice`) | statement content             | statement shape                    |
+| `signKeySpend`            | BIP-341 key-path sig over target sighash                     | target sighash                | `SparkKey` + `SigningTarget`       |
+| `signHtlcTimeout`         | BIP-342 script-path sig over the HTLC sequence-lock leaf     | prevout + leaf sighash        | single-input shape, CSV sequence   |
+| `prepareTransfer`         | sender transfer package (fresh keys, VSS tweaks, ECIES)      | —                             | leaf ids, receiver identity keys   |
+| `prepareClaim`            | receiver claim package (VSS `received − LEAF{id}` tweaks)    | —                             | leaf ids                           |
+| `prepareLightningReceive` | preimage + VSS `SecretShare` per operator                    | —                             | —                                  |
+| `claimStaticDeposit`      | child key ECIES-sealed to the bound SSP identity + DER sig   | claim statement               | request fields                     |
+| `dispose`                 | wipes keys, cached secrets, unused nonces                    | —                             | —                                  |
 
 ### `SparkCrypto` / C ABI table
 

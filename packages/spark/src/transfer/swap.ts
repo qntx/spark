@@ -78,8 +78,6 @@ export async function swapLeaves(
       key: { type: "leaf", leafId: leaf.id },
       receiverIdentityPublicKey: options.sspIdentityPublicKey,
     })),
-    operators,
-    threshold,
   });
 
   const signingCommitments = await spark.get_signing_commitments(

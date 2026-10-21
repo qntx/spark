@@ -17,7 +17,6 @@ import {
 import type { ClaimLeafKeyTweak, SendLeafKeyTweak } from "../proto/gen/spark_pb.ts";
 import {
   backendCall,
-  checkOperators,
   checkThreshold,
   operatorShare,
   parseSplit,
@@ -38,12 +37,20 @@ import type {
   StaticDepositClaimRequest,
 } from "./types.ts";
 
-/** What the package-building methods need from the signer. */
+/**
+ * What the package-building methods need from the signer. `operators`, `threshold` and
+ * `sspIdentityPublicKey` are bound at construction: the key-tweak shares and the static-deposit
+ * secret can only ever be sealed to the configured operator set and SSP identity — a caller can
+ * never retarget them per request.
+ */
 export type PackageContext = {
   readonly crypto: SparkCrypto;
   readonly keys: SignerKeys;
   readonly network: SparkNetwork;
   readonly random: (length: number) => Uint8Array;
+  readonly operators: ReadonlyArray<SparkOperator>;
+  readonly threshold: number;
+  readonly sspIdentityPublicKey: Uint8Array;
 };
 
 type TweakSplit = {
@@ -115,17 +122,16 @@ export function prepareTransferPackage(
   request: PrepareTransferRequest,
   context: PackageContext,
 ): PreparedTransfer {
-  const { crypto, keys, random } = context;
+  const { crypto, keys, random, operators, threshold } = context;
   if (request.leaves.length === 0) {
     throw new SparkInputError("leaves: must not be empty");
   }
-  checkOperators(request.operators);
   const secrets: Uint8Array[] = [];
   const plaintexts: Uint8Array[] = [];
   try {
     // Per-operator tweak entries, grouped by operator identifier.
     const perOperator = new Map<string, SendLeafKeyTweak[]>();
-    for (const operator of request.operators) {
+    for (const operator of operators) {
       perOperator.set(operator.identifier, []);
     }
     const leaves: PreparedTransferLeaf[] = [];
@@ -153,13 +159,13 @@ export function prepareTransferPackage(
       secrets.push(tweak);
       const { proofs, shareFor, pubkeySharesTweak } = splitTweak(
         tweak,
-        request.operators,
-        request.threshold,
+        operators,
+        threshold,
         context,
         secrets,
         "prepareTransfer",
       );
-      for (const operator of request.operators) {
+      for (const operator of operators) {
         perOperator.get(operator.identifier)?.push(
           create(SendLeafKeyTweakSchema, {
             leafId: leaf.leafId,
@@ -181,7 +187,7 @@ export function prepareTransferPackage(
       });
     }
     const operatorPackages = sealPerOperator(
-      request.operators,
+      operators,
       (operator) => {
         const tweaks = perOperator.get(operator.identifier);
         if (tweaks === undefined) {
@@ -214,16 +220,15 @@ export function prepareClaimPackage(
   request: PrepareClaimRequest,
   context: PackageContext,
 ): PreparedClaim {
-  const { keys } = context;
+  const { keys, operators, threshold } = context;
   if (request.leaves.length === 0) {
     throw new SparkInputError("leaves: must not be empty");
   }
-  checkOperators(request.operators);
   const secrets: Uint8Array[] = [];
   const plaintexts: Uint8Array[] = [];
   try {
     const perOperator = new Map<string, ClaimLeafKeyTweak[]>();
-    for (const operator of request.operators) {
+    for (const operator of operators) {
       perOperator.set(operator.identifier, []);
     }
     for (const leaf of request.leaves) {
@@ -242,13 +247,13 @@ export function prepareClaimPackage(
       secrets.push(tweak);
       const { proofs, shareFor, pubkeySharesTweak } = splitTweak(
         tweak,
-        request.operators,
-        request.threshold,
+        operators,
+        threshold,
         context,
         secrets,
         "prepareClaim",
       );
-      for (const operator of request.operators) {
+      for (const operator of operators) {
         perOperator.get(operator.identifier)?.push(
           create(ClaimLeafKeyTweakSchema, {
             leafId: leaf.leafId,
@@ -262,7 +267,7 @@ export function prepareClaimPackage(
       }
     }
     const operatorPackages = sealPerOperator(
-      request.operators,
+      operators,
       (operator) => {
         const tweaks = perOperator.get(operator.identifier);
         if (tweaks === undefined) {
@@ -291,16 +296,8 @@ export function prepareClaimPackage(
  * Generates a preimage, VSS-splits it across `operators` at `threshold`, and seals one
  * `SecretShare` plaintext per operator. Returns `sha256(preimage)` as the payment hash.
  */
-export function prepareLightningReceivePackage(
-  request: {
-    readonly operators: ReadonlyArray<SparkOperator>;
-    readonly threshold: number;
-  },
-  context: PackageContext,
-): PreparedLightningReceive {
-  const { crypto, random } = context;
-  checkOperators(request.operators);
-  checkThreshold(request.threshold, request.operators);
+export function prepareLightningReceivePackage(context: PackageContext): PreparedLightningReceive {
+  const { crypto, random, operators, threshold } = context;
   const secrets: Uint8Array[] = [];
   const plaintexts: Uint8Array[] = [];
   try {
@@ -308,13 +305,13 @@ export function prepareLightningReceivePackage(
     secrets.push(preimage);
     const split = backendCall(() =>
       withRandom(random, 32, (seed) =>
-        crypto.splitSecretWithProofs(preimage, request.threshold, request.operators.length, seed),
+        crypto.splitSecretWithProofs(preimage, threshold, operators.length, seed),
       ),
     );
     secrets.push(split);
-    const { proofs, shares } = parseSplit(split, request.threshold, request.operators.length);
+    const { proofs, shares } = parseSplit(split, threshold, operators.length);
     const operatorPackages = sealPerOperator(
-      request.operators,
+      operators,
       (operator) =>
         toBinary(
           SecretShareSchema,
@@ -346,29 +343,17 @@ export function claimStaticDepositPackage(
   request: StaticDepositClaimRequest,
   context: PackageContext,
 ): { encryptedSecretKey: Uint8Array; signature: Uint8Array } {
-  const { crypto, keys, network, random } = context;
+  const { crypto, keys, network, random, sspIdentityPublicKey } = context;
   const { digest } = statementDigest(request.statement, {
     identityPoint: keys.identityPoint,
     identityPublicKey: keys.identityPublicKey,
     network,
   });
-  if (request.sspIdentityPublicKey.length !== PUBLIC_KEY_LENGTH) {
-    throw new SparkInputError("claimStaticDeposit: sspIdentityPublicKey must be 33 bytes");
-  }
-  try {
-    secp256k1.Point.fromBytes(request.sspIdentityPublicKey);
-  } catch (error) {
-    throw new SparkInputError("claimStaticDeposit: sspIdentityPublicKey is not a valid point", {
-      cause: error,
-    });
-  }
   const secret = keys.staticDepositPrivateKey(request.index);
   try {
     return {
       encryptedSecretKey: backendCall(() =>
-        withRandom(random, 32, (seed) =>
-          crypto.eciesEncrypt(request.sspIdentityPublicKey, secret, seed),
-        ),
+        withRandom(random, 32, (seed) => crypto.eciesEncrypt(sspIdentityPublicKey, secret, seed)),
       ),
       signature: ecdsaSign(digest, keys.identityPrivateKey, "der"),
     };

@@ -144,53 +144,54 @@ describe("I-01: the per-call hedge counters a repeating RNG", () => {
 describe("L-05: operator lists must be unique", () => {
   test("a duplicate id, identifier or identityPublicKey is rejected", async () => {
     const accountKey = sparkAccountKey(hexToBytes(derivation.cases[0]!.seed_hex), "regtest", 0);
-    const signer = createSparkSigner({
-      crypto: await backend(),
-      accountKey,
-      network: "regtest",
-      random: seededRandom(new Uint8Array(32).fill(4)),
-    });
-    try {
-      const first: SparkOperator = {
-        id: 0,
-        identifier: bytesToHex(be32(1n)),
-        identityPublicKey: Point.BASE.toBytes(true),
-      };
-      const second: SparkOperator = {
-        id: 1,
-        identifier: bytesToHex(be32(2n)),
-        identityPublicKey: Point.BASE.multiply(2n).toBytes(true),
-      };
-      const lists: SparkOperator[][] = [
-        [first, second, { ...second, id: 0 }],
-        [
-          first,
-          second,
-          {
-            ...second,
-            id: 2,
-            identityPublicKey: Point.BASE.multiply(3n).toBytes(true),
-          },
-        ],
-        [
-          first,
-          second,
-          {
-            ...second,
-            id: 2,
-            identifier: bytesToHex(be32(3n)),
-            identityPublicKey: Point.BASE.toBytes(true),
-          },
-        ],
-      ];
-      for (const operators of lists) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential assertions on one signer instance
-        await expect(signer.prepareLightningReceive({ operators, threshold: 2 })).rejects.toThrow(
-          "id, identifier and identityPublicKey must each be unique",
-        );
-      }
-    } finally {
-      signer.dispose();
+    const crypto = await backend();
+    const random = seededRandom(new Uint8Array(32).fill(4));
+    const first: SparkOperator = {
+      id: 0,
+      identifier: bytesToHex(be32(1n)),
+      identityPublicKey: Point.BASE.toBytes(true),
+    };
+    const second: SparkOperator = {
+      id: 1,
+      identifier: bytesToHex(be32(2n)),
+      identityPublicKey: Point.BASE.multiply(2n).toBytes(true),
+    };
+    const lists: SparkOperator[][] = [
+      [first, second, { ...second, id: 0 }],
+      [
+        first,
+        second,
+        {
+          ...second,
+          id: 2,
+          identityPublicKey: Point.BASE.multiply(3n).toBytes(true),
+        },
+      ],
+      [
+        first,
+        second,
+        {
+          ...second,
+          id: 2,
+          identifier: bytesToHex(be32(3n)),
+          identityPublicKey: Point.BASE.toBytes(true),
+        },
+      ],
+    ];
+    for (const operators of lists) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential construction attempts
+      await expect(
+        Promise.resolve().then(() =>
+          createSparkSigner({
+            crypto,
+            accountKey,
+            network: "regtest",
+            random,
+            operators,
+            threshold: 2,
+          }),
+        ),
+      ).rejects.toThrow("id, identifier and identityPublicKey must each be unique");
     }
   });
 });

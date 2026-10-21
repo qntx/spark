@@ -150,7 +150,9 @@ export type SparkOperator = {
 /**
  * PrepareTransfer input: every leaf gets a fresh random recipient key; the operator-visible tweak
  * is `old − new` (mod n) split by VSS and encrypted per operator. Each leaf's `secret_cipher` is
- * sealed to that leaf's own receiver identity key, so one transfer can pay several receivers.
+ * sealed to that leaf's own receiver identity key, so one transfer can pay several receivers. The
+ * operator set and threshold are the signer's construction-time values — a call cannot retarget the
+ * tweak shares to other keys.
  */
 export type PrepareTransferRequest = {
   readonly transferId: string;
@@ -160,8 +162,6 @@ export type PrepareTransferRequest = {
     /** 33-byte compressed identity public key the leaf's `secret_cipher` is encrypted to. */
     readonly receiverIdentityPublicKey: Uint8Array;
   }>;
-  readonly operators: ReadonlyArray<SparkOperator>;
-  readonly threshold: number;
 };
 
 /** One leaf's transfer output, mirroring the per-leaf fields of `spark.SendLeafKeyTweak`. */
@@ -185,12 +185,13 @@ export type PreparedTransfer = {
   readonly leaves: ReadonlyArray<PreparedTransferLeaf>;
 };
 
-/** PrepareClaim input: each leaf's `secretCipher` is the sender's ECIES-encrypted leaf key. */
+/**
+ * PrepareClaim input: each leaf's `secretCipher` is the sender's ECIES-encrypted leaf key. The
+ * tweak shares are split across and sealed to the signer's construction-time operator set.
+ */
 export type PrepareClaimRequest = {
   readonly transferId: string;
   readonly leaves: ReadonlyArray<{ readonly leafId: string; readonly secretCipher: Uint8Array }>;
-  readonly operators: ReadonlyArray<SparkOperator>;
-  readonly threshold: number;
 };
 
 /**
@@ -233,15 +234,14 @@ export type HtlcTimeoutSignRequest = {
 };
 
 /**
- * The static-deposit claim request: which key index, the statement the SSP expects signed, and the
- * SSP identity public key the deposit secret is sealed to.
+ * The static-deposit claim request: which key index and the statement the SSP expects signed. The
+ * deposit secret is sealed to the SSP identity bound at signer construction — a call cannot
+ * redirect it to another key.
  */
 export type StaticDepositClaimRequest = {
   /** Static-deposit child index (upstream uses 0 for the current deposit address). */
   readonly index: number;
   readonly statement: Extract<IdentityStatement, { readonly kind: "static-deposit-claim" }>;
-  /** The SSP's compressed identity public key — the deposit secret is ECIES-sealed to it. */
-  readonly sspIdentityPublicKey: Uint8Array;
 };
 
 /**
@@ -301,14 +301,11 @@ export type SparkSigner = {
   /** Builds the receiver claim package: VSS `received − LEAF{leafId}` tweaks, per-SO ECIES packages. */
   readonly prepareClaim: (request: PrepareClaimRequest) => Promise<PreparedClaim>;
   /** Generates a preimage, splits it by VSS and encrypts one `SecretShare` per operator. */
-  readonly prepareLightningReceive: (request: {
-    readonly operators: ReadonlyArray<SparkOperator>;
-    readonly threshold: number;
-  }) => Promise<PreparedLightningReceive>;
+  readonly prepareLightningReceive: () => Promise<PreparedLightningReceive>;
   /**
-   * The static-deposit claim: the child secret key ECIES-sealed to `sspIdentityPublicKey` (the same
-   * scheme as transfer leaf secret ciphers) plus the identity-key DER signature over the claim
-   * statement. The plaintext key never leaves the signer.
+   * The static-deposit claim: the child secret key ECIES-sealed to the SSP identity bound at signer
+   * construction (the same scheme as transfer leaf secret ciphers) plus the identity-key DER
+   * signature over the claim statement. The plaintext key never leaves the signer.
    */
   readonly claimStaticDeposit: (
     request: StaticDepositClaimRequest,

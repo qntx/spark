@@ -136,10 +136,7 @@ export async function createLightningInvoice(
 
   const identityPublicKey = await deps.signer.identityPublicKey();
   const payeeIdentityPublicKey = options.receiverIdentityPublicKey ?? identityPublicKey;
-  const prepared = await deps.signer.prepareLightningReceive({
-    operators: deps.operators,
-    threshold: deps.threshold,
-  });
+  const prepared = await deps.signer.prepareLightningReceive();
 
   const request = await deps.ssp.requestLightningReceive({
     network: deps.network,

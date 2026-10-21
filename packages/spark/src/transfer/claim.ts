@@ -140,7 +140,7 @@ export async function claimTransfer(
     readonly call?: CallOptions;
   },
 ): Promise<SparkLeaf[]> {
-  const { spark, signer, network, operators, threshold } = options;
+  const { spark, signer, network } = options;
   const { transfer } = options;
   if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
     throw new SparkInputError(`claimTransfer: transfer status ${transfer.status} is not claimable`);
@@ -204,8 +204,6 @@ export async function claimTransfer(
       leafId: leaf.leaf.id,
       secretCipher: leaf.secretCipher,
     })),
-    operators,
-    threshold,
   });
 
   const signingCommitments = await spark.get_signing_commitments(

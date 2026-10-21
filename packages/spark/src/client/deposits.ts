@@ -156,7 +156,6 @@ export function createDeposits(context: ClientContext): SparkClient["deposits"] 
         {
           ...context.depositCoordinator,
           ssp: context.sspClient,
-          sspIdentityPublicKey: context.config.ssp.identityPublicKey,
         },
         claimOptions,
       );

@@ -23,7 +23,9 @@
 - The client never holds private keys and never imports crypto or signer implementation modules.
   SparkSigner computes every digest it signs from full content; there is no sign-arbitrary-hash
   method. No signer method returns plaintext private key material; claimStaticDeposit returns the
-  static-deposit key ECIES-sealed to the SSP identity.
+  static-deposit key ECIES-sealed to the SSP identity. The operator set, VSS threshold and SSP
+  identity are bound at signer construction (network-config defaults, overridable for a local
+  stack); no signer request can retarget packages to other keys.
 - SparkSigner types are protocol values: Uint8Array, safe integers, strings, booleans, arrays and
   plain objects.
 - `spark-crypto` forbids unsafe code and takes randomness as input. It builds for
