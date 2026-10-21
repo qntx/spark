@@ -2,12 +2,10 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient, createRouterTransport } from "@connectrpc/connect";
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
-import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
-import { createSparkClientWith } from "../src/client/index.ts";
 import {
   createCurrentTimelockRefundTxs,
   createDecrementedTimelockRefundTxs,
@@ -18,16 +16,10 @@ import {
   sendLeafSigningDigest,
   transferPackageDigest,
 } from "../src/core/hashing/statements.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import { SignatureScheme, SignatureSchema } from "../src/proto/gen/common_pb.ts";
-import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
 import {
   ClaimTransferResponseSchema,
   GetSigningCommitmentsResponseSchema,
@@ -78,60 +70,23 @@ import type { SparkLeaf } from "../src/tree/index.ts";
 import { batchedPublicKeys, SIGNER_BATCH_LIMIT, signUserJobs } from "../src/tree/signing.ts";
 import type { UserSigningSpec } from "../src/tree/signing.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import {
+  commitmentGroup,
+  fabricateLeaf,
+  fixedRandom,
+  hashedRandom,
+  makeTestClient,
+  OPERATORS,
+  operatorCommitments,
+  required,
+  SHARE_PUB,
+  THRESHOLD,
+  verifyingKeyFor,
+} from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
-const THRESHOLD = 2;
 const LEAF_ID = "01989abc-def0-7abc-89ab-cdef01234567";
 const TRANSFER_ID = "01989abc-def0-7000-8000-abcdef012345";
-
-/** Unwraps values the router captures — a missing capture is a test bug, not a branch. */
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
-
-/** Deterministic byte stream for the signer and uuidv7. */
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
-  };
-}
-
-/**
- * Deterministic byte stream whose 64-byte windows never repeat — `fixedRandom`'s 251-byte period
- * makes commitment batches collide once they exceed ~250 items.
- */
-function uniqueRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i += 32) {
-      const block = sha256(utf8ToBytes(`signer-test-${counter}`));
-      counter += 1;
-      out.set(block.subarray(0, Math.min(32, length - i)), i);
-    }
-    return out;
-  };
-}
 
 async function testSigner(random?: (length: number) => Uint8Array): Promise<SparkSigner> {
   return createSparkSigner({
@@ -144,89 +99,6 @@ async function testSigner(random?: (length: number) => Uint8Array): Promise<Spar
 
 const RECEIVER_SECRET = new Uint8Array(32).fill(77);
 const SENDER_SECRET = new Uint8Array(32).fill(55);
-
-/** Fabricated SO keyshare; the leaf verifying key is `share + user signing key`. */
-const SHARE_SECRET = 0x5ea5n;
-const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
-function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-  return secp256k1.Point.fromBytes(SHARE_PUB)
-    .add(secp256k1.Point.fromBytes(signingPublicKey))
-    .toBytes(true);
-}
-
-/**
- * A leaf with parseable transactions: a synthetic node tx (sequence-0 input, one P2TR output) and
- * the initial-timelock CPFP refund (sequence 2000) the SO would have issued for it.
- */
-function fabricateLeaf(options: {
-  leafId: string;
-  signingPublicKey: Uint8Array;
-  ownerIdentityPublicKey: Uint8Array;
-  valueSats?: bigint;
-  /** Node tx input sequence; nonzero marks a live timelock so direct refunds are built. */
-  nodeSequence?: number;
-}): { leaf: SparkLeaf; nodeTx: Uint8Array; refundTx: Uint8Array; verifyingKey: Uint8Array } {
-  const verifyingKey = verifyingKeyFor(options.signingPublicKey);
-  const nodeTx = new Transaction({ allowUnknownOutputs: true });
-  nodeTx.addInput({
-    txid: new Uint8Array(32).fill(7),
-    index: 0,
-    sequence: options.nodeSequence ?? 0,
-  });
-  nodeTx.addOutput({
-    script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-    amount: options.valueSats ?? 100_000n,
-  });
-  const nodeTxBytes = nodeTx.toBytes(true);
-  const refundTx = createCurrentTimelockRefundTxs({
-    nodeTx: nodeTxBytes,
-    sequence: 2000,
-    receivingPublicKey: options.signingPublicKey,
-    network: "regtest",
-  }).cpfpRefund.txBytes;
-  return {
-    leaf: {
-      id: options.leafId,
-      treeId: `tree-${options.leafId}`,
-      valueSats: Number(options.valueSats ?? 100_000n),
-      status: "AVAILABLE",
-      nodeTx: nodeTxBytes,
-      refundTx,
-      verifyingPublicKey: verifyingKey,
-      ownerIdentityPublicKey: options.ownerIdentityPublicKey,
-      ownerSigningPublicKey: options.signingPublicKey,
-      signingKeyshare: {
-        ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-        threshold: THRESHOLD,
-        publicKey: SHARE_PUB,
-      },
-      vout: 0,
-    },
-    nodeTx: nodeTxBytes,
-    refundTx,
-    verifyingKey,
-  };
-}
-
-function operatorCommitments(): Record<string, { hiding: Uint8Array; binding: Uint8Array }> {
-  return Object.fromEntries(
-    OPERATORS.map((op, i) => [
-      op.identifier,
-      {
-        hiding: secp256k1.Point.BASE.toBytes(true),
-        binding: secp256k1.Point.BASE.multiply(BigInt(i + 2)).toBytes(true),
-      },
-    ]),
-  );
-}
-
-function commitmentGroup(count: number) {
-  return Array.from({ length: count }, () =>
-    create(RequestedSigningCommitmentsSchema, {
-      signingNonceCommitments: operatorCommitments(),
-    }),
-  );
-}
 
 type SparkImpl = Partial<{
   query_nodes: (req: unknown) => unknown;
@@ -246,51 +118,21 @@ function makeClient(
   sspFetch?: typeof globalThis.fetch,
   sspIdentity?: Uint8Array,
 ) {
-  return createSparkClientWith(
-    {
-      network: "regtest",
-      signer,
-      fetch: sspFetch ?? (async () => Promise.reject(new Error("no fetch"))),
-      random: fixedRandom(),
-      operators: OPERATORS,
-      store: store ?? createMemorySparkStore(),
-      ...(sspIdentity === undefined
-        ? {}
-        : {
-            ssp: {
-              baseUrl: "https://ssp.test",
-              graphqlPath: "graphql",
-              identityPublicKey: sspIdentity,
-            },
-          }),
-    },
-    {
-      transportFactory: (interceptors) =>
-        createRouterTransport(
-          (router) => {
-            router.service(SparkAuthnService, {
-              get_challenge: (req) => ({
-                protectedChallenge: create(ProtectedChallengeSchema, {
-                  challenge: create(ChallengeSchema, {
-                    version: 1,
-                    timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                    nonce: new Uint8Array(4),
-                    publicKey: req.publicKey,
-                  }),
-                  serverHmac: new Uint8Array(4),
-                }),
-              }),
-              verify_challenge: () => ({
-                sessionToken: "so-tok",
-                expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-              }),
-            });
-            router.service(SparkService, sparkImpl as never);
+  return makeTestClient({
+    signer,
+    spark: sparkImpl,
+    ...(store === undefined ? {} : { store }),
+    ...(sspFetch === undefined ? {} : { fetch: sspFetch }),
+    ...(sspIdentity === undefined
+      ? {}
+      : {
+          ssp: {
+            baseUrl: "https://ssp.test",
+            graphqlPath: "graphql",
+            identityPublicKey: sspIdentity,
           },
-          { transport: { interceptors: [...interceptors] } },
-        ),
-    },
-  );
+        }),
+  });
 }
 
 /**
@@ -630,7 +472,7 @@ describe("transfers.send", () => {
   });
 
   test("signUserJobs preserves spec order across signer-call chunks", async () => {
-    const signer = await testSigner(uniqueRandom());
+    const signer = await testSigner(hashedRandom("signer-test"));
     const identity = await signer.identityPublicKey();
     const leafIds = ["order-a", "order-b", "order-c", "order-d"];
     const keys = await signer.publicKeys(
@@ -678,7 +520,7 @@ describe("transfers.send", () => {
   }, 60_000);
 
   test("a 300-leaf send chunks every signer call within the per-call cap", async () => {
-    const signer = await testSigner(uniqueRandom());
+    const signer = await testSigner(hashedRandom("signer-test"));
     const leafIds = Array.from({ length: 300 }, (_, i) => `batch-send-${i}`);
     const fabricated = await fabricatedNodes(signer, leafIds, 100_000n, { withDirectTx: true });
     const nodes = fabricated.map((entry) => entry.node);
@@ -1813,7 +1655,7 @@ describe("transfers.claim", () => {
   });
 
   test("a 300-leaf claim chunks every signer call within the per-call cap", async () => {
-    const receiver = await testSigner(uniqueRandom());
+    const receiver = await testSigner(hashedRandom("signer-test"));
     const receiverIdentity = await receiver.identityPublicKey();
     const receivedSecret = new Uint8Array(32).fill(88);
     const leafIds = Array.from({ length: 300 }, (_, i) => `batch-claim-${i}`);
@@ -2716,7 +2558,7 @@ describe("transfers.swap", () => {
   });
 
   test("a 300-input swap chunks every signer call within the per-call cap", async () => {
-    const signer = await testSigner(uniqueRandom());
+    const signer = await testSigner(hashedRandom("signer-test"));
     const identity = await signer.identityPublicKey();
     const leafIds = Array.from({ length: 300 }, (_, i) => `batch-swap-${i}`);
     const fabricated = await fabricatedNodes(signer, leafIds, 100_000n);

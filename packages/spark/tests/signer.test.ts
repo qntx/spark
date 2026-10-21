@@ -48,6 +48,7 @@ import { ProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkOperator, SparkSigner } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import { seededRandom } from "./support/fakes.ts";
 import {
   be32,
   frostGroup,
@@ -107,20 +108,6 @@ const backend = async (): Promise<SparkCrypto> => {
   cryptoPromise ??= loadWasmBackend();
   return cryptoPromise;
 };
-
-/** Deterministic non-repeating "randomness" — distinct sha256 blocks per call. */
-function seededRandom(seed: Uint8Array): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let offset = 0; offset < length; offset += 32) {
-      const block = sha256(concatBytes(seed, be32(BigInt(counter))));
-      counter += 1;
-      out.set(block.subarray(0, Math.min(32, length - offset)), offset);
-    }
-    return out;
-  };
-}
 
 async function signerFor(
   seedHex: string,

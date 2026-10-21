@@ -51,6 +51,7 @@ import {
   validateCoopExitPayoutTransaction,
 } from "../src/core/bitcoin/validate.ts";
 import { SparkInputError } from "../src/errors/index.ts";
+import { required } from "./support/fakes.ts";
 
 type TxResult = { tx: string; sighash: string };
 
@@ -126,13 +127,6 @@ const vectors = JSON.parse(
 };
 
 // Module-level helpers keep test bodies free of conditionals (vitest lint rule).
-
-function required<T>(value: T | null | undefined, what: string): T {
-  if (value === undefined || value === null) {
-    throw new Error(`${what}: missing`);
-  }
-  return value;
-}
 
 function parent(): Uint8Array {
   return hexToBytes(PARENT_TX);

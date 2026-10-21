@@ -13,6 +13,7 @@ import { ChallengeSchema, SparkAuthnService } from "../src/proto/gen/spark_authn
 import type { SparkService } from "../src/proto/gen/spark_pb.ts";
 import { CancelTransferRequestSchema } from "../src/proto/gen/spark_pb.ts";
 import { mapTransfer, prepareTransferPackage, queryTransferById } from "../src/transfer/index.ts";
+import { required } from "./support/fakes.ts";
 import {
   bitcoinRpc,
   CLAIM_DEADLINE_MS,
@@ -28,13 +29,6 @@ import {
 const EXPIRY_MS = 90_000;
 // Expiry plus a bit over two 1-minute cancel_expired_transfers task cycles.
 const PROBE_UNTIL_EXTRA_MS = 150_000;
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not present`);
-  }
-  return value;
-}
 
 /** Re-queries the transfer every ~30 s until `untilMs`, logging each observed status. */
 async function pollTransferStatus(

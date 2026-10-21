@@ -10,7 +10,6 @@ import type { ClientContext } from "../src/client/context.ts";
 import { createWithdrawals } from "../src/client/withdrawals.ts";
 import {
   btcNetwork,
-  createCurrentTimelockRefundTxs,
   EPHEMERAL_ANCHOR_SCRIPT,
   p2trScriptFromPublicKey,
   p2trAddressFromPublicKey,
@@ -21,7 +20,6 @@ import {
 } from "../src/core/bitcoin/index.ts";
 import { createMutex } from "../src/core/mutex.ts";
 import { sparkNetworkConfig } from "../src/core/network.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import {
   cooperativeExit,
@@ -51,19 +49,14 @@ import type { SparkSigner, FrostSignJob } from "../src/signer/index.ts";
 import type { SspClient, SspCoopExitRequest, SspCoopExitResult } from "../src/ssp/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import {
+  fabricateSignedLeaf,
+  fixedRandom,
+  OPERATORS,
+  required,
+  THRESHOLD,
+} from "./support/fakes.ts";
 
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
-const THRESHOLD = 2;
 const SSP_SECRET = new Uint8Array(32).fill(21);
 const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
 const WITHDRAW_KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(77), true);
@@ -75,97 +68,6 @@ function jobLeafId(job: FrostSignJob): string {
     throw new Error("expected a leaf job");
   }
   return job.key.leafId;
-}
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
-
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
-  };
-}
-
-const SHARE_SECRET = 0x5ea5n;
-const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
-function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-  return secp256k1.Point.fromBytes(SHARE_PUB)
-    .add(secp256k1.Point.fromBytes(signingPublicKey))
-    .toBytes(true);
-}
-
-/** A leaf with parseable node/refund txs, like lightning.test.ts's fixture. */
-async function fabricateLeaf(
-  signer: SparkSigner,
-  options: {
-    leafId: string;
-    valueSats?: bigint;
-    directNodeTx?: boolean;
-    /** A non-zero node timelock is what makes a direct refund exist for the leaf. */
-    nodeSequence?: number;
-    /** Refund timelock; below 200 the leaf is stale and renews before leaving the wallet. */
-    refundSequence?: number;
-  },
-): Promise<SparkLeaf> {
-  const signingPublicKeys = await signer.publicKeys([{ type: "leaf", leafId: options.leafId }]);
-  const signingPublicKey = required(signingPublicKeys[0], "leaf signing key");
-  const ownerIdentityPublicKey = await signer.identityPublicKey();
-  const verifyingKey = verifyingKeyFor(signingPublicKey);
-  const nodeTx = new Transaction({ allowUnknownOutputs: true });
-  nodeTx.addInput({
-    txid: new Uint8Array(32).fill(7),
-    index: 0,
-    sequence: options.nodeSequence ?? 0,
-  });
-  nodeTx.addOutput({
-    script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-    amount: options.valueSats ?? 100_000n,
-  });
-  const nodeTxBytes = nodeTx.toBytes(true);
-  const refundTx = createCurrentTimelockRefundTxs({
-    nodeTx: nodeTxBytes,
-    sequence: options.refundSequence ?? 2000,
-    receivingPublicKey: signingPublicKey,
-    network: "regtest",
-  }).cpfpRefund.txBytes;
-  let directTx: Uint8Array | undefined;
-  if (options.directNodeTx === true) {
-    const direct = new Transaction({ allowUnknownOutputs: true });
-    direct.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
-    direct.addOutput({
-      script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-      amount: (options.valueSats ?? 100_000n) - 330n,
-    });
-    directTx = direct.toBytes(true);
-  }
-  return {
-    id: options.leafId,
-    treeId: `tree-${options.leafId}`,
-    valueSats: Number(options.valueSats ?? 100_000n),
-    status: "AVAILABLE",
-    nodeTx: nodeTxBytes,
-    refundTx,
-    ...(directTx === undefined ? {} : { directTx }),
-    verifyingPublicKey: verifyingKey,
-    ownerIdentityPublicKey,
-    ownerSigningPublicKey: signingPublicKey,
-    signingKeyshare: {
-      ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-      threshold: THRESHOLD,
-      publicKey: SHARE_PUB,
-    },
-    vout: 0,
-  };
 }
 
 /** A payout transaction paying `amountSats` to `address` — the SSP's raw_coop_exit_transaction. */
@@ -682,7 +584,7 @@ describe("quoteCooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(base, { leafId: "leaf-q" });
+    const leaf = await fabricateSignedLeaf(base, { leafId: "leaf-q" });
     const { ssp, quotes } = fakeSsp({
       coopExitFeeQuote: () => ({ fees: { fast: 101, medium: 67, slow: 33 } }),
     });
@@ -710,8 +612,8 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf1 = await fabricateLeaf(signer0, { leafId: "leaf-1", valueSats: 60_000n });
-    const leaf2 = await fabricateLeaf(signer0, {
+    const leaf1 = await fabricateSignedLeaf(signer0, { leafId: "leaf-1", valueSats: 60_000n });
+    const leaf2 = await fabricateSignedLeaf(signer0, {
       leafId: "leaf-2",
       valueSats: 40_000n,
       directNodeTx: true,
@@ -853,7 +755,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-f", valueSats: 60n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-f", valueSats: 60n });
     const { deps, exitRequests } = await exitDeps({
       leaves: [leaf],
       fees: { fast: 100, medium: 50, slow: 10 },
@@ -868,7 +770,7 @@ describe("cooperativeExit", () => {
     ).rejects.toThrow("exceeds maxFeeSats");
     // SLOW fee 10 equals the 60-sat leaf total minus... 10 < 60 fine, but fee >= total fails.
     const { deps: deps2 } = await exitDeps({
-      leaves: [await fabricateLeaf(signer0, { leafId: "leaf-g", valueSats: 50n })],
+      leaves: [await fabricateSignedLeaf(signer0, { leafId: "leaf-g", valueSats: 50n })],
       fees: { fast: 100, medium: 50, slow: 50 },
     });
     await expect(
@@ -888,7 +790,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-v", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-v", valueSats: 100_000n });
     const options = { address: WITHDRAW_ADDRESS, speed: "SLOW" as const, maxFeeSats: 100 };
 
     const otherTx = payoutTxFor(WITHDRAW_ADDRESS, 99_990);
@@ -931,7 +833,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-c", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-c", valueSats: 100_000n });
     const options = { address: WITHDRAW_ADDRESS, speed: "SLOW" as const, maxFeeSats: 100 };
 
     const wrongParent = await exitDeps({
@@ -968,7 +870,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-t", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-t", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const { deps } = await exitDeps({
       leaves: [leaf],
@@ -993,7 +895,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-r", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-r", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const recovered = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1028,7 +930,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-x", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-x", valueSats: 100_000n });
     const { deps } = await exitDeps({
       leaves: [leaf],
       cooperative_exit_v2: async () => Promise.reject(new SparkRequestError("response lost")),
@@ -1045,7 +947,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-w", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-w", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1076,7 +978,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-s", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-s", valueSats: 100_000n });
     const options = { address: WITHDRAW_ADDRESS, speed: "SLOW" as const, maxFeeSats: 100 };
 
     // First completion fails; the status read shows the SSP already accepted the request.
@@ -1127,7 +1029,7 @@ describe("cooperativeExit", () => {
     const identityPublicKey = await signer0.identityPublicKey();
     // Refund timelock 100 is below the renewal threshold; the node timelock is already zero,
     // so the leaf takes the zero-timelock renewal path.
-    const staleLeaf = await fabricateLeaf(signer0, {
+    const staleLeaf = await fabricateSignedLeaf(signer0, {
       leafId: "leaf-stale",
       valueSats: 60_000n,
       refundSequence: 100,
@@ -1241,7 +1143,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-p", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-p", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const payoutTx = payoutTxFor(WITHDRAW_ADDRESS, 99_990);
     const connectorTx = connectorTxFor(txId(payoutTx), 2);
@@ -1296,7 +1198,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-f", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-f", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const payoutTx = payoutTxFor(WITHDRAW_ADDRESS, 99_990);
     const connectorTx = connectorTxFor(txId(payoutTx), 2);
@@ -1336,7 +1238,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-q", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-q", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1383,7 +1285,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-c", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-c", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     // The committed refunds were signed against a different connector — the returned request
     // belongs to another exit, so its payout/fee must not be trusted or completed.
@@ -1422,7 +1324,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-n", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-n", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1453,7 +1355,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-t", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-t", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1485,7 +1387,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-b", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-b", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1522,7 +1424,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-e", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-e", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
@@ -1554,7 +1456,7 @@ describe("cooperativeExit", () => {
       network: "regtest",
       random: fixedRandom(),
     });
-    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-xp", valueSats: 100_000n });
+    const leaf = await fabricateSignedLeaf(signer0, { leafId: "leaf-xp", valueSats: 100_000n });
     const { deps, calls, frostJobs, deleted, completions } = await exitDeps({
       leaves: [leaf],
       requestStatus: "EXPIRED",

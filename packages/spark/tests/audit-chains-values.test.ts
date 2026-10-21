@@ -47,6 +47,7 @@ import { mapTransfer, swapLeaves } from "../src/transfer/index.ts";
 import { malformedLeafTx, mapTreeNode } from "../src/tree/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import { required } from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 // Regression coverage for external-audit H-01 and H-02 (PoCs d1 and d3, reversed):
@@ -57,12 +58,6 @@ const OPERATORS = sparkNetworkConfig("regtest").operators;
 const THRESHOLD = 2;
 const COORDINATOR = OPERATORS[0]!.identifier;
 const SHARE_PUB = secp256k1.getPublicKey(new Uint8Array(32).fill(11), true);
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`required ${name} missing`);
-  }
-  return value;
-}
 
 const LEAF_ID = "leaf-1";
 const LEAF_SECRET = new Uint8Array(32).fill(42);

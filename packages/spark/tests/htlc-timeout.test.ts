@@ -8,6 +8,7 @@ import { p2trScriptFromPublicKey, p2wpkhAddressFromPublicKey } from "../src/core
 import { txIdInputBytes } from "../src/core/bitcoin/transactions.ts";
 import { sweepHtlcTimeout } from "../src/lightning/htlc-timeout.ts";
 import type { HtlcTimeoutSignRequest, SparkSigner } from "../src/signer/types.ts";
+import { required } from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 const SSP_IDENTITY = secp256k1.getPublicKey(new Uint8Array(32).fill(0x53), true);
@@ -16,13 +17,6 @@ const DESTINATION = p2wpkhAddressFromPublicKey(
   secp256k1.getPublicKey(new Uint8Array(32).fill(0x44), true),
   "regtest",
 );
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name}: missing`);
-  }
-  return value;
-}
 
 function parentTx(amountSats: bigint): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });

@@ -4,6 +4,7 @@ import { describe, expect, test } from "vite-plus/test";
 import { decodeSparkAddress } from "../src/core/address.ts";
 import { selectLeaves } from "../src/tree/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
+import { required } from "./support/fakes.ts";
 import type { HostedWallet } from "./support/hosted.ts";
 import { hostedSeed, hostedWallet } from "./support/hosted.ts";
 import { claimPendingUntil } from "./support/local.ts";
@@ -102,13 +103,6 @@ function pickMultiLeafSwap(leaves: ReadonlyArray<SparkLeaf>): number | undefined
     }
   }
   return undefined;
-}
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not produced`);
-  }
-  return value;
 }
 
 type MultiSwapSender = {

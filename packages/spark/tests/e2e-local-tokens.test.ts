@@ -9,6 +9,7 @@ import { SparkError } from "../src/errors/index.ts";
 import type { PartialTokenTransaction } from "../src/proto/gen/spark_token_pb.ts";
 import type { SparkSigner } from "../src/signer/types.ts";
 import { broadcastPartialTokenTransaction } from "../src/tokens/index.ts";
+import { requiredIdentifier } from "./support/fakes.ts";
 import { LOCAL_OPERATORS, localFetch, localWallet, sleep } from "./support/local.ts";
 
 const TOKENS = sparkNetworkConfig("regtest").tokens;
@@ -167,13 +168,6 @@ async function outputsUntil(
     // oxlint-disable-next-line no-await-in-loop -- polling is sequential by definition
     await sleep(1000);
   }
-}
-
-function requiredIdentifier(value: Uint8Array | undefined): Uint8Array {
-  if (value === undefined) {
-    throw new SparkError("create broadcast did not return a token identifier");
-  }
-  return value;
 }
 
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO tokens", () => {

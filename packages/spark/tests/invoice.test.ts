@@ -1,30 +1,16 @@
 import { create } from "@bufbuild/protobuf";
 import type { Client } from "@connectrpc/connect";
-import { createRouterTransport } from "@connectrpc/connect";
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { numberToBytesBE, numberToVarBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
-import { createSparkClientWith } from "../src/client/index.ts";
 import { encodeSparkAddress } from "../src/core/address.ts";
-import {
-  createCurrentTimelockRefundTxs,
-  p2trScriptFromPublicKey,
-} from "../src/core/bitcoin/index.ts";
 import { encodeInvoiceFields } from "../src/core/invoice.ts";
 import type { SparkInvoiceFields } from "../src/core/invoice.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { finalizeTokenInvoice, prepareTokenInvoice } from "../src/core/token-invoice.ts";
 import { SparkError, SparkInputError } from "../src/errors/index.ts";
-import { createMemorySparkStore } from "../src/exit/store.ts";
 import { createSatsInvoice, createTokensInvoice, parseSparkInvoice } from "../src/invoice/index.ts";
-import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
 import {
   GetSigningCommitmentsResponseSchema,
   HashVariant,
@@ -33,8 +19,6 @@ import {
   QueryNodesResponseSchema,
   QuerySparkInvoicesResponseSchema,
   QueryTransfersResponseSchema,
-  RequestedSigningCommitmentsSchema,
-  SparkService,
   StartTransferResponseSchema,
   TransferSchema,
   TransferStatus,
@@ -48,15 +32,12 @@ import type {
   StartTransferRequest,
   Transfer,
 } from "../src/proto/gen/spark_pb.ts";
-import {
-  CommitStatus,
-  SparkTokenService,
-  TokenOutputStatus,
-} from "../src/proto/gen/spark_token_pb.ts";
+import { CommitStatus, TokenOutputStatus } from "../src/proto/gen/spark_token_pb.ts";
 import type {
   BroadcastTransactionRequest,
   BroadcastTransactionResponse,
   QueryTokenOutputsResponse,
+  SparkTokenService,
 } from "../src/proto/gen/spark_token_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
@@ -64,19 +45,17 @@ import { buildTransferPartial, broadcastPartialTokenTransaction } from "../src/t
 import type { TokenNetworkParams } from "../src/tokens/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import {
+  commitmentGroup,
+  fabricateLeaf,
+  fixedRandom,
+  makeTestClient,
+  OPERATORS,
+  required,
+  SHARE_PUB,
+  THRESHOLD,
+} from "./support/fakes.ts";
 
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
-const THRESHOLD = 2;
 const LEAF_ID = "01989abc-def0-7abc-89ab-cdef01234567";
 const NOW = 1_700_000_000_000;
 const TOKEN_ID = hexToBytes("ab".repeat(32));
@@ -87,25 +66,6 @@ const TOKENS: TokenNetworkParams = {
   validityDurationSeconds: 180,
 };
 
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
-
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
-  };
-}
-
 async function testSigner(secretFill: number): Promise<SparkSigner> {
   return createSparkSigner({
     crypto: await loadWasmBackend(),
@@ -113,52 +73,6 @@ async function testSigner(secretFill: number): Promise<SparkSigner> {
     network: "regtest",
     random: fixedRandom(),
   });
-}
-
-/** Fabricated SO keyshare; the leaf verifying key is `share + user signing key`. */
-const SHARE_SECRET = 0x5ea5n;
-const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
-function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-  return secp256k1.Point.BASE.multiply(SHARE_SECRET)
-    .add(secp256k1.Point.fromBytes(signingPublicKey))
-    .toBytes(true);
-}
-
-function fabricateLeaf(options: {
-  signingPublicKey: Uint8Array;
-  ownerIdentityPublicKey: Uint8Array;
-}): SparkLeaf {
-  const verifyingKey = verifyingKeyFor(options.signingPublicKey);
-  const nodeTx = new Transaction({ allowUnknownOutputs: true });
-  nodeTx.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
-  nodeTx.addOutput({
-    script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-    amount: 100_000n,
-  });
-  const nodeTxBytes = nodeTx.toBytes(true);
-  const refundTx = createCurrentTimelockRefundTxs({
-    nodeTx: nodeTxBytes,
-    sequence: 2000,
-    receivingPublicKey: options.signingPublicKey,
-    network: "regtest",
-  }).cpfpRefund.txBytes;
-  return {
-    id: LEAF_ID,
-    treeId: `tree-${LEAF_ID}`,
-    valueSats: 100_000,
-    status: "AVAILABLE",
-    nodeTx: nodeTxBytes,
-    refundTx,
-    verifyingPublicKey: verifyingKey,
-    ownerIdentityPublicKey: options.ownerIdentityPublicKey,
-    ownerSigningPublicKey: options.signingPublicKey,
-    signingKeyshare: {
-      ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-      threshold: THRESHOLD,
-      publicKey: SHARE_PUB,
-    },
-    vout: 0,
-  };
 }
 
 function leafNode(leaf: SparkLeaf) {
@@ -184,23 +98,6 @@ function leafNode(leaf: SparkLeaf) {
   });
 }
 
-function commitmentGroup(count: number) {
-  const operatorCommitments = Object.fromEntries(
-    OPERATORS.map((op, i) => [
-      op.identifier,
-      {
-        hiding: secp256k1.Point.BASE.toBytes(true),
-        binding: secp256k1.Point.BASE.multiply(BigInt(i + 2)).toBytes(true),
-      },
-    ]),
-  );
-  return Array.from({ length: count }, () =>
-    create(RequestedSigningCommitmentsSchema, {
-      signingNonceCommitments: operatorCommitments,
-    }),
-  );
-}
-
 type SparkImpl = Partial<{
   query_nodes: (req: unknown) => unknown;
   get_signing_commitments: (req: GetSigningCommitmentsRequest) => unknown;
@@ -214,55 +111,23 @@ type TokenImpl = Partial<{
 }>;
 
 function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, tokenImpl?: TokenImpl) {
-  return createSparkClientWith(
-    {
-      network: "regtest",
-      signer,
-      fetch: async () => Promise.reject(new Error("no fetch")),
-      random: fixedRandom(),
-      now: () => NOW,
-      operators: OPERATORS,
-      store: createMemorySparkStore(),
+  return makeTestClient({
+    signer,
+    spark: sparkImpl,
+    token: {
+      query_token_outputs: (req: { tokenIdentifiers: Uint8Array[] }) =>
+        tokenImpl?.query_token_outputs?.(req) ?? {
+          $typeName: "spark_token.QueryTokenOutputsResponse",
+          outputsWithPreviousTransactionData: [],
+        },
+      broadcast_transaction: (req: BroadcastTransactionRequest) =>
+        tokenImpl?.broadcast_transaction?.(req) ?? {
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_FINALIZED,
+        },
     },
-    {
-      transportFactory: (interceptors) =>
-        createRouterTransport(
-          (router) => {
-            router.service(SparkAuthnService, {
-              get_challenge: (req) => ({
-                protectedChallenge: create(ProtectedChallengeSchema, {
-                  challenge: create(ChallengeSchema, {
-                    version: 1,
-                    timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                    nonce: new Uint8Array(4),
-                    publicKey: req.publicKey,
-                  }),
-                  serverHmac: new Uint8Array(4),
-                }),
-              }),
-              verify_challenge: () => ({
-                sessionToken: "so-tok",
-                expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-              }),
-            });
-            router.service(SparkService, sparkImpl as never);
-            router.service(SparkTokenService, {
-              query_token_outputs: (req) =>
-                tokenImpl?.query_token_outputs?.(req) ?? {
-                  $typeName: "spark_token.QueryTokenOutputsResponse",
-                  outputsWithPreviousTransactionData: [],
-                },
-              broadcast_transaction: (req) =>
-                tokenImpl?.broadcast_transaction?.(req) ?? {
-                  $typeName: "spark_token.BroadcastTransactionResponse",
-                  commitStatus: CommitStatus.COMMIT_FINALIZED,
-                },
-            });
-          },
-          { transport: { interceptors: [...interceptors] } },
-        ),
-    },
-  );
+    now: () => NOW,
+  });
 }
 
 /** Wraps a signer to capture the invoice bytes it was asked to sign. */
@@ -488,7 +353,8 @@ describe("client.invoices", () => {
   async function leafNodeFor(signer: SparkSigner) {
     const identity = await signer.identityPublicKey();
     const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
-    const leaf = fabricateLeaf({
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
       signingPublicKey: required(leafKey, "leaf public key"),
       ownerIdentityPublicKey: identity,
     });

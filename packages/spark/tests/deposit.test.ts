@@ -8,7 +8,6 @@ import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
-import { createSparkClientWith } from "../src/client/index.ts";
 import { u64ToSats } from "../src/core/assert.ts";
 import {
   addressToScript,
@@ -19,16 +18,10 @@ import {
   taprootKeySpendSighash,
 } from "../src/core/bitcoin/index.ts";
 import { proofOfPossessionDigest } from "../src/core/hashing/statements.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { queryUnusedDepositAddresses } from "../src/deposit/index.ts";
 import { SparkInputError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkStore } from "../src/exit/store.ts";
-import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
 import {
   AddressSchema,
   DepositAddressProofSchema,
@@ -55,29 +48,17 @@ import type {
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import {
+  fixedRandom,
+  makeTestClient,
+  OPERATOR_SECRETS,
+  OPERATORS,
+  required,
+} from "./support/fakes.ts";
 import { be32, taprootTweakedKey } from "./support/frost.ts";
 
 const COORDINATOR_ID = "0000000000000000000000000000000000000000000000000000000000000001";
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
 // Operator 0 is the coordinator — its address signature is skipped for single-use addresses.
-
-/** Unwraps values the router captures — a missing capture is a test bug, not a branch. */
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
 
 /** Full first page of 100, then a short page with one entry. */
 function pageBatch(offset: number): number[] {
@@ -106,19 +87,6 @@ function pagedUnusedAddresses(entryAddress: string, entryKey: Uint8Array) {
       ),
       offset: batch.length === 100 ? BigInt(offset + batch.length) : -1n,
     });
-  };
-}
-
-/** Deterministic byte stream for the signer and uuidv7. */
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
   };
 }
 
@@ -171,7 +139,7 @@ function fabricateDepositAddress(options: {
     }
     addressSignatures[operator.identifier] = secp256k1.sign(
       addressHash,
-      OPERATOR_SECRETS[operator.id]!,
+      required(OPERATOR_SECRETS[operator.id], "operator secret"),
       { format: "der", prehash: false },
     );
   }
@@ -206,42 +174,11 @@ function nodesQuery(served: () => ReadonlyArray<TreeNode>) {
 }
 
 function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStore) {
-  return createSparkClientWith(
-    {
-      network: "regtest",
-      signer,
-      fetch: async () => Promise.reject(new Error("no fetch")),
-      random: fixedRandom(),
-      operators: OPERATORS,
-      store: store ?? createMemorySparkStore(),
-    },
-    {
-      transportFactory: (interceptors) =>
-        createRouterTransport(
-          (router) => {
-            router.service(SparkAuthnService, {
-              get_challenge: (req) => ({
-                protectedChallenge: create(ProtectedChallengeSchema, {
-                  challenge: create(ChallengeSchema, {
-                    version: 1,
-                    timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                    nonce: new Uint8Array(4),
-                    publicKey: req.publicKey,
-                  }),
-                  serverHmac: new Uint8Array(4),
-                }),
-              }),
-              verify_challenge: () => ({
-                sessionToken: "so-tok",
-                expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-              }),
-            });
-            router.service(SparkService, sparkImpl as never);
-          },
-          { transport: { interceptors: [...interceptors] } },
-        ),
-    },
-  );
+  return makeTestClient({
+    signer,
+    spark: sparkImpl,
+    ...(store === undefined ? {} : { store }),
+  });
 }
 
 function depositTxTo(

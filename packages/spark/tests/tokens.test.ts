@@ -18,11 +18,7 @@ import {
   SparkTokenBroadcastError,
 } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
-import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
+import { SparkAuthnService } from "../src/proto/gen/spark_authn_pb.ts";
 import { Network, PageResponseSchema } from "../src/proto/gen/spark_pb.ts";
 import {
   CommitStatus,
@@ -51,16 +47,10 @@ import {
   transferWithInputIds,
 } from "../src/tokens/index.ts";
 import type { SparkTokenOutput, TokenNetworkParams } from "../src/tokens/index.ts";
+import { authnServiceImpl, required } from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 type BroadcastTxInit = MessageInitShape<typeof BroadcastTransactionRequestSchema>;
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`expected ${name}`);
-  }
-  return value;
-}
 
 function byteCompare(a: Uint8Array, b: Uint8Array): number {
   const shared = Math.min(a.length, b.length);
@@ -1173,23 +1163,7 @@ describe("client.tokens", () => {
         transportFactory: (interceptors) =>
           createRouterTransport(
             (router) => {
-              router.service(SparkAuthnService, {
-                get_challenge: (req) => ({
-                  protectedChallenge: create(ProtectedChallengeSchema, {
-                    challenge: create(ChallengeSchema, {
-                      version: 1,
-                      timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                      nonce: new Uint8Array(4),
-                      publicKey: req.publicKey,
-                    }),
-                    serverHmac: new Uint8Array(4),
-                  }),
-                }),
-                verify_challenge: () => ({
-                  sessionToken: "so-tok",
-                  expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-                }),
-              });
+              router.service(SparkAuthnService, authnServiceImpl);
               router.service(SparkTokenService, {
                 query_token_outputs: (req) =>
                   impl.query?.(req) ?? {
