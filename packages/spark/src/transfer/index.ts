@@ -14,6 +14,7 @@ export {
   queryPendingTransfers,
   queryTransferById,
   queryTransfersByIds,
+  verifyTransferAcrossOperators,
 } from "./query.ts";
 export type { CommittedTransferExpectation } from "./query.ts";
 export { prepareTransferPackage, sendTransfer } from "./send.ts";

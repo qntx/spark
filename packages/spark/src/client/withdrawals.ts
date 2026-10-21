@@ -44,6 +44,7 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
       cooperativeExit(
         {
           spark: coordinatorConnection.spark,
+          operatorSparks: context.otherConnections.map((connection) => connection.spark),
           ssp: context.sspClient,
           sspIdentityPublicKey: config.ssp.identityPublicKey,
           signer,

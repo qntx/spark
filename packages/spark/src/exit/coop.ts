@@ -36,6 +36,7 @@ import {
   assertLiveTransfer,
   queryCommittedTransfer,
   queryTransferById,
+  verifyTransferAcrossOperators,
 } from "../transfer/query.ts";
 import { prepareTransferPackage } from "../transfer/send.ts";
 import type { SparkLeaf } from "../tree/index.ts";
@@ -81,6 +82,8 @@ const COMPLETE_RETRY_DELAY_MS = 2000;
 export type CoopExitDeps = {
   /** Coordinator `spark` client. */
   readonly spark: Client<typeof SparkService>;
+  /** One client per non-coordinator operator — committed transfers are cross-verified on all. */
+  readonly operatorSparks: ReadonlyArray<Client<typeof SparkService>>;
   readonly ssp: SspClient;
   readonly sspIdentityPublicKey: Uint8Array;
   readonly signer: SparkSigner;
@@ -266,21 +269,22 @@ function requireConnectorMatchesCommittedRefunds(
 
 /**
  * Resumes an exit whose transfer already committed under `options.transferId`: the SSP request is
- * re-created for the committed leaf ids — the SSP dedupes on `userOutboundTransferExternalId`, so a
- * live request resolves to itself and an expired one is re-created — then validated and completed.
- * Before anything completes, the request is bound to the committed transfer: its connector must be
- * the transaction the committed intermediate refunds spend, and that connector must spend
- * `coopExitTxid` — so the fee and payout are the ones the first call priced and validated, which is
- * why `maxFeeSats` does not gate this path. A payout that does not pay `options.address` means the
- * id was reused with different terms — that fails rather than riding along.
+ * re-created for the cross-verified committed leaf ids — the SSP dedupes on
+ * `userOutboundTransferExternalId`, so a live request resolves to itself and an expired one is
+ * re-created — then validated and completed. Before anything completes, the request is bound to the
+ * committed transfer: every operator must serve the identical row, its connector must be the
+ * transaction the committed intermediate refunds spend, and that connector must spend
+ * `coopExitTxid`. The derived fee still gets a `maxFeeSats` ceiling — an already-committed exit
+ * priced higher than approved fails loud instead of silently overpaying. A payout that does not pay
+ * `options.address` means the id was reused with different terms — that fails rather than riding
+ * along.
  */
 async function resumeCommittedExit(
-  deps: CoopExitDeps & {
-    readonly deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
-  },
+  deps: CoopExitDeps,
   options: {
     readonly address: string;
     readonly speed: SspCoopExitSpeed;
+    readonly maxFeeSats: number;
     readonly transferId: string;
   },
   transfer: SparkTransfer,
@@ -297,11 +301,18 @@ async function resumeCommittedExit(
     },
     "coop exit",
   );
+  // The coordinator's word is not enough: every other operator must serve the identical transfer,
+  // intermediate refunds included — the connector binding below trusts them (L-05).
+  await verifyTransferAcrossOperators({
+    operators: deps.operatorSparks,
+    network,
+    transfer,
+    compareIntermediateRefunds: true,
+  });
 
-  // The transfer committed in an earlier call — deleting its old chains needs no lock: a
-  // leaves() sync only re-stores chains for leaves it just queried, and these are gone.
-  await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
-
+  // A probe hit deletes no chains and forwards only the verified leaf ids to the SSP: the leaves
+  // were committed in an earlier call, and the endorsed sync sweep reclaims them — a reported
+  // leaf list never decides deletions or the exit scope on its own (N-01).
   const request = await ssp.requestCoopExit({
     leafIds: transfer.leaves.map((leaf) => leaf.leaf.id),
     withdrawalAddress: options.address,
@@ -344,6 +355,15 @@ async function resumeCommittedExit(
   if (feeSats < 0) {
     throw new SparkError(
       `coop exit: payout ${payoutSats} exceeds the committed ${transfer.totalValueSats} sats`,
+    );
+  }
+  // The resume path derives its fee from the committed total minus the payout the SSP reports —
+  // a coordinator-plus-SSP pair could inflate it past what the caller ever approved. The exit is
+  // already committed, so this fails loud with the numbers rather than silently overpaying.
+  if (feeSats > options.maxFeeSats) {
+    throw new SparkError(
+      `coop exit: transfer ${transfer.id} is already committed; its derived fee ${feeSats} ` +
+        `exceeds maxFeeSats ${options.maxFeeSats} (payout ${payoutSats} sats)`,
     );
   }
 
@@ -586,11 +606,27 @@ export async function cooperativeExit(
       },
       "coop exit",
     );
+    await verifyTransferAcrossOperators({
+      operators: deps.operatorSparks,
+      network,
+      transfer,
+      compareIntermediateRefunds: true,
+    });
 
     // The leaves are committed under connector refunds now, so the old refund txs must not survive
-    // a failure on the completion call. The returned transfer — not the selected list — decides
-    // which leaves left the wallet: on a retry the SO may report the first-attempt leaves.
-    await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
+    // a failure on the completion call. Only leaf ids this call both selected and the verified
+    // transfer names are deleted — a reported list cannot strip other leaves' exit data (N-01).
+    const selected = new Set(leaves.map((leaf) => leaf.id));
+    const spent = [
+      ...new Set(
+        transfer.leaves
+          .map((transferLeaf) => transferLeaf.leaf.id)
+          .filter((leafId) => selected.has(leafId)),
+      ),
+    ];
+    if (spent.length > 0) {
+      await deps.deleteExitChains(spent);
+    }
 
     return { transfer, request, payoutSats, feeSats };
   });

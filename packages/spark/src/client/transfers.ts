@@ -13,6 +13,7 @@ import {
   queryPendingTransfers,
   queryTransferById,
   sendTransfer,
+  verifyTransferAcrossOperators,
 } from "../transfer/index.ts";
 import type { CommittedTransferExpectation, SparkTransfer } from "../transfer/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
@@ -78,14 +79,20 @@ export async function sendSats(
 
   // Retry path: the id is already committed — resume on it. A present-but-mismatched transfer
   // means the id was reused with different terms and must not ride along. The probe stays outside
-  // the leaf lock: it only reads. The committed transfer's chain deletion needs no lock either —
-  // a leaves() sync only re-stores chains for leaves it just queried, and these are gone.
+  // the leaf lock: it only reads. The coordinator's claim of a commit is not enough — every other
+  // operator must serve the identical transfer (L-05). A probe hit deletes no chains: the leaves
+  // were committed in an earlier call, and the endorsed sync sweep reclaims them — a reported leaf
+  // list must never decide deletions on its own (N-01).
   if (options.transferId !== undefined) {
     const found = await queryTransferById({ spark, network, transferId });
     if (found !== undefined) {
       assertLiveTransfer(found);
       assertCommittedTransfer(found, expected, "send");
-      await store.deleteExitChains(found.leaves.map((leaf) => leaf.leaf.id));
+      await verifyTransferAcrossOperators({
+        operators: context.otherConnections.map((connection) => connection.spark),
+        network,
+        transfer: found,
+      });
       return found;
     }
   }
@@ -127,16 +134,35 @@ export async function sendSats(
       sent = recovered;
     }
     // The returned transfer — fresh or recovered — must be the one we signed for: same id, type,
-    // sender and receiver set (the lightning-pay path asserts its fresh response the same way).
+    // sender and receiver set (the lightning-pay path asserts its fresh response the same way),
+    // and every other operator must serve it identically — a coordinator-fabricated response is
+    // neither a payment success nor a deletion witness.
     assertCommittedTransfer(sent, expected, "send");
-    // The returned transfer — not the locally selected list — decides which leaves left the wallet:
-    // on a retry the SO may report the first-attempt leaves. Responses echoing no leaves fall back
-    // to the selection (the send path always commits the leaves it built the package over).
+    await verifyTransferAcrossOperators({
+      operators: context.otherConnections.map((connection) => connection.spark),
+      network,
+      transfer: sent,
+    });
+    // Only leaves this call both selected locally AND the verified transfer names may lose their
+    // chains — the coordinator cannot strip the exit data of leaves it merely lists (N-01). On a
+    // retry the SO may report the first-attempt leaves; responses echoing no leaves fall back to
+    // the selection (the send path always commits the leaves it built the package over).
+    const selectedLeafIds = new Set(
+      allocations.flatMap((allocation) => allocation.leaves.map((leaf) => leaf.id)),
+    );
     const spentLeafIds =
       sent.leaves.length > 0
-        ? sent.leaves.map((transferLeaf) => transferLeaf.leaf.id)
-        : allocations.flatMap((allocation) => allocation.leaves.map((leaf) => leaf.id));
-    await store.deleteExitChains(spentLeafIds);
+        ? [
+            ...new Set(
+              sent.leaves
+                .map((transferLeaf) => transferLeaf.leaf.id)
+                .filter((leafId) => selectedLeafIds.has(leafId)),
+            ),
+          ]
+        : [...selectedLeafIds];
+    if (spentLeafIds.length > 0) {
+      await store.deleteExitChains(spentLeafIds);
+    }
     return sent;
   });
 }

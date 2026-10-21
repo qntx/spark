@@ -95,6 +95,64 @@ function sameOptionalBytes(a: Uint8Array | undefined, b: Uint8Array | undefined)
   return a === b || (a !== undefined && b !== undefined && equalBytes(a, b));
 }
 
+/** Every mapped field two rows for the same leaf id must share to count as one report. */
+export function sameLeafRow(a: SparkLeaf, b: SparkLeaf): boolean {
+  return (
+    a.id === b.id &&
+    a.treeId === b.treeId &&
+    a.valueSats === b.valueSats &&
+    a.status === b.status &&
+    a.vout === b.vout &&
+    a.parentNodeId === b.parentNodeId &&
+    a.signingKeyshare.threshold === b.signingKeyshare.threshold &&
+    equalBytes(a.signingKeyshare.publicKey, b.signingKeyshare.publicKey) &&
+    a.signingKeyshare.ownerIdentifiers.length === b.signingKeyshare.ownerIdentifiers.length &&
+    a.signingKeyshare.ownerIdentifiers.every(
+      (identifier, i) => identifier === b.signingKeyshare.ownerIdentifiers[i],
+    ) &&
+    equalBytes(a.nodeTx, b.nodeTx) &&
+    equalBytes(a.refundTx, b.refundTx) &&
+    equalBytes(a.verifyingPublicKey, b.verifyingPublicKey) &&
+    equalBytes(a.ownerIdentityPublicKey, b.ownerIdentityPublicKey) &&
+    equalBytes(a.ownerSigningPublicKey, b.ownerSigningPublicKey) &&
+    sameOptionalBytes(a.directTx, b.directTx) &&
+    sameOptionalBytes(a.directRefundTx, b.directRefundTx) &&
+    sameOptionalBytes(a.directFromCpfpRefundTx, b.directFromCpfpRefundTx)
+  );
+}
+
+/**
+ * Groups served leaf rows by id. Identical copies collapse to one row — honest paging over a
+ * mutating set can repeat a row. Two DIFFERENT rows for one id quarantine it: a coordinator can
+ * serve conflicting copies under different map keys to smuggle one row past the agreement checks,
+ * so a conflicted id is never spendable, never counted and never a deletion witness.
+ */
+export function dedupeLeafRows(leaves: ReadonlyArray<SparkLeaf>): {
+  readonly unique: SparkLeaf[];
+  readonly conflicted: string[];
+} {
+  const byId = new Map<string, SparkLeaf[]>();
+  for (const leaf of leaves) {
+    const rows = byId.get(leaf.id);
+    if (rows === undefined) {
+      byId.set(leaf.id, [leaf]);
+    } else {
+      rows.push(leaf);
+    }
+  }
+  const unique: SparkLeaf[] = [];
+  const conflicted: string[] = [];
+  for (const [id, rows] of byId) {
+    const [first] = rows;
+    if (first !== undefined && rows.every((row) => sameLeafRow(first, row))) {
+      unique.push(first);
+    } else {
+      conflicted.push(id);
+    }
+  }
+  return { unique, conflicted };
+}
+
 /**
  * Whether `leafPublicKey` — the wallet's `LEAF{leafId}` key — plus the operators' signing share
  * reaches the leaf's verifying key. The wallet can sign for the leaf only when it does; malformed

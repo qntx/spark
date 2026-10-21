@@ -1,5 +1,6 @@
 import type { CallOptions, Client } from "@connectrpc/connect";
 import { equalBytes } from "@noble/curves/utils.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
@@ -270,6 +271,146 @@ export async function queryTransferById(options: {
   }
   const transfer = transfers.find((candidate) => candidate.id === options.transferId);
   return transfer === undefined ? undefined : mapTransfer(transfer);
+}
+
+/**
+ * Names the first field on which the coordinator's committed transfer and another operator's copy
+ * disagree — undefined when they describe the same transfer. Only the terms a caller can act on
+ * count: the leaf id set decides which exit chains a commit spends, the receivers and total the
+ * payment terms, and the status class (live vs terminal) whether the id still resolves. Operator
+ * copies may legitimately lag inside one class, so statuses compare as classes and receiver-edge
+ * statuses not at all. `compareIntermediateRefunds` additionally binds the per-leaf intermediate
+ * refund transactions — the data coop-exit resume and lightning payment-hash checks trust.
+ */
+const isTerminalStatus = (status: string) => TERMINAL_TRANSFER_STATUSES.has(status);
+
+const transferEdges = (transfer: SparkTransfer) =>
+  transfer.receivers
+    .map(
+      (receiver) =>
+        `${receiver.id}:${bytesToHex(receiver.identityPublicKey)}:${receiver.amountSats}`,
+    )
+    .sort();
+
+const transferLeafIds = (transfer: SparkTransfer) =>
+  transfer.leaves.map((transferLeaf) => transferLeaf.leaf.id).sort();
+
+function transferRowMismatch(
+  reference: SparkTransfer,
+  candidate: SparkTransfer,
+  compareIntermediateRefunds: boolean,
+): string | undefined {
+  if (candidate.id !== reference.id) {
+    return "id";
+  }
+  if (candidate.type !== reference.type) {
+    return "type";
+  }
+  if (isTerminalStatus(candidate.status) !== isTerminalStatus(reference.status)) {
+    return "status";
+  }
+  if (!equalBytes(candidate.senderIdentityPublicKey, reference.senderIdentityPublicKey)) {
+    return "senderIdentityPublicKey";
+  }
+  if (!equalBytes(candidate.receiverIdentityPublicKey, reference.receiverIdentityPublicKey)) {
+    return "receiverIdentityPublicKey";
+  }
+  if (candidate.totalValueSats !== reference.totalValueSats) {
+    return "totalValueSats";
+  }
+  const expectedEdges = transferEdges(reference);
+  const candidateEdges = transferEdges(candidate);
+  if (
+    expectedEdges.length !== candidateEdges.length ||
+    expectedEdges.some((edge, i) => edge !== candidateEdges[i])
+  ) {
+    return "receivers";
+  }
+  const leafIds = transferLeafIds;
+  const expectedIds = leafIds(reference);
+  const candidateIds = leafIds(candidate);
+  if (
+    expectedIds.length !== candidateIds.length ||
+    expectedIds.some((id, i) => id !== candidateIds[i])
+  ) {
+    return "leaves";
+  }
+  if (compareIntermediateRefunds) {
+    const byId = new Map(candidate.leaves.map((leaf) => [leaf.leaf.id, leaf]));
+    for (const transferLeaf of reference.leaves) {
+      const other = byId.get(transferLeaf.leaf.id);
+      if (
+        other === undefined ||
+        !equalBytes(other.intermediateRefundTx, transferLeaf.intermediateRefundTx) ||
+        !equalBytes(other.intermediateDirectRefundTx, transferLeaf.intermediateDirectRefundTx) ||
+        !equalBytes(
+          other.intermediateDirectFromCpfpRefundTx,
+          transferLeaf.intermediateDirectFromCpfpRefundTx,
+        )
+      ) {
+        return `intermediate refund txs of leaf ${transferLeaf.leaf.id}`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A committed transfer the coordinator reports must be the transfer every other operator recorded —
+ * a coordinator alone can fabricate `transfer.leaves` (deleting unrelated exit chains) or report a
+ * commit that never happened (a false payment success). Queries `query_transfers_by_id` for
+ * `transfer.id` on every non-coordinator operator and requires an identical row from each — every
+ * SO runs the same `QueryTransfersByID` handler (so/handler/transfer_handler.go:2086) over its own
+ * copy written during the commit, so a real commit is served everywhere. Any operator error,
+ * missing row or differing field throws: an unverifiable commit is never treated as committed.
+ */
+export async function verifyTransferAcrossOperators(options: {
+  /** One client per non-coordinator operator. */
+  readonly operators: ReadonlyArray<Client<typeof SparkService>>;
+  readonly network: SparkNetwork;
+  /** The coordinator's already-asserted transfer, used as the reference row. */
+  readonly transfer: SparkTransfer;
+  /** Also compare the per-leaf intermediate refund transactions (coop exit, lightning). */
+  readonly compareIntermediateRefunds?: boolean;
+  readonly call?: CallOptions;
+}): Promise<void> {
+  const { operators, network, transfer } = options;
+  await Promise.all(
+    operators.map(async (spark) => {
+      const rows = await queryTransfersByIds({
+        spark,
+        transferIds: [transfer.id],
+        network,
+        ...(options.call === undefined ? {} : { call: options.call }),
+      }).catch((error: unknown) => {
+        throw new SparkError(
+          `committed transfer ${transfer.id} cannot be verified: an operator is unreachable`,
+          { cause: error },
+        );
+      });
+      const matching = rows.filter((row) => row.id === transfer.id);
+      const [row] = matching;
+      if (matching.length !== 1 || row === undefined) {
+        throw new SparkError(`committed transfer ${transfer.id} is not served by every operator`);
+      }
+      let candidate: SparkTransfer;
+      try {
+        candidate = mapTransfer(row);
+      } catch (error) {
+        throw new SparkError(`committed transfer ${transfer.id} is unmappable on an operator`, {
+          cause: error,
+        });
+      }
+      const field = transferRowMismatch(
+        transfer,
+        candidate,
+        options.compareIntermediateRefunds ?? false,
+      );
+      if (field !== undefined) {
+        throw new SparkError(`committed transfer ${transfer.id} ${field} differs across operators`);
+      }
+    }),
+  );
 }
 
 /**

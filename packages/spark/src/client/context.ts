@@ -1,17 +1,30 @@
+import { equalBytes } from "@noble/curves/utils.js";
+
 import type { OperatorConnection } from "../connection/index.ts";
 import { decodeSparkAddress, verifySparkAddressSignature } from "../core/address.ts";
 import { createMutex } from "../core/mutex.ts";
 import type { Mutex } from "../core/mutex.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
+import { sparkNetworkProto } from "../core/network.ts";
 import { decodeTokenIdentifier } from "../core/token-identifier.ts";
 import type { DepositCoordinator } from "../deposit/index.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
 import type { SparkStore } from "../exit/store.ts";
 import { queryExitChains } from "../exit/unilateral.ts";
+import { TreeNodeStatus } from "../proto/gen/spark_pb.ts";
+import type { TreeNode } from "../proto/gen/spark_pb.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import type { createSspClient } from "../ssp/index.ts";
 import type { TransferCoordinator } from "../transfer/index.ts";
-import { malformedLeafTx, operatorsDisagree, ownsLeaf, queryLeaves } from "../tree/index.ts";
+import {
+  dedupeLeafRows,
+  malformedLeafTx,
+  mapTreeNode,
+  operatorsDisagree,
+  ownsLeaf,
+  queryLeaves,
+  sameLeafRow,
+} from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { batchedPublicKeys } from "../tree/signing.ts";
 
@@ -53,6 +66,33 @@ export type ClientContext = {
   readonly tokenIdentifierForNetwork: (text: string) => Uint8Array;
 };
 
+/** SO `query_nodes` caps `nodeIds` at DefaultMaxQueryNodesByID. */
+const MAX_QUERY_NODE_IDS = 1000;
+
+/**
+ * The node statuses that prove a stored exit chain can never be broadcast again — deletion is
+ * justified only on this positive evidence (or unanimous owner change), never on absence from the
+ * AVAILABLE listing. ON_CHAIN is deliberately absent: upstream `MarkExitingNodes`
+ * (so/tree/tree.go:55-82) flips a leaf to it the moment its node tx confirms while the refund is
+ * still CSV-locked — the stored chain is exactly what the wallet needs to finish that exit. For the
+ * same reason PARENT_EXITED (non-terminal, drains to EXITED), CONSOLIDATED (exit-only node whose
+ * stored package is the exit path), FROZEN_BY_ISSUER, TRANSFER_LOCKED, RENEW_LOCKED and the retired
+ * SPLITTED/AGGREGATED keep their chains: the SO's own `IsTerminal`
+ * (so/ent/schema/schematype/treenode_status.go:285-312) does not mark them exited, and a leaf whose
+ * renewal split it keeps an owner it still has — internal_renew_handler.go:175 carries the owner
+ * key to the split node, so no owner-change evidence exists. Of `IsTerminal`'s statuses,
+ * LOST/REIMBURSED/CREATION_ABANDONED never reach the wire enum, leaving:
+ */
+const TERMINAL_CHAIN_STATUSES: ReadonlySet<number> = new Set([
+  // Refund tx confirmed — the exit completed (treenode_status.go:23-24).
+  TreeNodeStatus.EXITED,
+  // An ancestor's direct tx conflict-spent the outpoint the node's tx claims — terminal
+  // (treenode_status.go:43-46).
+  TreeNodeStatus.WATCHTOWER_EXITED,
+  // The swept output already has a co-signed spend — terminal (treenode_status.go:47-56).
+  TreeNodeStatus.WATCHTOWER_EXIT_RECOVERED,
+]);
+
 export function createClientContext(
   parts: Omit<
     ClientContext,
@@ -84,12 +124,12 @@ export function createClientContext(
   };
 
   // Syncing leaves is the reconciliation point: refresh every spendable leaf's exit chain and
-  // drop chains for leaves the coordinator no longer reports as ours. The coordinator can lie,
-  // so a leaf is spendable only when it is well-formed, held under our LEAF{id} key (ownership:
-  // our public key plus the operators' share reaches the verifying key), and reported
-  // identically by every operator — breez-spark-sdk refresh_leaves @956ff90. An owned leaf one
-  // operator does not report is withheld from the result but keeps its stored chain, so a
-  // lagging operator cannot make a just-claimed leaf look gone.
+  // drop chains only on operator-endorsed proof the leaf is gone for good (see the sweep below).
+  // The coordinator can lie, so a leaf is spendable only when it is well-formed, held under our
+  // LEAF{id} key (ownership: our public key plus the operators' share reaches the verifying key),
+  // and reported identically by every operator — breez-spark-sdk refresh_leaves @956ff90. An
+  // owned leaf one operator does not report is withheld from the result but keeps its stored
+  // chain, so a lagging operator cannot make a just-claimed leaf look gone.
   const syncLeaves = async (): Promise<ReadonlyArray<SparkLeaf>> => {
     const ownerIdentityPublicKey = await signer.identityPublicKey();
     const [coordinatorResult, ...operatorResults] = await Promise.all([
@@ -106,37 +146,32 @@ export function createClientContext(
         }),
       ),
     ]);
-    const coordinatorLeaves = coordinatorResult.leaves;
+    // A party can serve the same leaf id under two map keys (honest paging overlap repeats rows
+    // too). Identical copies dedupe to one row; two DIFFERENT rows for one id are unverifiable and
+    // quarantine the id — it is never spendable, never counted in the balance, and never a
+    // deletion witness this sync (otherwise a coordinator could pair a tampered copy with an
+    // honest one to smuggle a leaf past the agreement checks).
+    const coordinatorRows = dedupeLeafRows(coordinatorResult.leaves);
+    const operatorRows = operatorResults.map((result) => dedupeLeafRows(result.leaves));
+    const conflictedIds = new Set(coordinatorRows.conflicted);
+    for (const rows of operatorRows) {
+      for (const id of rows.conflicted) {
+        conflictedIds.add(id);
+      }
+    }
 
     // An ancestor of another reported node is not a leaf, whatever status it carries.
     const parentIds = new Set<string>();
-    for (const leaf of coordinatorLeaves) {
+    for (const leaf of coordinatorRows.unique) {
       if (leaf.parentNodeId !== undefined) {
         parentIds.add(leaf.parentNodeId);
       }
     }
-    const reported = coordinatorLeaves.filter(
+    const reported = coordinatorRows.unique.filter(
       (leaf) => !parentIds.has(leaf.id) && malformedLeafTx(leaf) === undefined,
     );
 
-    // A coordinator row that failed to map never reaches `reported`, and an operator row that
-    // failed to map is absent from that operator's map — both already read as unverifiable and
-    // are quarantined below; they only matter here as still-reported ids for the chain sweep.
-    const reportedIds = new Set<string>(coordinatorResult.unmappableIds);
-    for (const leaf of coordinatorLeaves) {
-      reportedIds.add(leaf.id);
-    }
-    for (const result of operatorResults) {
-      for (const leaf of result.leaves) {
-        reportedIds.add(leaf.id);
-      }
-      for (const id of result.unmappableIds) {
-        reportedIds.add(id);
-      }
-    }
-
     const ownedIds = new Set<string>();
-    const notOwnedIds = new Set<string>();
     const keys = await batchedPublicKeys(
       signer,
       reported.map((leaf) => ({ type: "leaf", leafId: leaf.id })),
@@ -148,22 +183,12 @@ export function createClientContext(
       }
       if (ownsLeaf(leaf, leafPublicKey)) {
         ownedIds.add(leaf.id);
-      } else {
-        notOwnedIds.add(leaf.id);
       }
     }
 
-    // Paging over a set an operator is concurrently mutating can return the same leaf on more
-    // than one page; like Breez, keep the first occurrence.
-    const operatorMaps = operatorResults.map(({ leaves: operatorLeaves }) => {
-      const byId = new Map<string, SparkLeaf>();
-      for (const leaf of operatorLeaves) {
-        if (!byId.has(leaf.id)) {
-          byId.set(leaf.id, leaf);
-        }
-      }
-      return byId;
-    });
+    const operatorMaps = operatorRows.map(
+      ({ unique }) => new Map(unique.map((leaf) => [leaf.id, leaf])),
+    );
     const spendable = reported.filter(
       (leaf) =>
         ownedIds.has(leaf.id) &&
@@ -180,34 +205,152 @@ export function createClientContext(
     const rejectedIds = new Set(await storeChainsFor(spendable));
     const usable = spendable.filter((leaf) => !rejectedIds.has(leaf.id));
     const chains = await store.exitChains();
-    // A stored chain is the wallet's offline-exit data, so deleting one takes more than the
-    // coordinator's word. Drop a chain only when no operator reported the id at all in this
-    // sync — mapped or unmappable — or when the coordinator's row is not owned AND every other
-    // operator serves a row agreeing with it: the operators then collectively attest the leaf
-    // is no longer ours, as when a transferred-away leaf still shows up under our identity. A
-    // coordinator-side omission, or a coordinator-tampered row another operator contradicts,
-    // must not erase the chain the wallet would need to exit around a hostile coordinator.
-    const reportedById = new Map(reported.map((leaf) => [leaf.id, leaf]));
-    const attestedNotOwnedIds = new Set<string>();
-    for (const leafId of notOwnedIds) {
-      const coordinatorLeaf = reportedById.get(leafId);
-      if (
-        coordinatorLeaf !== undefined &&
-        operatorMaps.every((byId) => {
-          const operatorLeaf = byId.get(leafId);
-          return operatorLeaf !== undefined && !operatorsDisagree(coordinatorLeaf, operatorLeaf);
-        })
-      ) {
-        attestedNotOwnedIds.add(leafId);
+    // A stored chain is the wallet's offline-exit data — deleting one takes operator-endorsed
+    // positive evidence, never mere absence from this sync's AVAILABLE listing: a leaf mid
+    // unilateral exit flips to ON_CHAIN (its node tx confirmed while the refund is still
+    // CSV-locked, MarkExitingNodes) and simply stops being listed, so "not reported" must not
+    // erase the chain the wallet needs right then. Every stored id outside this sync's spendable
+    // set is re-queried by node id — no status filter — from EVERY operator; a chain is deleted
+    // only when every operator answers and either none of them serves the node at all, or all
+    // serve the same row showing it is no longer exitable by this wallet (owner changed, a
+    // TERMINAL_CHAIN_STATUSES status, or a row the wallet's key math cannot own). Any
+    // operator error, a missing row on some but not all
+    // operators, disagreement, or a conflicting-row id keeps the chain.
+    const spendableIds = new Set(spendable.map((leaf) => leaf.id));
+    const candidates: string[] = [];
+    for (const chain of chains) {
+      if (!spendableIds.has(chain.leafId) && !conflictedIds.has(chain.leafId)) {
+        candidates.push(chain.leafId);
       }
     }
-    const stale = chains
-      .map((chain) => chain.leafId)
-      .filter((leafId) => !reportedIds.has(leafId) || attestedNotOwnedIds.has(leafId));
+    const stale = await endorsedChainDeletions(candidates, ownerIdentityPublicKey);
     if (stale.length > 0) {
       await store.deleteExitChains(stale);
     }
     return usable;
+  };
+
+  /**
+   * The stored-chain ids every operator agrees are gone for good. Queries `leafIds` by node id — no
+   * status filter — from the coordinator and every other operator. An operator transport error
+   * fails the sweep closed: no deletions at all.
+   */
+  const endorsedChainDeletions = async (
+    leafIds: ReadonlyArray<string>,
+    ownerIdentityPublicKey: Uint8Array,
+  ): Promise<ReadonlyArray<string>> => {
+    if (leafIds.length === 0) {
+      return [];
+    }
+    const clients = [
+      coordinatorConnection.spark,
+      ...otherConnections.map((connection) => connection.spark),
+    ];
+    let maps: ReadonlyArray<ReadonlyMap<string, TreeNode[]>>;
+    try {
+      maps = await Promise.all(
+        clients.map(async (spark) => {
+          const rows = new Map<string, TreeNode[]>();
+          for (let i = 0; i < leafIds.length; i += MAX_QUERY_NODE_IDS) {
+            // oxlint-disable-next-line no-await-in-loop -- chunks are sequential by design
+            const response = await spark.query_nodes({
+              source: {
+                case: "nodeIds",
+                value: { nodeIds: leafIds.slice(i, i + MAX_QUERY_NODE_IDS) },
+              },
+              includeParents: false,
+              limit: 0n,
+              offset: 0n,
+              network: sparkNetworkProto(network),
+              statuses: [],
+            });
+            for (const node of Object.values(response.nodes)) {
+              const list = rows.get(node.id);
+              if (list === undefined) {
+                rows.set(node.id, [node]);
+              } else {
+                list.push(node);
+              }
+            }
+          }
+          return rows;
+        }),
+      );
+    } catch {
+      return [];
+    }
+    const stale: string[] = [];
+    const keyChecks = new Map<string, SparkLeaf>();
+    for (const leafId of leafIds) {
+      const served = maps.map((byId) => byId.get(leafId) ?? []);
+      // An operator serving two rows for the id cannot be evaluated — keep the chain.
+      if (served.some((rows) => rows.length > 1)) {
+        continue;
+      }
+      const rows = served.map((list) => list[0]);
+      if (rows.every((row) => row === undefined)) {
+        // Endorsed absence: every operator answered and none serves the node.
+        stale.push(leafId);
+        continue;
+      }
+      const present = rows.filter((row) => row !== undefined);
+      if (present.length !== rows.length) {
+        continue;
+      }
+      const [reference] = present;
+      if (reference === undefined) {
+        continue;
+      }
+      // "All agree" means literally the same row on every operator: a coordinator whose row
+      // differs on any mapped field cannot borrow the other rows' verdict, and a row that
+      // cannot be mapped cannot vouch for anything.
+      const mapped: SparkLeaf[] = [];
+      let unmappable = false;
+      for (const row of present) {
+        try {
+          mapped.push(mapTreeNode(row));
+        } catch {
+          unmappable = true;
+          break;
+        }
+      }
+      const [referenceLeaf] = mapped;
+      if (unmappable || referenceLeaf === undefined) {
+        continue;
+      }
+      const agree =
+        present.every((row) => row.treenodeStatus === reference.treenodeStatus) &&
+        mapped.every((leaf) => sameLeafRow(referenceLeaf, leaf));
+      if (!agree) {
+        continue;
+      }
+      const notOurs =
+        reference.ownerIdentityPublicKey.length === 33 &&
+        !equalBytes(reference.ownerIdentityPublicKey, ownerIdentityPublicKey);
+      if (notOurs || TERMINAL_CHAIN_STATUSES.has(reference.treenodeStatus)) {
+        stale.push(leafId);
+        continue;
+      }
+      // A unanimously served row the wallet cannot sign for — its leaf key plus the reported
+      // keyshare does not reach the verifying key — is endorsed evidence the leaf is not
+      // exitable here, the same judgement the spendable filter made on it.
+      keyChecks.set(leafId, referenceLeaf);
+    }
+    if (keyChecks.size > 0) {
+      const ids = [...keyChecks.keys()];
+      const keys = await batchedPublicKeys(
+        signer,
+        ids.map((leafId) => ({ type: "leaf", leafId })),
+      );
+      for (const [i, leafId] of ids.entries()) {
+        const leaf = keyChecks.get(leafId);
+        const leafPublicKey = keys[i];
+        if (leaf !== undefined && leafPublicKey !== undefined && !ownsLeaf(leaf, leafPublicKey)) {
+          stale.push(leafId);
+        }
+      }
+    }
+    return stale;
   };
 
   /** Resolves a spark address string or raw identity public key to the receiver's identity key. */

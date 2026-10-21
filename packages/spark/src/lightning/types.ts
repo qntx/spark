@@ -9,6 +9,8 @@ import type { SspClient } from "../ssp/index.ts";
 export type LightningDeps = {
   /** Coordinator `spark` client. */
   readonly spark: Client<typeof SparkService>;
+  /** One client per non-coordinator operator — committed transfers are cross-verified on all. */
+  readonly operatorSparks: ReadonlyArray<Client<typeof SparkService>>;
   readonly ssp: SspClient;
   readonly sspIdentityPublicKey: Uint8Array;
   readonly signer: SparkSigner;
