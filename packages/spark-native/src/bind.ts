@@ -11,13 +11,17 @@ function asArrayBuffer(view: Uint8Array): ArrayBuffer {
   return new Uint8Array(view).buffer;
 }
 
-/** Maps `qntx_spark:<code>` errors raised by the C++ side to `SparkCryptoError`. */
+/**
+ * Maps `qntx_spark:<code>` errors raised by the C++ side to `SparkCryptoError`. Nitro rethrows C++
+ * exceptions as `funcName + ": " + e.what()` (HybridFunction.hpp), so the code may sit at the end
+ * of the message after the function prefix.
+ */
 function call<T>(invoke: () => T): T {
   try {
     return invoke();
   } catch (error) {
     if (error instanceof Error) {
-      const code = /^qntx_spark:(\d+)$/.exec(error.message)?.[1];
+      const code = /(?:^|: )qntx_spark:(\d+)$/.exec(error.message)?.[1];
       if (code !== undefined) {
         throw new SparkCryptoError(Number(code));
       }

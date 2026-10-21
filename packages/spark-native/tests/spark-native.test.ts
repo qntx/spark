@@ -171,6 +171,43 @@ describe("non-ABI errors", () => {
   });
 });
 
+describe("nitro-prefixed ABI errors", () => {
+  test("a function-prefixed qntx_spark:<code> maps to SparkCryptoError", async () => {
+    const { native } = await fakeSparkNative();
+    const broken = Object.create(native) as typeof native;
+    broken.frostSign = () => {
+      throw new Error("SparkNative.frostSign(...): qntx_spark:5");
+    };
+    const crypto = bindSparkNative(broken);
+    const error = syncThrow(() => crypto.frostSign(new Uint8Array(4)));
+    expect(error).toBeInstanceOf(SparkCryptoError);
+    expect((error as SparkCryptoError).code).toBe(5);
+  });
+
+  test("a bare qntx_spark:<code> message still maps", async () => {
+    const { native } = await fakeSparkNative();
+    const broken = Object.create(native) as typeof native;
+    broken.frostSign = () => {
+      throw new Error("qntx_spark:5");
+    };
+    const crypto = bindSparkNative(broken);
+    const error = syncThrow(() => crypto.frostSign(new Uint8Array(4)));
+    expect(error).toBeInstanceOf(SparkCryptoError);
+    expect((error as SparkCryptoError).code).toBe(5);
+  });
+
+  test("an unrelated prefixed message is rethrown unchanged", async () => {
+    const { native } = await fakeSparkNative();
+    const broken = Object.create(native) as typeof native;
+    const failure = new Error("foo: bar");
+    broken.frostSign = () => {
+      throw failure;
+    };
+    const crypto = bindSparkNative(broken);
+    expect(syncThrow(() => crypto.frostSign(new Uint8Array(4)))).toBe(failure);
+  });
+});
+
 /** First ArrayBuffer recorded for `name` — throws if the hybrid never saw a call. */
 function firstReceived(received: Map<string, ArrayBuffer[]>, name: string): ArrayBuffer {
   const buffers = received.get(name) ?? [];
