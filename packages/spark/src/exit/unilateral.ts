@@ -1,13 +1,21 @@
 import type { CallOptions, Client } from "@connectrpc/connect";
+import { equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
-import { getTimelockFromSequence, parseTransaction, txId } from "../core/bitcoin/index.ts";
+import {
+  getTimelockFromSequence,
+  p2trScriptFromPublicKey,
+  parseTransaction,
+  txId,
+} from "../core/bitcoin/index.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
 import type { SparkService } from "../proto/gen/spark_pb.ts";
+import type { SparkSigner } from "../signer/types.ts";
 import { mapTreeNode } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
+import { batchedPublicKeys } from "../tree/signing.ts";
 import type { SparkExitChain } from "./store.ts";
 
 // Unilateral exit: the Spark tree's pre-signed transactions are already signed by
@@ -99,6 +107,7 @@ type Outpoint = { txid: string; vout: number };
 type LinkageCache = {
   readonly txids: Map<Uint8Array, string>;
   readonly input0: Map<Uint8Array, Outpoint>;
+  readonly output0: Map<Uint8Array, Uint8Array>;
   readonly verifiedLinks: Set<string>;
 };
 
@@ -143,18 +152,59 @@ function requireSpends(
   }
 }
 
+/** The script output 0 pays, parsed and memoized once per transaction. */
+function output0Script(txBytes: Uint8Array, what: string, cache: LinkageCache): Uint8Array {
+  const cached = cache.output0.get(txBytes);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const tx = parseTransaction(txBytes);
+  if (tx.outputsLength === 0) {
+    throw new SparkError(`unilateral exit: ${what} has no outputs`);
+  }
+  const { script } = tx.getOutput(0);
+  if (script === undefined) {
+    throw new SparkError(`unilateral exit: ${what} output 0 has no script`);
+  }
+  cache.output0.set(txBytes, script);
+  return script;
+}
+
+/**
+ * Fails closed on a transaction whose output 0 does not pay `expectedScript` — a served refund that
+ * looks structurally valid but pays another key would spend the exit to a stranger.
+ */
+function requirePaysScript(
+  txBytes: Uint8Array,
+  expectedScript: Uint8Array,
+  what: string,
+  cache: LinkageCache,
+): void {
+  if (!equalBytes(output0Script(txBytes, what, cache), expectedScript)) {
+    throw new SparkError(`unilateral exit: ${what} does not pay the leaf's key-path script`);
+  }
+}
+
 /**
  * Builds each requested leaf's storable exit chain from a node map. A requested id the map does not
- * hold is a `SparkInputError`, as is a node carrying no refund (not a leaf).
+ * hold is a `SparkInputError`, as is a node carrying no refund (not a leaf). Every refund must also
+ * pay the caller-supplied `refundScripts` entry — derived from the signer's own leaf key, never the
+ * node — so a served refund paying a stranger fails closed.
  */
 export function buildExitChains(
   leafIds: ReadonlyArray<string>,
   nodes: ReadonlyMap<string, SparkLeaf>,
+  refundScripts: ReadonlyMap<string, Uint8Array>,
 ): SparkExitChain[] {
   const chains: SparkExitChain[] = [];
   // Leaves share ancestors; each node→parent link is verified once and each
   // transaction is parsed and hashed once per call.
-  const cache: LinkageCache = { txids: new Map(), input0: new Map(), verifiedLinks: new Set() };
+  const cache: LinkageCache = {
+    txids: new Map(),
+    input0: new Map(),
+    output0: new Map(),
+    verifiedLinks: new Set(),
+  };
   for (const leafId of leafIds) {
     const requested = nodes.get(leafId);
     if (requested === undefined) {
@@ -207,6 +257,33 @@ export function buildExitChains(
       requireSpends(
         directRefundTx,
         { txid: cachedTxId(directTx, cache), vout: 0 },
+        `direct refund tx of leaf ${leafId}`,
+        cache,
+      );
+    }
+    // Structure alone is not enough — every refund must pay this leaf's own key-path script.
+    const expectedRefundScript = refundScripts.get(leafId);
+    if (expectedRefundScript === undefined) {
+      throw new SparkError(`unilateral exit: no expected refund script for leaf ${leafId}`);
+    }
+    requirePaysScript(
+      requested.refundTx,
+      expectedRefundScript,
+      `refund tx of leaf ${leafId}`,
+      cache,
+    );
+    if (directFromCpfpRefundTx !== undefined) {
+      requirePaysScript(
+        directFromCpfpRefundTx,
+        expectedRefundScript,
+        `direct-from-CPFP refund tx of leaf ${leafId}`,
+        cache,
+      );
+    }
+    if (directRefundTx !== undefined) {
+      requirePaysScript(
+        directRefundTx,
+        expectedRefundScript,
         `direct refund tx of leaf ${leafId}`,
         cache,
       );
@@ -279,18 +356,50 @@ export function exitTransactions(chains: ReadonlyArray<SparkExitChain>): ExitTra
 }
 
 /**
+ * The key-path script every refund of `leafIds` must pay: P2TR of the signer's own `LEAF{leafId}`
+ * public key — the key this client signs those refunds with — never a key the SO reports.
+ */
+async function leafRefundScripts(
+  signer: SparkSigner,
+  leafIds: ReadonlyArray<string>,
+  network: SparkNetwork,
+): Promise<ReadonlyMap<string, Uint8Array>> {
+  const keys = await batchedPublicKeys(
+    signer,
+    leafIds.map((leafId) => ({ type: "leaf", leafId })),
+  );
+  const scripts = new Map<string, Uint8Array>();
+  for (const [i, leafId] of leafIds.entries()) {
+    const key = keys[i];
+    if (key === undefined) {
+      throw new SparkError("unilateral exit: signer returned fewer public keys than requested");
+    }
+    scripts.set(leafId, p2trScriptFromPublicKey(key, network));
+  }
+  return scripts;
+}
+
+/**
  * Builds exit chains for leaves already in hand. Fetches only the ancestors the caller lacks
  * (parentNodeIds not among the given leaves) with `includeParents`, in `nodeIds` chunks of 1000 —
  * those ancestors existed before the claim/deposit, so looking them up by id does not depend on the
  * just-written leaf being indexed. Given leaf objects win over returned nodes for their own id.
+ * Each refund must pay the signer's own `LEAF{id}` key-path script — a foreign leaf fails rather
+ * than storing a stranger's chain.
  */
 export async function queryExitChains(options: {
   readonly spark: Client<typeof SparkService>;
   readonly network: SparkNetwork;
+  readonly signer: SparkSigner;
   readonly leaves: ReadonlyArray<SparkLeaf>;
   readonly call?: CallOptions;
 }): Promise<SparkExitChain[]> {
-  const { spark, network, leaves } = options;
+  const { spark, network, signer, leaves } = options;
+  const refundScripts = await leafRefundScripts(
+    signer,
+    leaves.map((leaf) => leaf.id),
+    network,
+  );
   const known = new Map<string, SparkLeaf>(leaves.map((leaf) => [leaf.id, leaf]));
   const wanted = new Set<string>();
   for (const leaf of leaves) {
@@ -302,6 +411,7 @@ export async function queryExitChains(options: {
     return buildExitChains(
       leaves.map((leaf) => leaf.id),
       known,
+      refundScripts,
     );
   }
   const ids = [...wanted];
@@ -331,28 +441,33 @@ export async function queryExitChains(options: {
   return buildExitChains(
     leaves.map((leaf) => leaf.id),
     known,
+    refundScripts,
   );
 }
 
 /**
  * One `query_nodes` (with parents) for the requested leaves' ids, then the exit chains and their
  * broadcast-flattened transactions. A requested id that the query does not return or that carries
- * no refund is a `SparkInputError`. The returned transactions are owner-broadcastable; the direct
- * variants stored alongside them in the chains are witness-stripped templates and are not.
+ * no refund is a `SparkInputError`. Each refund must pay the signer's own `LEAF{id}` key-path
+ * script, so a foreign leaf id fails rather than returning a stranger's chain. The returned
+ * transactions are owner-broadcastable; the direct variants stored alongside them in the chains are
+ * witness-stripped templates and are not.
  */
 export async function unilateralExitTransactions(options: {
   readonly spark: Client<typeof SparkService>;
   readonly network: SparkNetwork;
+  readonly signer: SparkSigner;
   readonly leafIds: ReadonlyArray<string>;
   readonly call?: CallOptions;
 }): Promise<{
   readonly transactions: ReadonlyArray<ExitTransaction>;
   readonly chains: ReadonlyArray<SparkExitChain>;
 }> {
-  const { spark, network, leafIds } = options;
+  const { spark, network, signer, leafIds } = options;
   if (leafIds.length === 0) {
     return { transactions: [], chains: [] };
   }
+  const refundScripts = await leafRefundScripts(signer, leafIds, network);
   const response = await spark.query_nodes(
     {
       source: { case: "nodeIds", value: { nodeIds: [...leafIds] } },
@@ -370,6 +485,6 @@ export async function unilateralExitTransactions(options: {
       return [leaf.id, leaf];
     }),
   );
-  const chains = buildExitChains(leafIds, nodes);
+  const chains = buildExitChains(leafIds, nodes, refundScripts);
   return { transactions: exitTransactions(chains), chains };
 }

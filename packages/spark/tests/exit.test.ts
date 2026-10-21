@@ -23,10 +23,25 @@ import {
   TreeNodeStatus,
 } from "../src/proto/gen/spark_pb.ts";
 import type { QueryNodesRequest } from "../src/proto/gen/spark_pb.ts";
+import type { SparkLeafKey, SparkSigner } from "../src/signer/types.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 
 const OPERATORS = ["id0001", "id0002"];
 const KEY = secp256k1.Point.BASE.multiply(5n).toBytes(true);
+const OTHER_KEY = secp256k1.Point.BASE.multiply(7n).toBytes(true);
+
+const REFUND_SCRIPT = p2trScriptFromPublicKey(KEY, "regtest");
+
+/** Leaf id → the key-path script the signer's own `LEAF{id}` key pays. */
+function refundScripts(...leafIds: ReadonlyArray<string>): ReadonlyMap<string, Uint8Array> {
+  return new Map(leafIds.map((leafId) => [leafId, REFUND_SCRIPT]));
+}
+
+/** Signer stub: `publicKeys` answers KEY for every leaf — the owner of the fixture refunds. */
+const SIGNER = {
+  // oxlint-disable-next-line require-await -- the SparkSigner shape is async; nothing awaits here
+  publicKeys: async (keys: ReadonlyArray<SparkLeafKey>) => keys.map(() => KEY),
+} as unknown as SparkSigner;
 
 /** Asymmetric fake display-order txid derived from a label byte. */
 function fakeTxid(label: number): Uint8Array {
@@ -37,10 +52,10 @@ function fakeTxid(label: number): Uint8Array {
   return out;
 }
 
-function txSpending(prevTxid: Uint8Array, sequence: number): Uint8Array {
+function txSpending(prevTxid: Uint8Array, sequence: number, payKey: Uint8Array = KEY): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });
   tx.addInput({ txid: prevTxid, index: 0, sequence });
-  tx.addOutput({ script: p2trScriptFromPublicKey(KEY, "regtest"), amount: 100_000n });
+  tx.addOutput({ script: p2trScriptFromPublicKey(payKey, "regtest"), amount: 100_000n });
   return tx.toBytes(true);
 }
 
@@ -199,7 +214,9 @@ const ALL_MAP = new Map(ALL.map((leaf) => [leaf.id, leaf]));
 
 describe("exitTransactions", () => {
   test("emits root-to-leaf chains, dedupes shared ancestors, refund right after its leaf", () => {
-    const out = exitTransactions(buildExitChains(["leaf-a", "leaf-b"], ALL_MAP));
+    const out = exitTransactions(
+      buildExitChains(["leaf-a", "leaf-b"], ALL_MAP, refundScripts("leaf-a", "leaf-b")),
+    );
     expect(out.map((tx) => `${tx.nodeId}:${tx.kind}`)).toStrictEqual([
       "root:node",
       "mid:node",
@@ -211,7 +228,7 @@ describe("exitTransactions", () => {
   });
 
   test("reports txids, parentTxid and relative timelocks", () => {
-    const out = exitTransactions(buildExitChains(["leaf-b"], ALL_MAP));
+    const out = exitTransactions(buildExitChains(["leaf-b"], ALL_MAP, refundScripts("leaf-b")));
     const [rootTx, midTx, leafTx, refundTx] = out;
     const root = required(rootTx);
     const mid = required(midTx);
@@ -237,7 +254,9 @@ describe("buildExitChains linkage", () => {
       ["p", parent],
       ["c", child],
     ]);
-    expect(() => buildExitChains(["c"], nodes)).toThrow(/does not spend its parent output/);
+    expect(() => buildExitChains(["c"], nodes, refundScripts("c"))).toThrow(
+      /does not spend its parent output/,
+    );
   });
 
   test("rejects a child spending the parent at the wrong vout", () => {
@@ -251,7 +270,7 @@ describe("buildExitChains linkage", () => {
       ["p", parent],
       ["c", child],
     ]);
-    expect(() => buildExitChains(["c"], nodes)).toThrow(/vout 3/);
+    expect(() => buildExitChains(["c"], nodes, refundScripts("c"))).toThrow(/vout 3/);
   });
 
   test("rejects a leaf refund that does not spend the leaf node tx", () => {
@@ -260,7 +279,7 @@ describe("buildExitChains linkage", () => {
       refundTx: txSpending(fakeTxid(0x22), 500),
     };
     const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
-    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
       /refund tx of leaf leaf-a does not spend/,
     );
   });
@@ -269,7 +288,7 @@ describe("buildExitChains linkage", () => {
     const directFromCpfpRefundTx = txSpending(fakeTxid(0x22), 300);
     const leaf = { ...LEAF_A, directFromCpfpRefundTx };
     const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
-    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
       /direct-from-CPFP refund tx of leaf leaf-a does not spend/,
     );
   });
@@ -279,7 +298,7 @@ describe("buildExitChains linkage", () => {
     const directRefundTx = txSpending(fakeTxid(0x44), 100);
     const leaf = { ...LEAF_A, directTx, directRefundTx };
     const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
-    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
       /direct refund tx of leaf leaf-a does not spend/,
     );
   });
@@ -287,7 +306,9 @@ describe("buildExitChains linkage", () => {
   test("rejects a leaf with a direct refund but no direct tx", () => {
     const leaf = { ...LEAF_A, directRefundTx: txSpending(fakeTxid(0x44), 100) };
     const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
-    expect(() => buildExitChains(["leaf-a"], nodes)).toThrow(/direct refund but no direct tx/);
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
+      /direct refund but no direct tx/,
+    );
   });
 });
 
@@ -313,11 +334,54 @@ describe("buildExitChains memoization", () => {
       );
     }
     const started = performance.now();
-    const chains = buildExitChains(leafIds, nodes);
+    const chains = buildExitChains(leafIds, nodes, refundScripts(...leafIds));
     const elapsed = performance.now() - started;
     expect(chains).toHaveLength(2000);
     expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["root", "mid", "leaf-0"]);
     expect(elapsed).toBeLessThan(2000);
+  });
+});
+
+describe("buildExitChains refund destination", () => {
+  test("rejects a refund that does not pay the leaf's key-path script", () => {
+    const leaf = {
+      ...LEAF_A,
+      refundTx: txSpending(hexToBytes(txId(LEAF_A.nodeTx)), 500, OTHER_KEY),
+    };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
+      /refund tx of leaf leaf-a does not pay/,
+    );
+  });
+
+  test("rejects a direct-from-CPFP refund paying another key", () => {
+    const leaf = {
+      ...LEAF_A,
+      directFromCpfpRefundTx: txSpending(hexToBytes(txId(LEAF_A.nodeTx)), 300, OTHER_KEY),
+    };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
+      /direct-from-CPFP refund tx of leaf leaf-a does not pay/,
+    );
+  });
+
+  test("rejects a direct refund paying another key", () => {
+    const directTx = txSpending(fakeTxid(0x33), 100);
+    const leaf = {
+      ...LEAF_A,
+      directTx,
+      directRefundTx: txSpending(hexToBytes(txId(directTx)), 100, OTHER_KEY),
+    };
+    const nodes = new Map([...ALL_MAP, ["leaf-a", leaf]]);
+    expect(() => buildExitChains(["leaf-a"], nodes, refundScripts("leaf-a"))).toThrow(
+      /direct refund tx of leaf leaf-a does not pay/,
+    );
+  });
+
+  test("rejects a leaf missing from the expected-script map", () => {
+    expect(() => buildExitChains(["leaf-a"], ALL_MAP, new Map())).toThrow(
+      /no expected refund script for leaf leaf-a/,
+    );
   });
 });
 
@@ -338,7 +402,12 @@ describe("unilateralExitTransactions", () => {
     });
     const spark = createClient(SparkService, transport);
     await expect(
-      unilateralExitTransactions({ spark, network: "regtest", leafIds: ["leaf-a"] }),
+      unilateralExitTransactions({
+        spark,
+        network: "regtest",
+        signer: SIGNER,
+        leafIds: ["leaf-a"],
+      }),
     ).rejects.toThrow(SparkInputError);
     const req = captured as {
       source: { case: string; value: { nodeIds: string[] } };
@@ -354,7 +423,12 @@ describe("unilateralExitTransactions", () => {
   test("rejects a requested id the query does not return", async () => {
     const spark = sparkReturning(ALL);
     await expect(
-      unilateralExitTransactions({ spark, network: "regtest", leafIds: ["stranger"] }),
+      unilateralExitTransactions({
+        spark,
+        network: "regtest",
+        signer: SIGNER,
+        leafIds: ["stranger"],
+      }),
     ).rejects.toThrow(SparkInputError);
   });
 
@@ -362,15 +436,44 @@ describe("unilateralExitTransactions", () => {
     const noRefund = leafNode({ id: "node-only", hasRefund: false });
     const spark = sparkReturning([noRefund]);
     await expect(
-      unilateralExitTransactions({ spark, network: "regtest", leafIds: ["node-only"] }),
+      unilateralExitTransactions({
+        spark,
+        network: "regtest",
+        signer: SIGNER,
+        leafIds: ["node-only"],
+      }),
     ).rejects.toThrow(/not a leaf/);
   });
 
   test("fails when a parent is missing from the query result", async () => {
     const spark = sparkReturning([LEAF_A]);
     await expect(
-      unilateralExitTransactions({ spark, network: "regtest", leafIds: ["leaf-a"] }),
+      unilateralExitTransactions({
+        spark,
+        network: "regtest",
+        signer: SIGNER,
+        leafIds: ["leaf-a"],
+      }),
     ).rejects.toThrow(/mid/);
+  });
+
+  test("rejects a leaf whose served refund pays a different key", async () => {
+    // A leaf we do not own: the SO serves a structurally valid chain whose refund pays a
+    // stranger's key — the client must refuse rather than return or store it.
+    const foreign = {
+      ...LEAF_A,
+      id: "foreign",
+      refundTx: txSpending(hexToBytes(txId(LEAF_A.nodeTx)), 1900, OTHER_KEY),
+    };
+    const spark = sparkReturning([...ALL, foreign]);
+    await expect(
+      unilateralExitTransactions({
+        spark,
+        network: "regtest",
+        signer: SIGNER,
+        leafIds: ["foreign"],
+      }),
+    ).rejects.toThrow(/refund tx of leaf foreign does not pay/);
   });
 
   test("empty input makes no call", async () => {
@@ -385,7 +488,7 @@ describe("unilateralExitTransactions", () => {
     });
     const spark = createClient(SparkService, transport);
     await expect(
-      unilateralExitTransactions({ spark, network: "regtest", leafIds: [] }),
+      unilateralExitTransactions({ spark, network: "regtest", signer: SIGNER, leafIds: [] }),
     ).resolves.toStrictEqual({ transactions: [], chains: [] });
     expect(calls).toBe(0);
   });
@@ -406,6 +509,7 @@ describe("queryExitChains", () => {
     const chains = await queryExitChains({
       spark,
       network: "regtest",
+      signer: SIGNER,
       leaves: [ROOT],
     });
     expect(calls).toBe(0);
@@ -466,7 +570,7 @@ describe("queryExitChains", () => {
       stream: async () => Promise.reject(new Error("unimplemented")),
     } as unknown as Transport;
     const spark = createClient(SparkService, transport);
-    const chains = await queryExitChains({ spark, network: "regtest", leaves });
+    const chains = await queryExitChains({ spark, network: "regtest", signer: SIGNER, leaves });
     expect(calls.map((chunk) => chunk.length)).toStrictEqual([1000, 1]);
     expect(chains).toHaveLength(1001);
   });
@@ -490,7 +594,12 @@ describe("queryExitChains", () => {
       });
     });
     const spark = createClient(SparkService, transport);
-    const chains = await queryExitChains({ spark, network: "regtest", leaves: [leaf] });
+    const chains = await queryExitChains({
+      spark,
+      network: "regtest",
+      signer: SIGNER,
+      leaves: [leaf],
+    });
     const [chain] = chains;
     expect(chain?.nodes.map((node) => node.nodeId)).toStrictEqual(["gp", "p", "leaf"]);
     expect(chain?.refundTx).toStrictEqual(leaf.refundTx);
@@ -504,8 +613,8 @@ describe("queryExitChains", () => {
       });
     });
     const spark = createClient(SparkService, transport);
-    await expect(queryExitChains({ spark, network: "regtest", leaves: [leaf] })).rejects.toThrow(
-      /ghost/,
-    );
+    await expect(
+      queryExitChains({ spark, network: "regtest", signer: SIGNER, leaves: [leaf] }),
+    ).rejects.toThrow(/ghost/);
   });
 });

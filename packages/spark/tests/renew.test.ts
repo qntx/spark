@@ -139,10 +139,11 @@ function fabricateLeaf(options: {
       ? new Uint8Array(32).fill(7)
       : txidBytes(txWithSequence(0, verifyingKey, 100_000n));
   const nodeTx = txWithSequence(options.nodeSequence, verifyingKey, 100_000n, prevTxid);
-  // The refund must spend the node tx output 0 for exit-chain linkage checks.
+  // The refund must spend the node tx output 0 and pay the leaf's own signing key — the
+  // exit-chain checks verify both.
   const refundTx = txWithSequence(
     options.refundSequence,
-    verifyingKey,
+    options.signingPublicKey,
     100_000n,
     txidBytes(nodeTx),
   );

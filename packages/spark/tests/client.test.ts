@@ -77,7 +77,11 @@ function ownedLeaf(
 ): TreeNode {
   const node = makeLeaf(id, valueSats, status);
   node.nodeTx = txSpending(fakeTxid((id.codePointAt(0) ?? 0) + id.length), 0);
-  node.refundTx = txSpending(hexToBytes(txId(node.nodeTx)), 0x200);
+  node.refundTx = txSpending(
+    hexToBytes(txId(node.nodeTx)),
+    0x200,
+    secp256k1.getPublicKey(leafPriv, true),
+  );
   const ours = secp256k1.Point.fromBytes(secp256k1.getPublicKey(leafPriv, true));
   node.verifyingPublicKey = ours.add(secp256k1.Point.fromBytes(KEYSHARE_PUBLIC)).toBytes(true);
   if (node.signingKeyshare !== undefined) {
@@ -388,10 +392,10 @@ function fakeTxid(label: number): Uint8Array {
   return out;
 }
 
-function txSpending(prevTxid: Uint8Array, sequence: number): Uint8Array {
+function txSpending(prevTxid: Uint8Array, sequence: number, payKey: Uint8Array = KEY): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });
   tx.addInput({ txid: prevTxid, index: 0, sequence });
-  tx.addOutput({ script: p2trScriptFromPublicKey(KEY, "mainnet"), amount: 1000n });
+  tx.addOutput({ script: p2trScriptFromPublicKey(payKey, "mainnet"), amount: 1000n });
   return tx.toBytes(true);
 }
 
@@ -573,9 +577,16 @@ test("leaves() throws when an operator query fails", async () => {
 });
 
 test("unilateralExit persists the queried exit chain in the store", async () => {
-  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([["leaf-exit", leafSecret(0)]]),
+  );
   const nodeTx = txSpending(fakeTxid(0x50), 0);
-  const refundTx = txSpending(hexToBytes(txId(nodeTx)), 500);
+  const refundTx = txSpending(
+    hexToBytes(txId(nodeTx)),
+    500,
+    secp256k1.getPublicKey(leafSecret(0), true),
+  );
   const leaf = makeLeaf("leaf-exit", 1000n);
   leaf.nodeTx = nodeTx;
   leaf.refundTx = refundTx;

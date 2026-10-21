@@ -70,6 +70,7 @@ export function createClientContext(
       await queryExitChains({
         spark: coordinatorConnection.spark,
         network,
+        signer,
         leaves: forLeaves,
       }),
     );
