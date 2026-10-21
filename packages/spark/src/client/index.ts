@@ -140,14 +140,18 @@ export type SparkClient = {
      *
      * A lost broadcast response is recovered automatically: the identical partial re-broadcasts
      * once (the SO dedups by partial hash), then the committed transaction is probed by the spent
-     * input ids. If a call still fails, check `tokens.outputs()` before retrying — the error names
-     * the input output ids, and a retry whose selected outputs are no longer available would pick
-     * different ones and pay again.
+     * input ids. If that cannot resolve the outcome the call throws `SparkTokenBroadcastError`
+     * carrying the spent `inputOutputIds` — retry with `inputOutputIds: error.inputOutputIds` and
+     * the same receiver and amount; that retry either returns the committed transaction's hash or
+     * broadcasts exactly those inputs once. Retrying without them would select different outputs
+     * and pay twice.
      */
     readonly transfer: (transferOptions: {
       readonly tokenIdentifier: string;
       readonly amount: bigint;
       readonly receiver: string | Uint8Array;
+      /** Output ids from a `SparkTokenBroadcastError`, to retry the same transaction safely. */
+      readonly inputOutputIds?: ReadonlyArray<string>;
     }) => Promise<string>;
     /**
      * Merges this identity's available outputs for `tokenIdentifier` into a single self-owned
@@ -155,11 +159,13 @@ export type SparkClient = {
      * on demand — no change output is created. Returns `undefined` when fewer than two available
      * outputs exist; call again to keep merging when more than 500 were owned.
      *
-     * Shares `transfer`'s lost-response recovery; if a call still fails, check `tokens.outputs()`
-     * before retrying — the error names the input output ids.
+     * Shares `transfer`'s lost-response recovery: on `SparkTokenBroadcastError`, retry with
+     * `inputOutputIds: error.inputOutputIds` — at least two, as the failed call's inputs were.
      */
     readonly consolidate: (options: {
       readonly tokenIdentifier: string;
+      /** Output ids from a `SparkTokenBroadcastError`, to retry the same transaction safely. */
+      readonly inputOutputIds?: ReadonlyArray<string>;
     }) => Promise<{ readonly transactionHash: string } | undefined>;
   };
   readonly invoices: {

@@ -3,6 +3,7 @@ export {
   SparkCryptoError,
   SparkInputError,
   SparkRequestError,
+  SparkTokenBroadcastError,
 } from "./errors/index.ts";
 export {
   sparkNetworkConfig,

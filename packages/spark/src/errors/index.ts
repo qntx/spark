@@ -55,3 +55,27 @@ export class SparkRequestError extends SparkError {
     this.operator = options?.operator;
   }
 }
+
+/**
+ * A token broadcast's outcome is uncertain: the transaction may have committed server-side.
+ * `inputOutputIds` names the spent outputs — the caller passes it back to `tokens.transfer` or
+ * `tokens.consolidate` with the same receiver and amount, and that retry either returns the
+ * committed transaction's hash or broadcasts exactly those inputs once. Retrying without it would
+ * select different outputs and pay twice.
+ */
+export class SparkTokenBroadcastError extends SparkRequestError {
+  readonly inputOutputIds: ReadonlyArray<string>;
+
+  constructor(
+    message: string,
+    options: ErrorOptions & {
+      readonly code?: string;
+      readonly operator?: string;
+      readonly inputOutputIds: ReadonlyArray<string>;
+    },
+  ) {
+    super(message, options);
+    this.name = "SparkTokenBroadcastError";
+    this.inputOutputIds = options.inputOutputIds;
+  }
+}

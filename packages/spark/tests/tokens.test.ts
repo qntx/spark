@@ -11,7 +11,12 @@ import { createSparkClientWith } from "../src/client/index.ts";
 import { encodeSparkAddress } from "../src/core/address.ts";
 import { hashFinalTokenTransaction } from "../src/core/hashing/token.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
-import { SparkError, SparkInputError, SparkRequestError } from "../src/errors/index.ts";
+import {
+  SparkError,
+  SparkInputError,
+  SparkRequestError,
+  SparkTokenBroadcastError,
+} from "../src/errors/index.ts";
 import {
   ChallengeSchema,
   ProtectedChallengeSchema,
@@ -42,6 +47,7 @@ import {
   broadcastPartialTokenTransaction,
   MAX_TOKEN_OUTPUTS_TX,
   selectTokenOutputs,
+  transferWithInputIds,
 } from "../src/tokens/index.ts";
 import type { SparkTokenOutput, TokenNetworkParams } from "../src/tokens/index.ts";
 import { createTestSigner } from "./support/test-signer.ts";
@@ -539,7 +545,8 @@ describe("broadcastPartialTokenTransaction recovery", () => {
       token: client,
       ...broadcastOptions,
     }).catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(SparkRequestError);
+    expect(failure).toBeInstanceOf(SparkTokenBroadcastError);
+    expect((failure as SparkTokenBroadcastError).inputOutputIds).toStrictEqual(["out-1", "out-2"]);
     expect((failure as Error).message).toContain("out-1");
     expect((failure as Error).message).toContain("out-2");
   });
@@ -585,7 +592,11 @@ describe("broadcastPartialTokenTransaction recovery", () => {
         token: client,
         ...broadcastOptions,
       }).catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(SparkRequestError);
+      expect(failure).toBeInstanceOf(SparkTokenBroadcastError);
+      expect((failure as SparkTokenBroadcastError).inputOutputIds).toStrictEqual([
+        "out-1",
+        "out-2",
+      ]);
       expect((failure as Error).message).toContain("still in progress");
       expect((failure as Error).message).toContain(bytesToHex(committedHash));
       expect((failure as Error).message).toContain("out-1");
@@ -663,6 +674,243 @@ describe("broadcastPartialTokenTransaction recovery", () => {
   });
 });
 
+/** The transaction that created an output id — vout is its index in `tokenOutputs`. */
+function creatorRow(
+  id: string,
+  vout: number,
+  amount: bigint,
+  overrides?: {
+    readonly owner?: Uint8Array;
+    readonly tokenIdentifier?: Uint8Array;
+    readonly hash?: Uint8Array;
+  },
+): TokenTransactionWithStatus {
+  const tokenOutputs: TokenOutput[] = [];
+  for (let index = 0; index <= vout; index += 1) {
+    tokenOutputs.push({
+      $typeName: "spark_token.TokenOutput",
+      ownerPublicKey: OWNER,
+      tokenIdentifier: TOKEN_ID,
+      tokenAmount: numberToBytesBE(1n, 16),
+      withdrawBondSats: 10_000n,
+      withdrawRelativeBlockLocktime: 1000n,
+    });
+  }
+  tokenOutputs[vout] = {
+    $typeName: "spark_token.TokenOutput",
+    id,
+    ownerPublicKey: overrides?.owner ?? OWNER,
+    tokenIdentifier: overrides?.tokenIdentifier ?? TOKEN_ID,
+    tokenAmount: numberToBytesBE(amount, 16),
+    withdrawBondSats: 10_000n,
+    withdrawRelativeBlockLocktime: 1000n,
+  };
+  return statusRow(
+    {
+      $typeName: "spark_token.TokenTransaction",
+      version: 3,
+      tokenInputs: {
+        case: "mintInput",
+        value: {
+          $typeName: "spark_token.TokenMintInput",
+          issuerPublicKey: OWNER,
+          tokenIdentifier: TOKEN_ID,
+        },
+      },
+      tokenOutputs,
+      sparkOperatorIdentityPublicKeys: [],
+      network: Network.REGTEST,
+      invoiceAttachments: [],
+    },
+    TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+    overrides?.hash ?? hexToBytes("ee".repeat(32)),
+  );
+}
+
+describe("transferWithInputIds", () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const HASH_1 = hexToBytes("ee".repeat(32));
+  const HASH_2 = hexToBytes("dd".repeat(32));
+  const creators = [
+    creatorRow("out-1", 1, 60n, { hash: HASH_1 }),
+    creatorRow("out-2", 0, 40n, { hash: HASH_2 }),
+  ];
+  const inputIds = ["out-1", "out-2"];
+  const committedHash = hexToBytes("11".repeat(32));
+  // The partial the retry rebuilds: receiver 70 of 100, 30 change back to the sender.
+  const resolved: SparkTokenOutput[] = [
+    {
+      id: "out-1",
+      tokenIdentifier: TOKEN_ID,
+      amount: 60n,
+      prevTransactionHash: HASH_1,
+      prevTransactionVout: 1,
+      ownerPublicKey: OWNER,
+      status: "available",
+    },
+    {
+      id: "out-2",
+      tokenIdentifier: TOKEN_ID,
+      amount: 40n,
+      prevTransactionHash: HASH_2,
+      prevTransactionVout: 0,
+      ownerPublicKey: OWNER,
+      status: "available",
+    },
+  ];
+  const expectedPartial = makeTransferPartial({ inputs: resolved, amount: 70n });
+
+  function retryClient(handlers: {
+    readonly rows?: ReadonlyArray<TokenTransactionWithStatus>;
+    readonly broadcast?: (req: BroadcastTransactionRequest) => BroadcastTransactionResponse;
+  }) {
+    let broadcastCalls = 0;
+    const requests: BroadcastTransactionRequest[] = [];
+    const client = {
+      broadcast_transaction: async (req: BroadcastTransactionRequest) => {
+        await Promise.resolve();
+        broadcastCalls += 1;
+        requests.push(req);
+        return required(handlers.broadcast, "broadcast handler")(req);
+      },
+      query_token_transactions: async () => {
+        await Promise.resolve();
+        return {
+          $typeName: "spark_token.QueryTokenTransactionsResponse",
+          tokenTransactionsWithStatus: [...(handlers.rows ?? [])],
+          offset: 0n,
+        };
+      },
+    } as unknown as Client<typeof SparkTokenService>;
+    return { client, broadcastCalls: () => broadcastCalls, requests: () => requests };
+  }
+
+  const retryOptions = {
+    signer,
+    network: "regtest" as const,
+    operators: OPERATORS,
+    tokens: TOKENS,
+    now: () => 1_700_000_999_000,
+    tokenIdentifier: TOKEN_ID,
+    receiverPublicKey: RECEIVER,
+    senderPublicKey: OWNER,
+    inputOutputIds: inputIds,
+    amount: 70n,
+  };
+
+  test("returns the committed hash without broadcasting when the same transaction finalized", async () => {
+    const { client, broadcastCalls } = retryClient({
+      rows: [
+        ...creators,
+        statusRow(
+          v2TxFor(expectedPartial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          committedHash,
+        ),
+      ],
+    });
+    const result = await transferWithInputIds({ token: client, ...retryOptions });
+    expect(result.transactionHash).toBe(bytesToHex(committedHash));
+    expect(broadcastCalls()).toBe(0);
+  });
+
+  test("broadcasts exactly the remembered inputs when nothing committed", async () => {
+    const { client, broadcastCalls, requests } = retryClient({
+      rows: creators,
+      broadcast: (req) => ({
+        $typeName: "spark_token.BroadcastTransactionResponse",
+        commitStatus: CommitStatus.COMMIT_FINALIZED,
+        finalTokenTransaction: finalFor(required(req.partialTokenTransaction, "broadcast partial")),
+      }),
+    });
+    const result = await transferWithInputIds({ token: client, ...retryOptions });
+    expect(broadcastCalls()).toBe(1);
+    const sent = required(requests()[0], "broadcast request");
+    const partialReq = required(sent.partialTokenTransaction, "broadcast partial");
+    // Sorted by vout: out-2 (vout 0) before out-1 (vout 1).
+    expect(
+      spentOutputs(partialReq).map((output) => ({
+        hash: bytesToHex(output.prevTokenTransactionHash),
+        vout: output.prevTokenTransactionVout,
+      })),
+    ).toStrictEqual([
+      { hash: bytesToHex(HASH_2), vout: 0 },
+      { hash: bytesToHex(HASH_1), vout: 1 },
+    ]);
+    expect(result.transactionHash).toBe(
+      bytesToHex(hashFinalTokenTransaction(finalFor(partialReq))),
+    );
+  });
+
+  test("a still-in-progress transaction over the inputs rethrows with the same ids", async () => {
+    const { client, broadcastCalls } = retryClient({
+      rows: [
+        ...creators,
+        statusRow(
+          v2TxFor(expectedPartial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_SIGNED,
+          committedHash,
+        ),
+      ],
+    });
+    const failure = await transferWithInputIds({ token: client, ...retryOptions }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(SparkTokenBroadcastError);
+    expect((failure as SparkTokenBroadcastError).inputOutputIds).toStrictEqual(inputIds);
+    expect(broadcastCalls()).toBe(0);
+  });
+
+  test("a committed transaction with different outputs over the same inputs throws", async () => {
+    const foreign = v2TxFor(expectedPartial, (output) => ({
+      ...output,
+      tokenAmount: numberToBytesBE(1n, 16),
+    }));
+    const { client } = retryClient({
+      rows: [
+        ...creators,
+        statusRow(foreign, TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED, committedHash),
+      ],
+    });
+    await expect(transferWithInputIds({ token: client, ...retryOptions })).rejects.toThrow(
+      /consumed by a different token transaction/,
+    );
+  });
+
+  test("unknown, foreign, and wrong-identifier inputs throw SparkInputError", async () => {
+    const { client } = retryClient({
+      rows: [creatorRow("out-1", 0, 60n)],
+      broadcast: () => {
+        throw new Error("unreachable");
+      },
+    });
+    await expect(
+      transferWithInputIds({ token: client, ...retryOptions, inputOutputIds: ["out-9"] }),
+    ).rejects.toThrow(SparkInputError);
+    await expect(
+      transferWithInputIds({ token: client, ...retryOptions, inputOutputIds: ["out-1", "out-9"] }),
+    ).rejects.toThrow(/out-9/);
+
+    const foreign = retryClient({
+      rows: [creatorRow("out-3", 0, 60n, { owner: RECEIVER })],
+    });
+    await expect(
+      transferWithInputIds({ token: foreign.client, ...retryOptions, inputOutputIds: ["out-3"] }),
+    ).rejects.toThrow(/not owned by this identity/);
+
+    const wrongToken = retryClient({
+      rows: [creatorRow("out-4", 0, 60n, { tokenIdentifier: OTHER_TOKEN_ID })],
+    });
+    await expect(
+      transferWithInputIds({
+        token: wrongToken.client,
+        ...retryOptions,
+        inputOutputIds: ["out-4"],
+      }),
+    ).rejects.toThrow(/different token identifier/);
+  });
+});
+
 describe("client.tokens", () => {
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const owner = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
@@ -697,6 +945,9 @@ describe("client.tokens", () => {
     broadcast?: (
       req: BroadcastTransactionRequest,
     ) => BroadcastTransactionResponse | Promise<BroadcastTransactionResponse>;
+    transactions?: () => {
+      readonly tokenTransactionsWithStatus: ReadonlyArray<TokenTransactionWithStatus>;
+    };
   }) {
     return createSparkClientWith(
       {
@@ -744,6 +995,13 @@ describe("client.tokens", () => {
                     $typeName: "spark_token.BroadcastTransactionResponse",
                     commitStatus: CommitStatus.COMMIT_FINALIZED,
                   },
+                query_token_transactions: () => ({
+                  $typeName: "spark_token.QueryTokenTransactionsResponse",
+                  tokenTransactionsWithStatus: [
+                    ...(impl.transactions?.().tokenTransactionsWithStatus ?? []),
+                  ],
+                  offset: 0n,
+                }),
               });
             },
             { transport: { interceptors: [...interceptors] } },
@@ -1133,6 +1391,73 @@ describe("client.tokens", () => {
     expect(maxInFlight).toBe(1);
     // The second run finds the outputs spent and has nothing to merge.
     expect([first, second].filter((result) => result !== undefined)).toHaveLength(1);
+    client.close();
+  });
+
+  test("transfer with inputOutputIds returns the committed hash without broadcasting", async () => {
+    const creators = [
+      creatorRow("out-1", 0, 60n, {
+        owner,
+        tokenIdentifier: rawIdentifier,
+        hash: hexToBytes("ee".repeat(32)),
+      }),
+      creatorRow("out-2", 0, 40n, {
+        owner,
+        tokenIdentifier: rawIdentifier,
+        hash: hexToBytes("dd".repeat(32)),
+      }),
+    ];
+    const resolved: SparkTokenOutput[] = [
+      {
+        id: "out-1",
+        tokenIdentifier: rawIdentifier,
+        amount: 60n,
+        prevTransactionHash: hexToBytes("ee".repeat(32)),
+        prevTransactionVout: 0,
+        ownerPublicKey: owner,
+        status: "available",
+      },
+      {
+        id: "out-2",
+        tokenIdentifier: rawIdentifier,
+        amount: 40n,
+        prevTransactionHash: hexToBytes("dd".repeat(32)),
+        prevTransactionVout: 0,
+        ownerPublicKey: owner,
+        status: "available",
+      },
+    ];
+    const expectedPartial = buildTransferPartial({
+      selectedOutputs: resolved,
+      receiverPublicKey: RECEIVER,
+      tokenIdentifier: rawIdentifier,
+      amount: 70n,
+      senderPublicKey: owner,
+      network: "regtest",
+      operators: OPERATORS,
+      tokens: TOKENS,
+      now: () => 0,
+    });
+    const committedHash = hexToBytes("11".repeat(32));
+    const client = clientWith({
+      transactions: () => ({
+        tokenTransactionsWithStatus: [
+          ...creators,
+          statusRow(
+            v2TxFor(expectedPartial),
+            TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+            committedHash,
+          ),
+        ],
+      }),
+    });
+    const hash = await client.tokens.transfer({
+      tokenIdentifier: identifier,
+      amount: 70n,
+      receiver: RECEIVER,
+      inputOutputIds: ["out-1", "out-2"],
+    });
+    expect(hash).toBe(bytesToHex(committedHash));
     client.close();
   });
 });
