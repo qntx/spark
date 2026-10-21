@@ -139,6 +139,8 @@ export function transferProto(options: {
   sender: Uint8Array;
   receiver: Uint8Array;
   receiverAmountSats?: bigint;
+  /** SO-local TransferReceiver row id — each operator assigns its own (uuid.NewV7). */
+  receiverId?: string;
   leaves: ReadonlyArray<TreeNode>;
   type?: TransferType;
   status?: TransferStatus;
@@ -149,6 +151,7 @@ export function transferProto(options: {
     receiverIdentityPublicKey: options.receiver,
     receivers: [
       create(TransferReceiverSchema, {
+        id: options.receiverId ?? "",
         identityPublicKey: options.receiver,
         amountSats: options.receiverAmountSats ?? 700n,
       }),
@@ -352,12 +355,15 @@ export async function sendHarness(state: {
   // captured from start_transfer_v2 (lost/fresh) — a served row under any other id would not
   // match this send's expectation, exactly like production.
   const committed = { id: state.transferId };
+  // Receiver edge ids are SO-local (upstream assigns a uuid.NewV7 per operator), so every
+  // operator serves the same receiver under a different id — as the real SO does.
   const coordinatorTransfer = (leaves: ReadonlyArray<TreeNode>) =>
     transferProto({
       id: committed.id,
       sender: identity,
       receiver: RECEIVER,
       receiverAmountSats: 1000n,
+      receiverId: `edge-${COORDINATOR}`,
       leaves,
     });
   const leafById = (id: string): TreeNode =>
@@ -365,7 +371,17 @@ export async function sendHarness(state: {
       leafRows.find((row) => row.id === id),
       `leaf row ${id}`,
     );
-  const honestTransfer = () => coordinatorTransfer([leafById(state.sendLeafId)]);
+  const operatorTransfer = (identifier: string, leaves: ReadonlyArray<TreeNode>) =>
+    transferProto({
+      id: committed.id,
+      sender: identity,
+      receiver: RECEIVER,
+      receiverAmountSats: 1000n,
+      receiverId: `edge-${identifier}`,
+      leaves,
+    });
+  const honestTransfer = (identifier: string) =>
+    operatorTransfer(identifier, [leafById(state.sendLeafId)]);
   const implFor = (identifier: string) => ({
     query_nodes: queryNodesImpl(() => leafRows)(identifier).query_nodes,
     get_signing_commitments: (req: { nodeIds?: string[]; count?: number }) =>
@@ -385,7 +401,10 @@ export async function sendHarness(state: {
       : {}),
     query_transfers_by_id: () => {
       if (identifier !== COORDINATOR && state.operatorTransfers === "honest") {
-        return { transfers: [honestTransfer()] };
+        return { transfers: [honestTransfer(identifier)] };
+      }
+      if (identifier !== COORDINATOR) {
+        return { transfers: [operatorTransfer(identifier, leafRows)] };
       }
       return { transfers: [coordinatorTransfer(leafRows)] };
     },
@@ -836,13 +855,14 @@ function h2Leaf(id: string, valueSats: bigint): TreeNode {
   });
 }
 
-function h2HonestTransfer(leafById: (id: string) => TreeNode): Transfer {
+function h2HonestTransfer(leafById: (id: string) => TreeNode, receiverId: string): Transfer {
   return create(TransferSchema, {
     id: H2_TRANSFER_ID,
     senderIdentityPublicKey: HARNESS_IDENTITY,
     receiverIdentityPublicKey: OTHER_LEAF_KEY,
     receivers: [
       create(TransferReceiverSchema, {
+        id: receiverId,
         identityPublicKey: OTHER_LEAF_KEY,
         amountSats: 1000n,
       }),
@@ -983,7 +1003,12 @@ export async function h2Iteration(iteration: number): Promise<string[]> {
                 throw new SparkError("response lost");
               }
               return {
-                transfer: mutateTransfer(h2HonestTransfer(leafById), mutation, extraLeaf, leafById),
+                transfer: mutateTransfer(
+                  h2HonestTransfer(leafById, `edge-${identifier}`),
+                  mutation,
+                  extraLeaf,
+                  leafById,
+                ),
               };
             },
           }
@@ -994,10 +1019,17 @@ export async function h2Iteration(iteration: number): Promise<string[]> {
         }
         if (isCoord) {
           return {
-            transfers: [mutateTransfer(h2HonestTransfer(leafById), mutation, extraLeaf, leafById)],
+            transfers: [
+              mutateTransfer(
+                h2HonestTransfer(leafById, `edge-${identifier}`),
+                mutation,
+                extraLeaf,
+                leafById,
+              ),
+            ],
           };
         }
-        return { transfers: [h2HonestTransfer(leafById)] };
+        return { transfers: [h2HonestTransfer(leafById, `edge-${identifier}`)] };
       },
     };
   };
