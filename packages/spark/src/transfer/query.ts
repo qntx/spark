@@ -284,16 +284,32 @@ export async function queryTransferById(options: {
  */
 const isTerminalStatus = (status: string) => TERMINAL_TRANSFER_STATUSES.has(status);
 
+// Receiver edge ids are SO-local: upstream assigns each TransferReceiver row a fresh
+// uuid.NewV7 at insert (so/ent/schema/mixin.go:18, so/handler/base_transfer_handler.go:1178),
+// so the same transfer carries different receiver ids on every operator. Only the receiver's
+// identity key and amount are protocol terms; the id is ignored like the SO-local token row id.
 const transferEdges = (transfer: SparkTransfer) =>
   transfer.receivers
-    .map(
-      (receiver) =>
-        `${receiver.id}:${bytesToHex(receiver.identityPublicKey)}:${receiver.amountSats}`,
-    )
+    .map((receiver) => `${bytesToHex(receiver.identityPublicKey)}:${receiver.amountSats}`)
     .sort();
 
 const transferLeafIds = (transfer: SparkTransfer) =>
   transfer.leaves.map((transferLeaf) => transferLeaf.leaf.id).sort();
+
+// The leaf -> receiver binding decides who claims which leaf. `transferReceiverId` is an
+// SO-local row id like the receiver id, so compare the binding resolved to the receiver's
+// identity key, not the raw id ("" means the leaf carries no receiver edge).
+const transferLeafReceivers = (transfer: SparkTransfer) => {
+  const receiverKeyById = new Map(
+    transfer.receivers.map((receiver) => [receiver.id, receiver.identityPublicKey]),
+  );
+  return transfer.leaves
+    .map((transferLeaf) => {
+      const key = receiverKeyById.get(transferLeaf.transferReceiverId);
+      return `${transferLeaf.leaf.id}:${key === undefined ? "" : bytesToHex(key)}`;
+    })
+    .sort();
+};
 
 function transferRowMismatch(
   reference: SparkTransfer,
@@ -334,6 +350,14 @@ function transferRowMismatch(
     expectedIds.some((id, i) => id !== candidateIds[i])
   ) {
     return "leaves";
+  }
+  const expectedBindings = transferLeafReceivers(reference);
+  const candidateBindings = transferLeafReceivers(candidate);
+  if (
+    expectedBindings.length !== candidateBindings.length ||
+    expectedBindings.some((binding, i) => binding !== candidateBindings[i])
+  ) {
+    return "leaf receiver assignments";
   }
   if (compareIntermediateRefunds) {
     const byId = new Map(candidate.leaves.map((leaf) => [leaf.leaf.id, leaf]));
