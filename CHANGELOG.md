@@ -27,6 +27,23 @@ First public pre-release. The workspace ships three packages with lockstep versi
   `@qntx/spark/server` Lightning Address server; `apps/lnurl-server` is a private
   reference deployment and is not published.
 
+### API surface
+
+- `createSparkClient` requires an explicit `store`; use `createMemorySparkStore`
+  for ephemeral wallets.
+- `createSparkSigner` binds the operator set, VSS threshold and SSP identity at
+  construction; signing requests do not carry them.
+- `lightning.sweepHtlcTimeout` spends an expired HTLC output via
+  `SparkSigner.signHtlcTimeout`.
+- `withdrawals.offlineExitTransactions` builds unilateral-exit transactions from
+  stored chains without contacting operators.
+- `tokens.balances` and `tokens.outputs` only report rows all operators agree on.
+- `invoices.pay` retries a lost response through `transferId` (sats invoices) or
+  `inputOutputIds` (token invoices) instead of paying twice.
+- A lost token broadcast throws `SparkTokenBroadcastError`, whose
+  `inputOutputIds` are the retry handle for `tokens.transfer` and
+  `tokens.consolidate`.
+
 ### Platforms and requirements
 
 - Node and browsers via `@qntx/spark-wasm`; `SPARK_WASM_INTEGRITY` exposes the
