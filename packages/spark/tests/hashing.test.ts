@@ -1,8 +1,24 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { create, fromBinary, fromJson, toBinary } from "@bufbuild/protobuf";
+import { create, createFileRegistry, fromBinary, fromJson, toBinary } from "@bufbuild/protobuf";
 import type { DescMessage, JsonObject } from "@bufbuild/protobuf";
+import {
+  AnySchema,
+  BoolValueSchema,
+  DescriptorProtoSchema,
+  DurationSchema,
+  EmptySchema,
+  FieldDescriptorProto_Label,
+  FieldDescriptorProto_Type,
+  FieldDescriptorProtoSchema,
+  FileDescriptorProtoSchema,
+  ListValueSchema,
+  StringValueSchema,
+  StructSchema,
+  TimestampSchema,
+  file_google_protobuf_duration,
+} from "@bufbuild/protobuf/wkt";
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
@@ -33,7 +49,7 @@ import type { SparkInvoiceFields, SparkNetwork } from "../src/core/index.ts";
 import { encodeInvoiceFields, protoInvoiceToPlain } from "../src/core/invoice.ts";
 import { finalizeTokenInvoice, prepareTokenInvoice } from "../src/core/token-invoice.ts";
 import { uuidToBytes, uuidv7 } from "../src/core/uuid.ts";
-import { SparkInputError } from "../src/errors/index.ts";
+import { SparkError, SparkInputError } from "../src/errors/index.ts";
 import { ChallengeSchema } from "../src/proto/gen/spark_authn_pb.ts";
 import {
   DelegationIntentSchema,
@@ -68,6 +84,37 @@ function protohashSchema(typeName: string): DescMessage {
   const schema = PROTOHASH_SCHEMAS[typeName];
   if (schema === undefined) {
     throw new Error(`no schema registered for ${typeName}`);
+  }
+  return schema;
+}
+
+/** Synthetic message carrying a `google.protobuf.Duration` field, for the unsupported-WKT test. */
+function durationWrapSchema(): DescMessage {
+  const wrapFile = create(FileDescriptorProtoSchema, {
+    name: "test/wrap.proto",
+    package: "test",
+    syntax: "proto3",
+    dependency: ["google/protobuf/duration.proto"],
+    messageType: [
+      create(DescriptorProtoSchema, {
+        name: "Wrap",
+        field: [
+          create(FieldDescriptorProtoSchema, {
+            name: "value",
+            number: 1,
+            label: FieldDescriptorProto_Label.OPTIONAL,
+            type: FieldDescriptorProto_Type.MESSAGE,
+            typeName: ".google.protobuf.Duration",
+          }),
+        ],
+      }),
+    ],
+  });
+  const schema = createFileRegistry(wrapFile, () => file_google_protobuf_duration).getMessage(
+    "test.Wrap",
+  );
+  if (schema === undefined) {
+    throw new Error("test.Wrap was not registered");
   }
   return schema;
 }
@@ -165,6 +212,39 @@ test.each(VECTORS.protohash)("protohash vector $name ($typeName)", (c) => {
   const schema = protohashSchema(c.typeName);
   const message = fromBinary(schema, hexToBytes(c.messageHex));
   expect(bytesToHex(hashProto(schema, message))).toBe(c.expected);
+});
+
+// Our protos carry only Timestamp and Empty; every other google.protobuf type
+// throws instead of being hashed by speculative semantics.
+test.each([
+  DurationSchema,
+  StructSchema,
+  ListValueSchema,
+  BoolValueSchema,
+  StringValueSchema,
+  AnySchema,
+])("protohash rejects unsupported well-known type $typeName", (schema) => {
+  const message = create(schema, {});
+  expect(() => hashProto(schema, message)).toThrow(SparkError);
+  expect(() => hashProto(schema, message)).toThrow(
+    `protohash: unsupported well-known type ${schema.typeName}`,
+  );
+});
+
+test("protohash rejects a Duration nested in a real message field", () => {
+  const schema = durationWrapSchema();
+  const message = create(schema, { value: create(DurationSchema, { seconds: 7n }) });
+  expect(() => hashProto(schema, message)).toThrow(
+    "protohash: unsupported well-known type google.protobuf.Duration",
+  );
+});
+
+test("protohash still hashes the well-known types our protos use", () => {
+  const timestamp = hashProto(TimestampSchema, create(TimestampSchema, { seconds: 1n }));
+  expect(timestamp).toHaveLength(32);
+  // Empty has no fields, so it hashes as a regular message to sha256(MAP_TAG).
+  const empty = hashProto(EmptySchema, create(EmptySchema, {}));
+  expect(empty).toStrictEqual(sha256(utf8ToBytes("d")));
 });
 
 test.each(VECTORS.tokenTransactionV3)("tokenTransactionV3 vector $name", (c) => {
