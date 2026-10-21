@@ -255,6 +255,19 @@ function renewZeroTimelockResult(
   };
 }
 
+/** A committed intermediate refund: input 0 spends `parentTx`, input 1 the connector output. */
+function connectorRefundFor(
+  parentTx: Uint8Array,
+  connectorTx: Uint8Array,
+  index: number,
+): Uint8Array {
+  const tx = new Transaction({ allowUnknownInputs: true, allowUnknownOutputs: true });
+  tx.addInput({ txid: hexToBytes(txId(parentTx)), index: 0, sequence: 0 });
+  tx.addInput({ txid: hexToBytes(txId(connectorTx)), index });
+  tx.addOutput({ script: p2trScriptFromPublicKey(SSP_IDENTITY, "regtest"), amount: 1000n });
+  return tx.toBytes(true);
+}
+
 function transferProto(options: {
   id: string;
   sender: Uint8Array;
@@ -263,6 +276,8 @@ function transferProto(options: {
   status?: TransferStatus;
   leaves?: ReadonlyArray<SparkLeaf>;
   totalValue?: bigint;
+  /** When set, each leaf's committed intermediate refunds spend this connector's output i. */
+  connectorTx?: Uint8Array;
 }): Transfer {
   return create(TransferSchema, {
     id: options.id,
@@ -272,7 +287,7 @@ function transferProto(options: {
     type: options.type ?? TransferType.COOPERATIVE_EXIT,
     network: Network.REGTEST,
     totalValue: options.totalValue ?? 0n,
-    leaves: (options.leaves ?? []).map((leaf) =>
+    leaves: (options.leaves ?? []).map((leaf, index) =>
       create(TransferLeafSchema, {
         leaf: create(TreeNodeSchema, {
           id: leaf.id,
@@ -297,6 +312,25 @@ function transferProto(options: {
         secretCipher: new Uint8Array(10),
         sig: { case: "signature" as const, value: new Uint8Array(64) },
         transferReceiverId: "",
+        ...(options.connectorTx === undefined
+          ? {}
+          : {
+              intermediateRefundTx: connectorRefundFor(leaf.nodeTx, options.connectorTx, index),
+              intermediateDirectFromCpfpRefundTx: connectorRefundFor(
+                leaf.nodeTx,
+                options.connectorTx,
+                index,
+              ),
+              ...(leaf.directTx === undefined
+                ? {}
+                : {
+                    intermediateDirectRefundTx: connectorRefundFor(
+                      leaf.directTx,
+                      options.connectorTx,
+                      index,
+                    ),
+                  }),
+            }),
       }),
     ),
   });
@@ -1208,15 +1242,18 @@ describe("cooperativeExit", () => {
     });
     const leaf = await fabricateLeaf(signer0, { leafId: "leaf-p", valueSats: 100_000n });
     const identity = await signer0.identityPublicKey();
+    const payoutTx = payoutTxFor(WITHDRAW_ADDRESS, 99_990);
+    const connectorTx = connectorTxFor(txId(payoutTx), 2);
     const committed = transferProto({
       id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
       sender: identity,
       receiver: SSP_IDENTITY,
       leaves: [leaf],
       totalValue: 100_000n,
+      connectorTx,
     });
     const { deps, calls, exitRequests, completions, deleted, spendAmounts, frostJobs, events } =
-      await exitDeps({ leaves: [leaf], recoveredTransfer: committed });
+      await exitDeps({ leaves: [leaf], recoveredTransfer: committed, payoutTx, connectorTx });
     // maxFeeSats: 0 proves the resume path is not gated by the fee cap.
     const result = await cooperativeExit(deps, {
       address: WITHDRAW_ADDRESS,
@@ -1271,10 +1308,20 @@ describe("cooperativeExit", () => {
       secp256k1.getPublicKey(new Uint8Array(32).fill(78), true),
       "regtest",
     );
+    const payoutTx = payoutTxFor(otherAddress, 99_990);
+    const connectorTx = connectorTxFor(txId(payoutTx), 2);
     const { deps, spendAmounts, completions } = await exitDeps({
       leaves: [leaf],
-      recoveredTransfer: committed,
-      payoutTx: payoutTxFor(otherAddress, 99_990),
+      recoveredTransfer: transferProto({
+        id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+        sender: identity,
+        receiver: SSP_IDENTITY,
+        leaves: [leaf],
+        totalValue: 100_000n,
+        connectorTx,
+      }),
+      payoutTx,
+      connectorTx,
     });
     await expect(
       cooperativeExit(deps, {
@@ -1285,6 +1332,76 @@ describe("cooperativeExit", () => {
       }),
     ).rejects.toThrow("does not pay the withdrawal address");
     expect(spendAmounts).toStrictEqual([]);
+    expect(completions).toStrictEqual([]);
+  });
+
+  test("a resumed exit fails when the connector is not the one the committed refunds spend", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-c", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    // The committed refunds were signed against a different connector — the returned request
+    // belongs to another exit, so its payout/fee must not be trusted or completed.
+    const committedConnector = connectorTxFor(txId(payoutTxFor(WITHDRAW_ADDRESS, 90_000)), 2);
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+      connectorTx: committedConnector,
+    });
+    const payoutTx = payoutTxFor(WITHDRAW_ADDRESS, 99_990);
+    const { deps, completions, deleted } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      payoutTx,
+      connectorTx: connectorTxFor(txId(payoutTx), 2),
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow("does not spend the ssp connector transaction");
+    expect(completions).toStrictEqual([]);
+    expect(deleted).toStrictEqual([["leaf-c"]]);
+  });
+
+  test("a resumed exit fails when the committed transfer carries no intermediate refunds", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-n", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+    });
+    const { deps, completions } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 100,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow("carries no intermediate refund transactions");
     expect(completions).toStrictEqual([]);
   });
 
