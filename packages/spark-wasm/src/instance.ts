@@ -23,9 +23,15 @@ export class WasmPoisonedError extends SparkCryptoError {
 
 /**
  * Runs `fn` unless the instance is already poisoned; a `WebAssembly.RuntimeError` aborts the
- * instance, so it is converted to {@link WasmPoisonedError} and rethrown on every later call.
+ * instance, so it is converted to {@link WasmPoisonedError} and rethrown on every later call. The
+ * aborted instance's whole linear memory is zeroed first — per-input regions are wiped on the
+ * success path, but a trap can leave secret copies elsewhere in memory.
  */
-export function runSparkPoisoned<T>(poison: { error?: Error }, fn: () => T): T {
+export function runSparkPoisoned<T>(
+  poison: { error?: Error },
+  memory: WebAssembly.Memory,
+  fn: () => T,
+): T {
   if (poison.error !== undefined) {
     throw poison.error;
   }
@@ -33,6 +39,7 @@ export function runSparkPoisoned<T>(poison: { error?: Error }, fn: () => T): T {
     return fn();
   } catch (error) {
     if (error instanceof WebAssembly.RuntimeError) {
+      new Uint8Array(memory.buffer).fill(0);
       poison.error = new WasmPoisonedError(8, { cause: error });
       throw poison.error;
     }
@@ -43,20 +50,17 @@ export function runSparkPoisoned<T>(poison: { error?: Error }, fn: () => T): T {
 /** Binds the raw wasm exports into a {@link SparkCrypto} backend. */
 export function bindSparkExports(exports: SparkWasmExports): SparkCrypto {
   const poison: { error?: Error } = {};
+  const run = <T>(fn: () => T): T => runSparkPoisoned(poison, exports.memory, fn);
   return {
     abiVersion: SPARK_ABI_VERSION,
-    frostCommit: (hedge, random) =>
-      runSparkPoisoned(poison, () => wasmFrostCommit(exports, hedge, random)),
-    frostSign: (request) => runSparkPoisoned(poison, () => wasmFrostSign(exports, request)),
-    frostAggregate: (request) =>
-      runSparkPoisoned(poison, () => wasmFrostAggregate(exports, request)),
+    frostCommit: (hedge, random) => run(() => wasmFrostCommit(exports, hedge, random)),
+    frostSign: (request) => run(() => wasmFrostSign(exports, request)),
+    frostAggregate: (request) => run(() => wasmFrostAggregate(exports, request)),
     eciesEncrypt: (publicKey, plaintext, random) =>
-      runSparkPoisoned(poison, () => wasmEciesEncrypt(exports, publicKey, plaintext, random)),
+      run(() => wasmEciesEncrypt(exports, publicKey, plaintext, random)),
     eciesDecrypt: (privateKey, ciphertext) =>
-      runSparkPoisoned(poison, () => wasmEciesDecrypt(exports, privateKey, ciphertext)),
+      run(() => wasmEciesDecrypt(exports, privateKey, ciphertext)),
     splitSecretWithProofs: (secret, threshold, shares, random) =>
-      runSparkPoisoned(poison, () =>
-        wasmSplitSecretWithProofs(exports, secret, threshold, shares, random),
-      ),
+      run(() => wasmSplitSecretWithProofs(exports, secret, threshold, shares, random)),
   };
 }
