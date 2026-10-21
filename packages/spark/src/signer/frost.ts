@@ -18,8 +18,9 @@ import type { NonceStore } from "./nonces.ts";
 import type { FrostAggregateJob, FrostSignJob } from "./types.ts";
 
 /**
- * User-side FROST signature shares, one 32-byte share per job in order. Each job's commitment nonce
- * is removed from the store before the backend call — reuse fails even after an error. Resolved
+ * User-side FROST signature shares, one 32-byte share per job in order. Every job's commitment
+ * nonce is removed from the store before any other validation or the backend call — a batch that
+ * fails partway leaves no job's nonce outstanding, and reuse fails even after an error. Resolved
  * private keys and consumed nonces are wiped.
  */
 export function frostSignJobs(
@@ -36,9 +37,12 @@ export function frostSignJobs(
   const consumedNonces: Uint8Array[] = [];
   try {
     const request = create(FrostSignRequestSchema, { jobs: [] });
-    for (const job of jobs) {
+    const taken = jobs.map((job) => {
       const nonce = nonces.take(job.commitment);
       consumedNonces.push(nonce);
+      return { job, nonce };
+    });
+    for (const { job, nonce } of taken) {
       const secretKey = keys.resolve(job.key);
       secretKeys.push(secretKey);
       request.jobs.push(

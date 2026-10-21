@@ -101,23 +101,36 @@ export function checkOperators(operators: ReadonlyArray<SparkOperator>): void {
   if (operators.length === 0) {
     throw new SparkInputError("operators: must not be empty");
   }
+  const ids = new Set<number>();
+  const identifiers = new Set<string>();
+  const publicKeys = new Set<string>();
   for (const operator of operators) {
     if (!Number.isSafeInteger(operator.id) || operator.id < 0) {
       throw new SparkInputError("operator.id: must be a non-negative safe integer");
     }
     identifierBytes(operator.identifier);
     requireLength(operator.identityPublicKey, PUBLIC_KEY_LENGTH, "operator.identityPublicKey");
+    const publicKey = bytesToHex(operator.identityPublicKey);
+    if (ids.has(operator.id) || identifiers.has(operator.identifier) || publicKeys.has(publicKey)) {
+      throw new SparkInputError(
+        "operators: id, identifier and identityPublicKey must each be unique",
+      );
+    }
+    ids.add(operator.id);
+    identifiers.add(operator.identifier);
+    publicKeys.add(publicKey);
   }
 }
 
 /**
- * Rejects a VSS threshold that is not a safe integer in `1..=operators.length`. The wasm ABI
+ * Rejects a VSS threshold that is not a safe integer in `2..=operators.length` — the Rust VSS
+ * requires t ≥ 2, so accepting t = 1 here would only surface as a backend error. The wasm ABI
  * otherwise coerces the JS number into an i32 (fractions truncate, values past 2^32 wrap) and
  * silently splits at a different threshold than requested.
  */
 export function checkThreshold(threshold: number, operators: ReadonlyArray<SparkOperator>): void {
-  if (!Number.isSafeInteger(threshold) || threshold < 1 || threshold > operators.length) {
-    throw new SparkInputError(`threshold: must be an integer between 1 and ${operators.length}`);
+  if (!Number.isSafeInteger(threshold) || threshold < 2 || threshold > operators.length) {
+    throw new SparkInputError(`threshold: must be an integer between 2 and ${operators.length}`);
   }
 }
 
