@@ -1,6 +1,6 @@
 # Security audit scope and code guide
 
-Commit under review: 495e9680700dd4ef439d838edcc7a6c3b30c2761
+Commit under review: eb75e197ea88f5b6baa116c5fdb30008828121f9
 
 ## Purpose and deliverables
 
@@ -167,17 +167,21 @@ identifiers are authoritative.
   `directRefundTx`, `directFromCpfpRefundTx`, `parentNodeId` and `treeId` —
   quarantines leaves whose exit chain fails verification, and isolates rows
   `mapTreeNode` cannot map, so a single malformed row never takes the
-  wallet down. Every node on an exit chain — leaf and ancestors, on the
-  sync, claim, swap, deposit and renew paths alike — must be served
-  identically by the coordinator and every operator (transaction bytes,
-  parent linkage, `treeId`, `vout` and the direct variants), and a leaf's
-  `valueSats` must equal output 0 of its `nodeTx`; a leaf that fails either
-  check is quarantined and, for an explicit exit, the error names the leaf
-  and the field. A stored exit chain is swept only when no operator
-  reported that node id at all in the sync, or when the coordinator's row
-  is not owned and every other operator serves an agreeing row
-  (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
-  `exit/unilateral.ts`).
+  wallet down. Conflicting duplicate rows for one leaf id — from the
+  coordinator or any operator — quarantine the id outright; identical
+  duplicates are deduplicated. Every node on an exit chain — leaf and
+  ancestors, on the sync, claim, swap, deposit and renew paths alike — must
+  be served identically by the coordinator and every operator (transaction
+  bytes, parent linkage, `treeId`, `vout` and the direct variants), and a
+  leaf's `valueSats` must equal output 0 of its `nodeTx`; a leaf that fails
+  either check is quarantined and, for an explicit exit, the error names the
+  leaf and the field. Token outputs and balances carry the same rule:
+  `query_token_outputs` runs on every operator and an output counts only
+  when all operators serve identical owner, token identifier, amount,
+  previous outpoint and status — `output.id` is SO-local and never part of
+  the comparison — and disagreement or conflicting duplicates exclude the
+  outpoint (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
+  `exit/unilateral.ts`, `tokens/query.ts`, `client/tokens.ts`).
 - **P7 — Idempotent retries never double-spend.** Sats transfers take a
   caller-supplied `transferId`; retries rebind and verify the committed
   transfer rather than re-sending. Token transfers take
@@ -190,11 +194,22 @@ identifiers are authoritative.
   than being trusted. Public entry points validate sats amounts and fee
   bounds (safe integers ≥ 0) before any remote call. Pending-transfer rows
   that cannot be mapped are isolated and reported as failures instead of
-  starving valid transfers. SSP read-only queries retry up to three
+  starving valid transfers. A committed transfer found by probing a
+  caller-supplied `transferId` — a previous call's commit, including a
+  cooperative-exit resume — is cross-verified before it can report success
+  or resume: `query_transfers_by_id` runs on every operator and must agree
+  on id, type, status class, sender, receivers and leaf set; a transport
+  failure is `SparkRequestError` (retryable with the same id), a real
+  mismatch `SparkError`. A transfer this call just committed — fresh
+  response or same-call lost-response recovery — is not gated on that
+  read: it is already authorized by the caller's own signing package, so
+  the post-commit steps (e.g. `requestLightningSend`) continue
+  unconditionally. SSP read-only queries retry up to three
   attempts with injected-sleep backoff, and only on transport/timeout
   errors — mutations are never retried (`client/context.ts`,
   `transfer/claim.ts`, `transfer/query.ts`, `tokens/transfer.ts`,
-  `exit/coop.ts`, `ssp/index.ts`).
+  `client/transfers.ts`, `lightning/send.ts`, `exit/coop.ts`,
+  `ssp/index.ts`).
 - **P9 — Bounded resource use.** All remote-driven loops are bounded:
   pagination caps and the coordinator's explicit `-1` end offset with
   strictly-advancing offsets on every paged RPC, request timeouts, LNURL per-user/global invoice quotas and HTTP body limits, and
@@ -212,19 +227,37 @@ identifiers are authoritative.
 - **P11 — Unilateral exit availability.** Two paths produce the same
   broadcast order: `unilateralExit` queries the operators live, and
   `offlineExitTransactions` derives the list purely from the exit chains the
-  store persists — no network — for when the operators are unreachable or
-  withholding data; stored chains are refreshed on every leaves sync.
-  Chains are built only from nodes served identically by every operator and
-  walked via the agreed `parentNodeId` — truncated or retargeted chains are
-  rejected — and the leaf's `valueSats` must equal output 0 of its
-  `nodeTx`. Every transaction must be broadcast and confirmed within the
+  caller-provided `SparkStore` persists — `createSparkClient` requires an
+  explicit store so durability is never an invisible default — for when the
+  operators are unreachable or withholding data; stored chains are
+  refreshed on every leaves sync. Chains are built only from nodes served
+  identically by every operator and walked via the agreed `parentNodeId` —
+  truncated or retargeted chains are rejected — and the leaf's `valueSats`
+  must equal output 0 of its `nodeTx`. A stored chain is deleted only on
+  operator-endorsed positive evidence: a commit made by this call deletes
+  leaf ids that are both locally selected and inside the reported transfer
+  (a retry-probe hit deletes nothing — the sync sweep handles it), and the
+  sync sweep deletes an id only when every operator answers and either no
+  operator returns the node or all agree it is no longer exitable by this
+  wallet — different owner or a terminal status (`EXITED`,
+  `WATCHTOWER_EXITED`, `WATCHTOWER_EXIT_RECOVERED`; `ON_CHAIN` is not
+  terminal because the node transaction may confirm while the refund path
+  stays CSV-locked); absence from the AVAILABLE
+  page alone never deletes, and any operator error keeps the chain.
+  Every transaction must be broadcast and confirmed within the
   `DIRECT_TIMELOCK_OFFSET` (50-block) deadline of it becoming broadcastable,
   or the watchtower may publish variants instead (`exit/unilateral.ts`,
-  `exit/watchtower.ts`, `client/withdrawals.ts`).
+  `exit/watchtower.ts`, `exit/coop.ts`, `client/context.ts`,
+  `client/withdrawals.ts`).
 - **P12 — LNURL server safety.** The LNURL server custodies no funds;
   preimage is verified before a settle is recorded; zap requests are
-  validated per NIP-57; outbound fetches are restricted
-  (`packages/spark/src/server/index.ts`, `apps/lnurl-server/src/`).
+  validated per NIP-57; outbound fetches are restricted — zap receipt relay
+  URLs must be `wss://` on port 443 with a plausibly public host:
+  single-label and internal-TLD names (`.local`, `.lan`, `.home`,
+  `.home.arpa`, `.internal`, `.intranet`, `.corp`, `.localdomain`,
+  `.localhost`, `.onion`), IPv6 literals and private/reserved IPv4 literals
+  are all rejected (`packages/spark/src/server/index.ts`,
+  `apps/lnurl-server/src/`, `apps/lnurl-server/src/zap.ts`).
 
 ## Scope
 
@@ -315,14 +348,34 @@ Ranked by risk:
   the SSP identity bound at signer construction, so the SSP can hold the key
   for that deposit; the static-deposit key is derived at fixed index 0.
 - Spending requires every operator online and in agreement: leaf selection,
-  sync and exit-chain verification query all operators and fail closed on a
-  missing or disagreeing row — one offline or dissenting operator blocks the
-  spend.
+  token output reads, committed-transfer verification, sync and exit-chain
+  verification query all operators and fail closed on a missing or
+  disagreeing row — one offline or dissenting operator blocks the spend.
+- `createSparkClient` requires an explicit `SparkStore`; stored exit chains
+  are the wallet's unilateral-exit data and their durability is a caller
+  decision — `createMemorySparkStore()` loses them on restart by design.
+- Release provenance is partial: only `spark.wasm` is byte-reproducible in
+  CI; the pack job that builds each published tarball could still inject
+  code into it (JS bundles are not independently reproducible), though the
+  native iOS/Android artifacts carry build-provenance attestations minted
+  in the publish-only `native-artifact` job on
+  release runs and published packages ship no source maps (I-06).
+- Dependabot routine version updates for the crypto and wire-format
+  dependencies (`@noble/*`, `@scure/*`, `@bufbuild/*`, `@connectrpc/*`, and
+  the Rust crypto crates) are ignored entirely — they are bumped by hand
+  together with the upstream pin in `scripts/lock.json`; security updates
+  still open PRs.
 - Stored exit chains are not retained for in-flight lightning leaves.
   Recovering the sender's side of an expired lightning HTLC uses
   `lightning.sweepHtlcTimeout` against the SSP-served HTLC transaction
   (BIP-342 script-path signature after `LIGHTNING_HTLC_SEQUENCE` blocks),
   not stored chains.
+- A preimage swap committed but abandoned before `requestLightningSend`
+  reached the SSP cannot be cancelled from the client: upstream exposes
+  `cancel_transfer` for the sender after expiry, but the SDK does not
+  surface it and the leaves stay locked until the SO returns the swap on
+  its own schedule — earlier than the 16-day transfer expiry in practice,
+  but not on any deadline the client controls.
 - `loadSparkWasm()` does not verify `SPARK_WASM_INTEGRITY` itself; consumers
   needing SRI must fetch with `integrity` and pass the bytes as `module`.
 - Served exit-chain transactions are checked for linkage, output scripts
@@ -333,9 +386,9 @@ Ranked by risk:
 
 ## Prior internal review
 
-Nine review rounds have run. Rounds 1–8 were internal; round 9 was the
-external audit scoped by this document, whose remediations are listed last.
-Areas covered:
+Ten review rounds have run. Rounds 1–8 were internal; rounds 9 and 10 were
+external audits scoped by this document, whose remediations are listed
+last. Areas covered:
 
 - Transfer claim/pending-transfer failure and pagination handling.
 - LNURL invoice/database growth and repeated settlement polling; request
@@ -373,9 +426,46 @@ Round 9 (external audit) remediations:
   risk documented as Breez parity (L-07).
 - Release pipeline: tagged-release ancestry check against `origin/main` and
   a WASM reproducibility job gating publish (L-06). The unprivileged pack /
-  privileged OIDC publish split in `qntx/workflows` is prepared in
-  qntx/workflows#113 and pending maintainer merge and a `v2` retag
-  (M-03).
+  privileged OIDC publish split in `qntx/workflows` landed — `v2` points at
+  `v2.12.0` with the pack/publish split (M-03).
+
+Round 10 (external audit) remediations:
+
+- Stored exit chains are deleted only on operator-endorsed positive
+  evidence: a commit made by this call deletes leaf ids that are both
+  locally selected and inside the reported transfer, the cross-operator
+  gate (`query_transfers_by_id` on every operator) applies only when a
+  caller-supplied `transferId` probes a previous call's commit —
+  transport failures there are `SparkRequestError`, mismatches
+  `SparkError` — a probe hit deletes nothing, and the
+  sync sweep requires every operator to agree the node is no longer
+  exitable by this wallet — different owner or a terminal status
+  (`EXITED`, `WATCHTOWER_EXITED`, `WATCHTOWER_EXIT_RECOVERED`) — or absent
+  everywhere; never mere absence from
+  the AVAILABLE page; conflicting duplicate rows quarantine the leaf id
+  (N-01, N-02, N-04, L-05).
+- Cooperative-exit resume re-verifies the committed transfer across
+  operators and enforces `maxFeeSats` on the derived fee — an
+  already-committed exit reports fee and payout instead of silently
+  succeeding over budget (L-01).
+- The signer's operator set, VSS threshold and SSP identity are fixed at
+  `createSparkSigner` construction; prepare/claim/static-deposit requests
+  no longer carry them and cannot redirect sealed key material or VSS
+  shares (N-03).
+- Token outputs and balances require all-operator agreement —
+  `query_token_outputs` runs on every operator and only unanimously
+  reported outputs count (N-05).
+- `createSparkClient` requires an explicit `SparkStore`; the mainnet-trial
+  file store fsyncs the temp file and directory around the rename; the zap
+  relay filter also rejects single-label and internal-TLD hostnames (L-03,
+  I-08, I-05).
+- Release hardening: native release builds skip the shared rust cache and
+  the publish-only `native-artifact` job in `publish-npm.yml` — the only
+  job holding `id-token`/`attestations` permissions — attests the
+  downloaded XCFramework and JNI artifacts; Dependabot ignores
+  routine updates for the crypto and wire-format dependencies; dead
+  `deny.toml` sources and license allowances removed; published packages
+  ship no source maps (L-02, L-04, I-10).
 
 ## Build, test and reproduce
 
@@ -610,7 +700,8 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 #### Token transfer / consolidate and explicit-input retry
 
 1. `client/tokens.ts:sendTokens`/`consolidate` enter `[tokenLock]`.
-2. `tokens/query.ts:queryTokenOutputs` selects inputs.
+2. `tokens/query.ts:queryVerifiedTokenOutputs` selects inputs — only
+   outputs every operator reports identically are eligible.
 3. `tokens/transfer.ts:buildTransferPartial` builds the partial transaction;
    the caller signs each input with the identity key.
 4. `broadcastPartialTokenTransaction` broadcasts and verifies the final tx;
