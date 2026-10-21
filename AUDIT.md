@@ -1,6 +1,6 @@
 # Security audit scope and code guide
 
-Commit under review: dc95b87dad92b71b4318e91aae463fce997bb772
+Commit under review: <sha> — re-pin at merge time
 
 ## Purpose and deliverables
 
@@ -153,9 +153,12 @@ identifiers are authoritative.
   (`deposit/index.ts`).
 - **P6 — Operator agreement and per-leaf quarantine.** `syncLeaves` requires
   field agreement across all operators — including `directTx`,
-  `directRefundTx`, `directFromCpfpRefundTx` — and quarantines leaves whose
-  exit chain fails verification, without bricking the rest of the wallet
-  (`client/context.ts`, `tree/verify.ts`, `exit/unilateral.ts`).
+  `directRefundTx`, `directFromCpfpRefundTx` — quarantines leaves whose exit
+  chain fails verification, and isolates rows `mapTreeNode` cannot map, so a
+  single malformed row never takes the wallet down. A stored exit chain is
+  swept only when no operator reported that node id at all in the sync
+  (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
+  `exit/unilateral.ts`).
 - **P7 — Idempotent retries never double-spend.** Sats transfers take a
   caller-supplied `transferId`; retries rebind and verify the committed
   transfer rather than re-sending. Token transfers take
@@ -168,20 +171,28 @@ identifiers are authoritative.
   than being trusted (`client/context.ts`, `transfer/claim.ts`,
   `transfer/query.ts`, `tokens/transfer.ts`, `exit/coop.ts`).
 - **P9 — Bounded resource use.** All remote-driven loops are bounded:
-  pagination caps and strictly-advancing offsets on every paged RPC, request
-  timeouts, LNURL per-user/global invoice quotas and HTTP body limits, and
+  pagination caps and the coordinator's explicit `-1` end offset with
+  strictly-advancing offsets on every paged RPC, request timeouts, LNURL per-user/global invoice quotas and HTTP body limits, and
   bounded zap-receipt publishing (`client/context.ts`, `transfer/query.ts`,
   `tokens/transfer.ts`, `apps/lnurl-server/src/http.ts`,
   `apps/lnurl-server/src/config.ts`, `apps/lnurl-server/src/zap.ts`).
-- **P10 — Offline receive.** A committed transfer cannot be revoked by the
-  sender; the receiver can claim at any later time without being online when
-  it committed (`transfer/query.ts`, `transfer/claim.ts`).
-- **P11 — Unilateral exit availability.** Stored exit chains are sufficient
-  to exit unilaterally: `unilateralExitTransactions` returns the full
-  broadcast order; every transaction must be broadcast and confirmed within
-  the `DIRECT_TIMELOCK_OFFSET` (50-block) deadline of it becoming
-  broadcastable, or the watchtower may publish variants instead
-  (`exit/unilateral.ts`, `exit/watchtower.ts`, `client/withdrawals.ts`).
+- **P10 — Offline receive.** A committed TRANSFER-type receive cannot be
+  revoked by the sender: `cancel_transfer` accepts only SenderInitiated or
+  Returned states for non-preimage transfers, so a committed transfer in
+  SENDER_KEY_TWEAKED cannot be cancelled even after expiry (upstream
+  `so/handler/base_transfer_handler.go:1322-1333`; the after-expiry branch
+  applies to PREIMAGE_SWAP sends only). The receiver can claim at any later
+  time without being online when it committed (`transfer/query.ts`,
+  `transfer/claim.ts`).
+- **P11 — Unilateral exit availability.** Two paths produce the same
+  broadcast order: `unilateralExit` queries the operators live, and
+  `offlineExitTransactions` derives the list purely from the exit chains the
+  store persists — no network — for when the operators are unreachable or
+  withholding data; stored chains are refreshed on every leaves sync. Every
+  transaction must be broadcast and confirmed within the
+  `DIRECT_TIMELOCK_OFFSET` (50-block) deadline of it becoming broadcastable,
+  or the watchtower may publish variants instead (`exit/unilateral.ts`,
+  `exit/watchtower.ts`, `client/withdrawals.ts`).
 - **P12 — LNURL server safety.** The LNURL server custodies no funds;
   preimage is verified before a settle is recorded; zap requests are
   validated per NIP-57; outbound fetches are restricted
@@ -256,10 +267,17 @@ Ranked by risk:
   exit.
 - WASM vs native backends differ in error type on invalid integers.
 - Pending-transfer claim time grows with transfer count.
+- Reusable workflows are referenced by the moving `qntx/workflows@v2` tag;
+  moving it requires a protected-environment retag approved by a second
+  account (third-party actions are SHA-pinned).
+- `renewLeaf` trusts the coordinator's returned node until the next sync
+  re-verifies it; signing would fail on a bad node.
+- `query_unused_deposit_addresses` upstream paging under-reports when a page
+  contains used addresses (the SO applies LIMIT before filtering).
 
 ## Prior internal review
 
-Seven internal review rounds have run before this audit. Areas covered:
+Eight internal review rounds have run before this audit. Areas covered:
 
 - Transfer claim/pending-transfer failure and pagination handling.
 - LNURL invoice/database growth and repeated settlement polling; request
@@ -273,6 +291,9 @@ Seven internal review rounds have run before this audit. Areas covered:
   leaves, direct refund-field agreement checks.
 - Nitro FFI error mapping into `SparkCryptoError`.
 - RPC timeouts and bounded retries across the connection layer.
+- Leaves-sync per-row isolation and union-based exit-chain retention,
+  explicit end-offset paging, exit-chain sequence validation, offline exit
+  from stored chains, and token commit-status handling.
 
 ## Build, test and reproduce
 
@@ -451,9 +472,11 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 #### Unilateral exit and watchtower recovery
 
 1. `client/withdrawals.ts:unilateralExit` →
-   `exit/unilateral.ts:unilateralExitTransactions` returns the ordered
-   `ExitTransactions` built from stored `SparkExitChain`s — broadcasting is
-   the host's job.
+   `exit/unilateral.ts:unilateralExitTransactions` queries the operators
+   live and returns the ordered `ExitTransactions`;
+   `client/withdrawals.ts:offlineExitTransactions` produces the same list
+   from stored `SparkExitChain`s with no network calls. Broadcasting is the
+   host's job.
 2. Deadline: every transaction must be broadcast and confirmed within 50
    blocks (`DIRECT_TIMELOCK_OFFSET`) of it becoming broadcastable, or the
    watchtower may publish self-fee/direct variants instead.
@@ -489,7 +512,9 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 2. `tokens/query.ts:queryTokenOutputs` selects inputs.
 3. `tokens/transfer.ts:buildTransferPartial` builds the partial transaction;
    the caller signs each input with the identity key.
-4. `broadcastPartialTokenTransaction` broadcasts and verifies the final tx.
+4. `broadcastPartialTokenTransaction` broadcasts and verifies the final tx;
+   only `COMMIT_FINALIZED` is success — `COMMIT_PROCESSING` polls the
+   committed-transaction probe on a bounded backoff until finalized.
 5. Lost response: one identical retry, then `probeCommittedTransfer` pages
    `query_token_transactions` (`TOKEN_TX_PAGE_SIZE` 100, advancing offset,
    `TOKEN_TX_MAX_PAGES`) — a FINALIZED match returns its hash; an uncertain
@@ -503,8 +528,8 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 #### Leaves sync, operator agreement, exit-chain refresh, quarantine
 
 1. `client/context.ts:syncLeaves` (called inside every spend path) queries
-   all operators with a strictly-advancing paged `queryOwnerNodes`
-   (`TREE_MAX_PAGES`).
+   all operators with a paged `queryOwnerNodes` that ends on the
+   coordinator's explicit `-1` offset (`TREE_MAX_PAGES`).
 2. Ancestor leaves are removed from spendable candidates; `ownsLeaf` checks
    each leaf's owner key against signer-derived keys.
 3. `tree/verify.ts:operatorsDisagree` compares every field across operators,
@@ -514,7 +539,8 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
    `buildExitChains`/`buildLeafExitChain` per leaf (shared `LinkageCache`);
    valid chains are stored, rejected leaf ids are quarantined; a stale chain
    stored earlier is retained.
-5. Stale chains keyed by `ownedIds` are pruned.
+5. Stored chains are swept only for node ids no operator reported at all —
+   mapped or unmappable — in this sync.
 
 #### LNURL server register → callback → settle → zap receipt
 
