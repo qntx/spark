@@ -253,7 +253,7 @@ function makeClient(
       fetch: sspFetch ?? (async () => Promise.reject(new Error("no fetch"))),
       random: fixedRandom(),
       operators: OPERATORS,
-      ...(store === undefined ? {} : { store }),
+      store: store ?? createMemorySparkStore(),
       ...(sspIdentity === undefined
         ? {}
         : {

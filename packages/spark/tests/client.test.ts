@@ -8,7 +8,7 @@ import { base64 } from "@scure/base";
 import { Transaction } from "@scure/btc-signer";
 import { expect, test } from "vite-plus/test";
 
-import { createSparkClientWith } from "../src/client/index.ts";
+import { createSparkClient, createSparkClientWith } from "../src/client/index.ts";
 import { p2trScriptFromPublicKey, txId } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkRequestError } from "../src/errors/index.ts";
@@ -206,7 +206,7 @@ function makeClient(
       random: (length) => new Uint8Array(length).fill(1),
       sleep: async () => Promise.resolve(),
       operators: OPERATORS,
-      ...(store === undefined ? {} : { store }),
+      store: store ?? createMemorySparkStore(),
     },
     {
       transportFactory: (interceptors, operator) =>
@@ -236,6 +236,18 @@ function makeClient(
     },
   );
 }
+
+test("createSparkClient requires an explicit store — no silent memory default", () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  // Deliberately untyped: a JS caller must not get an implicit in-memory store.
+  const options = {
+    network: "mainnet",
+    signer,
+    fetch: sspFetch,
+    random: (length: number) => new Uint8Array(length).fill(1),
+  } as unknown as Parameters<typeof createSparkClient>[0];
+  expect(() => createSparkClient(options)).toThrow("options.store is required");
+});
 
 test("leaves and balance page through query_nodes until a short page", async () => {
   const secrets = Array.from({ length: 51 }, (_, i) => leafSecret(i));

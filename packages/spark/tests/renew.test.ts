@@ -14,6 +14,7 @@ import {
   txId,
 } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
 import {
   ChallengeSchema,
   ProtectedChallengeSchema,
@@ -282,6 +283,7 @@ function makeWalletClient(signer: SparkSigner, sparkImpl: SparkImpl) {
       fetch: async () => Promise.reject(new Error("no fetch")),
       random: fixedRandom(),
       operators: OPERATORS,
+      store: createMemorySparkStore(),
     },
     {
       transportFactory: (interceptors) =>

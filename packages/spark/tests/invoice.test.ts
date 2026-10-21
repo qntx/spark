@@ -18,6 +18,7 @@ import type { SparkInvoiceFields } from "../src/core/invoice.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { finalizeTokenInvoice, prepareTokenInvoice } from "../src/core/token-invoice.ts";
 import { SparkError, SparkInputError } from "../src/errors/index.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
 import { createSatsInvoice, createTokensInvoice, parseSparkInvoice } from "../src/invoice/index.ts";
 import {
   ChallengeSchema,
@@ -221,6 +222,7 @@ function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, tokenImpl?: Token
       random: fixedRandom(),
       now: () => NOW,
       operators: OPERATORS,
+      store: createMemorySparkStore(),
     },
     {
       transportFactory: (interceptors) =>

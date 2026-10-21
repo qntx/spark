@@ -213,7 +213,7 @@ function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStor
       fetch: async () => Promise.reject(new Error("no fetch")),
       random: fixedRandom(),
       operators: OPERATORS,
-      ...(store === undefined ? {} : { store }),
+      store: store ?? createMemorySparkStore(),
     },
     {
       transportFactory: (interceptors) =>
