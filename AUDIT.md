@@ -298,10 +298,11 @@ Ranked by risk:
 - Reusable workflows are referenced by the moving `qntx/workflows@v2` tag;
   moving it requires a protected-environment retag approved by a second
   account (third-party actions are SHA-pinned).
-- `renewLeaf` no longer trusts the coordinator's returned node: the node is
-  adopted only after the same cross-operator verification and leaf-value
-  binding applied to every other chain source; a disagreeing or mislabelled
-  node is rejected and quarantined instead of carried until the next sync.
+- `renewLeaf` applies `malformedLeafTx` — including the `nodeTx` output-0
+  value binding — to the coordinator's returned node before it can be
+  selected, and cross-operator verification applies when its exit chain is
+  stored; the node's other fields are trusted until the next sync
+  re-verifies them (a bad key or keyshare would make signing fail).
 - `SparkSigner` enforces no transaction-semantics policy — it signs what the
   client layer asks it to. Funds safety relies on client-layer transaction
   construction and validation (P4); callers must not use the signer as a
@@ -366,9 +367,11 @@ Round 9 (external audit) remediations:
   `lightning.sweepHtlcTimeout` (M-02).
 - LNURL registered-user cap `LNURL_MAX_USERS`; zap `p`-tag misattribution
   risk documented as Breez parity (L-07).
-- Release pipeline: tagged-release ancestry check against `origin/main`,
-  WASM reproducibility job gating publish, and an unprivileged pack job
-  split from the privileged OIDC publish in `qntx/workflows` (L-06, M-03).
+- Release pipeline: tagged-release ancestry check against `origin/main` and
+  a WASM reproducibility job gating publish (L-06). The unprivileged pack /
+  privileged OIDC publish split in `qntx/workflows` is prepared in
+  qntx/workflows#113 and pending maintainer merge and a `v2` retag
+  (M-03).
 
 ## Build, test and reproduce
 
