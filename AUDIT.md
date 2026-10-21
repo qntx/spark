@@ -272,6 +272,9 @@ Ranked by risk:
   account (third-party actions are SHA-pinned).
 - `renewLeaf` trusts the coordinator's returned node until the next sync
   re-verifies it; signing would fail on a bad node.
+- Served exit-chain transactions are checked for linkage, output scripts
+  and operator agreement, but not for signature validity or sequence
+  policy; a malformed served transaction surfaces at broadcast time.
 - `query_unused_deposit_addresses` upstream paging under-reports when a page
   contains used addresses (the SO applies LIMIT before filtering).
 
@@ -292,8 +295,8 @@ Eight internal review rounds have run before this audit. Areas covered:
 - Nitro FFI error mapping into `SparkCryptoError`.
 - RPC timeouts and bounded retries across the connection layer.
 - Leaves-sync per-row isolation and union-based exit-chain retention,
-  explicit end-offset paging, exit-chain sequence validation, offline exit
-  from stored chains, and token commit-status handling.
+  explicit end-offset paging, offline exit from stored chains, and token
+  commit-status handling.
 
 ## Build, test and reproduce
 
