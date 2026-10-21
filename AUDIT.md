@@ -273,6 +273,8 @@ Ranked by risk:
   account (third-party actions are SHA-pinned).
 - `renewLeaf` trusts the coordinator's returned node until the next sync
   re-verifies it; signing would fail on a bad node.
+- `loadSparkWasm()` does not verify `SPARK_WASM_INTEGRITY` itself; consumers
+  needing SRI must fetch with `integrity` and pass the bytes as `module`.
 - Served exit-chain transactions are checked for linkage, output scripts
   and operator agreement, but not for signature validity or sequence
   policy; a malformed served transaction surfaces at broadcast time.
@@ -338,8 +340,9 @@ SPARK_E2E_HOSTED=1 bunx vp test --no-file-parallelism tests/e2e-hosted-*.test.ts
 ```
 
 WASM reproducibility: `bun run --cwd packages/spark-wasm build:wasm` performs
-a pinned `linux/amd64` Docker build; `packages/spark-wasm/src/integrity.ts`
-verifies the artifact hash at load.
+a pinned `linux/amd64` Docker build; the `SPARK_WASM_INTEGRITY` constant
+exported from `packages/spark-wasm` (`src/integrity.ts`) is the artifact's
+SHA-256 SRI and is compared against the packed `spark.wasm` in tests.
 
 ## Code guide
 
@@ -378,7 +381,8 @@ verifies the artifact hash at load.
 - `packages/spark/src/server/` — `createLightningAddressServer`.
 - `packages/spark/src/proto/gen` — generated protobuf (out of scope).
 - `packages/spark-wasm/src` — WASM loader + integrity (`instance.ts`,
-  `load.ts`, `integrity.ts`, `spark.wasm`).
+  `load.ts`, `integrity.ts`, `spark.wasm`); exports `SPARK_WASM_INTEGRITY`
+  for consumer-side SRI fetches.
 - `packages/spark-native/src` + `cpp/` — native binding (`bind.ts`,
   `specs`, `cpp/` nitro module).
 - `crates/spark-crypto/src` — `lib.rs`, `frost.rs`, `ecies.rs`, `vss.rs`,
