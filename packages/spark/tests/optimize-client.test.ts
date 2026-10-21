@@ -2,20 +2,14 @@ import { create } from "@bufbuild/protobuf";
 import { createClient, createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { utf8ToBytes } from "@noble/hashes/utils.js";
-import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
 import type { ClientContext } from "../src/client/context.ts";
 import { optimizeLeaves } from "../src/client/optimize.ts";
-import {
-  createCurrentTimelockRefundTxs,
-  p2trScriptFromPublicKey,
-} from "../src/core/bitcoin/index.ts";
+import { createCurrentTimelockRefundTxs } from "../src/core/bitcoin/index.ts";
 import { sendLeafSigningDigest } from "../src/core/hashing/statements.ts";
 import { createMutex } from "../src/core/mutex.ts";
 import { sparkNetworkConfig } from "../src/core/network.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import {
@@ -25,7 +19,6 @@ import {
   LeafRefundTxSigningResultSchema,
   Network,
   QueryTransfersResponseSchema,
-  RequestedSigningCommitmentsSchema,
   SigningKeyshareSchema,
   SigningResultSchema,
   SparkService,
@@ -48,105 +41,24 @@ import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import {
+  commitmentGroup,
+  fabricateLeaf,
+  fixedRandom,
+  hashedRandom,
+  OPERATORS,
+  operatorCommitments,
+  required,
+  SHARE_PUB,
+  THRESHOLD,
+  verifyingKeyFor,
+} from "./support/fakes.ts";
 
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
-const THRESHOLD = 2;
 const SSP_SECRET = new Uint8Array(32).fill(21);
 const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
 const NOW_MS = 1_700_000_000_000;
-const SHARE_SECRET = 0x5ea5n;
-const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
 
 const sorted = (values: ReadonlyArray<number>): number[] => values.toSorted((a, b) => a - b);
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
-
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
-  };
-}
-
-/** Distinct random streams per leaf so leaf signing keys never collide. */
-function keyedRandom(leafId: string): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i += 32) {
-      const block = sha256(utf8ToBytes(`optimize-test-${leafId}-${counter}`));
-      counter += 1;
-      out.set(block.subarray(0, Math.min(32, length - i)), i);
-    }
-    return out;
-  };
-}
-
-function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-  return secp256k1.Point.fromBytes(SHARE_PUB)
-    .add(secp256k1.Point.fromBytes(signingPublicKey))
-    .toBytes(true);
-}
-
-function fabricateLeaf(options: {
-  leafId: string;
-  signingPublicKey: Uint8Array;
-  ownerIdentityPublicKey: Uint8Array;
-  valueSats: bigint;
-  refundSequence?: number;
-}): SparkLeaf {
-  const verifyingKey = verifyingKeyFor(options.signingPublicKey);
-  const nodeTx = new Transaction({ allowUnknownOutputs: true });
-  nodeTx.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
-  nodeTx.addOutput({
-    script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-    amount: options.valueSats,
-  });
-  const nodeTxBytes = nodeTx.toBytes(true);
-  const refundTx = createCurrentTimelockRefundTxs({
-    nodeTx: nodeTxBytes,
-    sequence: options.refundSequence ?? 2000,
-    receivingPublicKey: options.signingPublicKey,
-    network: "regtest",
-  }).cpfpRefund.txBytes;
-  return {
-    id: options.leafId,
-    treeId: `tree-${options.leafId}`,
-    valueSats: Number(options.valueSats),
-    status: "AVAILABLE",
-    nodeTx: nodeTxBytes,
-    refundTx,
-    verifyingPublicKey: verifyingKey,
-    ownerIdentityPublicKey: options.ownerIdentityPublicKey,
-    ownerSigningPublicKey: options.signingPublicKey,
-    signingKeyshare: {
-      ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-      threshold: THRESHOLD,
-      publicKey: SHARE_PUB,
-    },
-    vout: 0,
-  };
-}
 
 /** A wallet leaf with a per-leaf signing key, as `syncLeaves` would map it. */
 async function walletLeaf(
@@ -163,27 +75,7 @@ async function walletLeaf(
     ownerIdentityPublicKey: identity,
     valueSats,
     ...(refundSequence === undefined ? {} : { refundSequence }),
-  });
-}
-
-function operatorCommitments(): Record<string, { hiding: Uint8Array; binding: Uint8Array }> {
-  return Object.fromEntries(
-    OPERATORS.map((op, i) => [
-      op.identifier,
-      {
-        hiding: secp256k1.Point.BASE.toBytes(true),
-        binding: secp256k1.Point.BASE.multiply(BigInt(i + 2)).toBytes(true),
-      },
-    ]),
-  );
-}
-
-function commitmentGroup(count: number) {
-  return Array.from({ length: count }, () =>
-    create(RequestedSigningCommitmentsSchema, {
-      signingNonceCommitments: operatorCommitments(),
-    }),
-  );
+  }).leaf;
 }
 
 function signingResult(leafId: string, verifyingKey: Uint8Array) {
@@ -224,7 +116,7 @@ async function sspInboundLeaf(
     valueSats,
   });
   const { nodeTx } = fabricated;
-  const verifyingKey = fabricated.verifyingPublicKey;
+  const verifyingKey = fabricated.leaf.verifyingPublicKey;
   const intermediateRefundTx = createCurrentTimelockRefundTxs({
     nodeTx,
     sequence: 1900,
@@ -473,7 +365,7 @@ async function swapContext(options?: {
     },
     operators: OPERATORS,
     store,
-    random: keyedRandom("context"),
+    random: hashedRandom("optimize-test-context"),
     now: () => NOW_MS,
     sleep: async () => Promise.resolve(),
     transferCoordinator: {

@@ -15,11 +15,7 @@ import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkInputError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import { payLightningInvoice } from "../src/lightning/index.ts";
-import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
+import { SparkAuthnService } from "../src/proto/gen/spark_authn_pb.ts";
 import {
   Network,
   QueryTransfersResponseSchema,
@@ -49,6 +45,7 @@ import { buildTransferPartial } from "../src/tokens/index.ts";
 import type { SparkTokenOutput } from "../src/tokens/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { encodeTestBolt11 } from "./support/bolt11.ts";
+import { authnServiceImpl, required } from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 // Round-9 external audit, group C. PoCs d4 and d5 run reversed: the bypassed fee gate now
@@ -57,13 +54,6 @@ import { createTestSigner } from "./support/test-signer.ts";
 // SSP read-only retry policy (I-12).
 
 const NOW_MS = 1_700_000_000_000;
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
 
 describe("d4: lightning.pay validates maxFeeSats before any SSP call", () => {
   const OPERATORS: ReadonlyArray<SparkOperatorConfig> = [
@@ -249,23 +239,7 @@ describe("d5: one malformed pending row cannot starve valid transfers", () => {
         transportFactory: (interceptors) =>
           createRouterTransport(
             (router) => {
-              router.service(SparkAuthnService, {
-                get_challenge: (req) => ({
-                  protectedChallenge: create(ProtectedChallengeSchema, {
-                    challenge: create(ChallengeSchema, {
-                      version: 1,
-                      timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                      nonce: new Uint8Array(4),
-                      publicKey: req.publicKey,
-                    }),
-                    serverHmac: new Uint8Array(4),
-                  }),
-                }),
-                verify_challenge: () => ({
-                  sessionToken: "so-tok",
-                  expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-                }),
-              });
+              router.service(SparkAuthnService, authnServiceImpl);
               router.service(SparkService, {
                 query_pending_transfers: async () => {
                   const pubkey = await signer.identityPublicKey();
@@ -328,23 +302,7 @@ describe("invoices.pay idempotency handles", () => {
   const COMMITTED_HASH = hexToBytes("11".repeat(32));
 
   function authnStub(router: ConnectRouter) {
-    router.service(SparkAuthnService, {
-      get_challenge: (req) => ({
-        protectedChallenge: create(ProtectedChallengeSchema, {
-          challenge: create(ChallengeSchema, {
-            version: 1,
-            timestamp: BigInt(Math.floor(Date.now() / 1000)),
-            nonce: new Uint8Array(4),
-            publicKey: req.publicKey,
-          }),
-          serverHmac: new Uint8Array(4),
-        }),
-      }),
-      verify_challenge: () => ({
-        sessionToken: "so-tok",
-        expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-      }),
-    });
+    router.service(SparkAuthnService, authnServiceImpl);
   }
 
   function satsInvoice(receiver: Uint8Array, amountSats: number): string {

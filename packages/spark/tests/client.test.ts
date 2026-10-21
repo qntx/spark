@@ -1,6 +1,6 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
-import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError } from "@connectrpc/connect";
 import type { HandlerContext } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
@@ -8,21 +8,15 @@ import { base64 } from "@scure/base";
 import { Transaction } from "@scure/btc-signer";
 import { expect, test } from "vite-plus/test";
 
-import { createSparkClient, createSparkClientWith } from "../src/client/index.ts";
+import { createSparkClient } from "../src/client/index.ts";
 import { p2trScriptFromPublicKey, txId } from "../src/core/bitcoin/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkRequestError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
 import type { SparkExitChain, SparkStore } from "../src/exit/store.ts";
 import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
-import {
   Network,
   QueryTransfersResponseSchema,
-  SparkService,
   SubscribeToEventsResponseSchema,
   TransferReceiverStatus,
   TreeNodeSchema,
@@ -32,6 +26,7 @@ import {
 } from "../src/proto/gen/spark_pb.ts";
 import type { QueryNodesRequest, TreeNode } from "../src/proto/gen/spark_pb.ts";
 import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
+import { makeTestClient } from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 const COORDINATOR_ID = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -198,43 +193,19 @@ function makeClient(
   /** Per-identifier overrides: an operator listed here gets this impl instead of `sparkImpl`. */
   operatorImpls: Record<string, object> = {},
 ) {
-  return createSparkClientWith(
-    {
-      network: "mainnet",
-      signer,
-      fetch: sspFetch,
-      random: (length) => new Uint8Array(length).fill(1),
-      sleep: async () => Promise.resolve(),
-      operators: OPERATORS,
-      store: store ?? createMemorySparkStore(),
-    },
-    {
-      transportFactory: (interceptors, operator) =>
-        createRouterTransport(
-          (router) => {
-            router.service(SparkAuthnService, {
-              get_challenge: (req) => ({
-                protectedChallenge: create(ProtectedChallengeSchema, {
-                  challenge: create(ChallengeSchema, {
-                    version: 1,
-                    timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                    nonce: new Uint8Array(4),
-                    publicKey: req.publicKey,
-                  }),
-                  serverHmac: new Uint8Array(4),
-                }),
-              }),
-              verify_challenge: () => ({
-                sessionToken: "so-tok",
-                expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-              }),
-            });
-            router.service(SparkService, operatorImpls[operator.identifier] ?? sparkImpl);
-          },
-          { transport: { interceptors: [...interceptors] } },
-        ),
-    },
-  );
+  return makeTestClient({
+    network: "mainnet",
+    signer,
+    spark: sparkImpl,
+    operatorImpls: Object.fromEntries(
+      Object.entries(operatorImpls).map(([id, spark]) => [id, { spark }]),
+    ),
+    operators: OPERATORS,
+    fetch: sspFetch,
+    random: (length) => new Uint8Array(length).fill(1),
+    sleep: async () => Promise.resolve(),
+    ...(store === undefined ? {} : { store }),
+  });
 }
 
 test("createSparkClient requires an explicit store — no silent memory default", () => {

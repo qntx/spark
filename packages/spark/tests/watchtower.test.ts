@@ -37,6 +37,7 @@ import type {
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import { required } from "./support/fakes.ts";
 import { lagrangeCoefficient, operatorSetup, operatorSignatureShares } from "./support/frost.ts";
 import type { FrostTestOperator } from "./support/frost.ts";
 
@@ -48,13 +49,6 @@ const DESTINATION_SCRIPT = p2trScriptFromPublicKey(
   secp256k1.Point.BASE.multiply(0xdeadn).toBytes(true),
   "regtest",
 );
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
 
 async function testSigner(): Promise<SparkSigner> {
   let counter = 0;

@@ -9,12 +9,9 @@ import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
 import {
-  createCurrentTimelockRefundTxs,
   createRefundTxsForLightning,
   getNextHTLCTransactionSequence,
-  p2trScriptFromPublicKey,
 } from "../src/core/bitcoin/index.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { SparkError, SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import {
   createLightningInvoice,
@@ -30,7 +27,6 @@ import {
   InitiatePreimageSwapResponseSchema,
   Network,
   QueryTransfersResponseSchema,
-  RequestedSigningCommitmentsSchema,
   SparkService,
   TransferLeafSchema,
   TransferSchema,
@@ -51,42 +47,19 @@ import type {
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
 import { encodeTestBolt11 } from "./support/bolt11.ts";
+import {
+  commitmentGroup,
+  fabricateSignedLeaf,
+  fixedRandom,
+  OPERATORS,
+  required,
+  THRESHOLD,
+} from "./support/fakes.ts";
 
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
-const THRESHOLD = 2;
 const SSP_SECRET = new Uint8Array(32).fill(21);
 const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
 const INVOICE_SECRET = new Uint8Array(32).fill(66);
 const SPARK_SCID = hexToBytes("f42400f424000001");
-
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
-
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
-  };
-}
 
 let signerPromise: Promise<SparkSigner> | undefined;
 async function testSigner(): Promise<SparkSigner> {
@@ -98,86 +71,6 @@ async function testSigner(): Promise<SparkSigner> {
       random: fixedRandom(),
     }))();
   return signerPromise;
-}
-
-const SHARE_SECRET = 0x5ea5n;
-const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
-function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-  return secp256k1.Point.fromBytes(SHARE_PUB)
-    .add(secp256k1.Point.fromBytes(signingPublicKey))
-    .toBytes(true);
-}
-
-/** A leaf with parseable node/refund txs, like transfer.test.ts's fixture. */
-async function fabricateLeaf(
-  signer: SparkSigner,
-  options: {
-    leafId: string;
-    valueSats?: bigint;
-    directNodeTx?: boolean;
-  },
-): Promise<SparkLeaf> {
-  const signingPublicKeys = await signer.publicKeys([{ type: "leaf", leafId: options.leafId }]);
-  const signingPublicKey = required(signingPublicKeys[0], "leaf signing key");
-  const ownerIdentityPublicKey = await signer.identityPublicKey();
-  const verifyingKey = verifyingKeyFor(signingPublicKey);
-  const nodeTx = new Transaction({ allowUnknownOutputs: true });
-  nodeTx.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
-  nodeTx.addOutput({
-    script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-    amount: options.valueSats ?? 100_000n,
-  });
-  const nodeTxBytes = nodeTx.toBytes(true);
-  const refundTx = createCurrentTimelockRefundTxs({
-    nodeTx: nodeTxBytes,
-    sequence: 2000,
-    receivingPublicKey: signingPublicKey,
-    network: "regtest",
-  }).cpfpRefund.txBytes;
-  let directTx: Uint8Array | undefined;
-  if (options.directNodeTx === true) {
-    const direct = new Transaction({ allowUnknownOutputs: true });
-    direct.addInput({ txid: new Uint8Array(32).fill(7), index: 0, sequence: 0 });
-    direct.addOutput({
-      script: p2trScriptFromPublicKey(verifyingKey, "regtest"),
-      amount: (options.valueSats ?? 100_000n) - 330n,
-    });
-    directTx = direct.toBytes(true);
-  }
-  return {
-    id: options.leafId,
-    treeId: `tree-${options.leafId}`,
-    valueSats: Number(options.valueSats ?? 100_000n),
-    status: "AVAILABLE",
-    nodeTx: nodeTxBytes,
-    refundTx,
-    ...(directTx === undefined ? {} : { directTx }),
-    verifyingPublicKey: verifyingKey,
-    ownerIdentityPublicKey,
-    ownerSigningPublicKey: signingPublicKey,
-    signingKeyshare: {
-      ownerIdentifiers: OPERATORS.map((op) => op.identifier),
-      threshold: THRESHOLD,
-      publicKey: SHARE_PUB,
-    },
-    vout: 0,
-  };
-}
-
-function commitments(count: number) {
-  return Array.from({ length: count }, () =>
-    create(RequestedSigningCommitmentsSchema, {
-      signingNonceCommitments: Object.fromEntries(
-        OPERATORS.map((op, i) => [
-          op.identifier,
-          {
-            hiding: secp256k1.Point.BASE.toBytes(true),
-            binding: secp256k1.Point.BASE.multiply(BigInt(i + 2)).toBytes(true),
-          },
-        ]),
-      ),
-    }),
-  );
 }
 
 /** A `query_transfers_by_id` lookup answering with the queued transfers in order, then none. */
@@ -304,7 +197,7 @@ function fakeSpark(handlers: {
           return respond(
             method,
             create(GetSigningCommitmentsResponseSchema, {
-              signingCommitments: commitments(3 * (req.nodeIds?.length ?? 1)),
+              signingCommitments: commitmentGroup(3 * (req.nodeIds?.length ?? 1)),
             }),
           );
         }
@@ -849,7 +742,7 @@ async function sendDeps(overrides: {
 describe("payLightningInvoice", () => {
   test("happy path: initiate fields, idempotency header, HTLC refund txs", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -926,7 +819,7 @@ describe("payLightningInvoice", () => {
 
   test("leaf with a direct tx signs all three HTLC refund variants", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, {
+    const leaf = await fabricateSignedLeaf(signer, {
       leafId: "leaf-d",
       valueSats: 150_000n,
       directNodeTx: true,
@@ -963,7 +856,7 @@ describe("payLightningInvoice", () => {
 
   test("caller-supplied transferId is reused (retry idempotency)", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -985,7 +878,7 @@ describe("payLightningInvoice", () => {
 
   test("fixed invoice rejects amountSats", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1000,7 +893,7 @@ describe("payLightningInvoice", () => {
 
   test("amountless invoice requires amountSats and forwards it", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({ secretKey: INVOICE_SECRET, paymentHash: PAYMENT_HASH });
     const { deps, feeEstimates } = await sendDeps({ leaves: [leaf] });
     await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
@@ -1021,7 +914,7 @@ describe("payLightningInvoice", () => {
 
   test("msat invoice amounts round up to sats", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1039,7 +932,7 @@ describe("payLightningInvoice", () => {
 
   test("expired invoice is rejected before the fee estimate", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1056,7 +949,7 @@ describe("payLightningInvoice", () => {
 
   test("fee estimate above maxFeeSats is rejected before any signing", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1072,7 +965,7 @@ describe("payLightningInvoice", () => {
   test("a lost initiate response recovers the committed transfer", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1105,7 +998,7 @@ describe("payLightningInvoice", () => {
 
   test("a non-committed initiate failure rethrows the original error", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1126,7 +1019,7 @@ describe("payLightningInvoice", () => {
   test("a committed swap under the caller's transfer id resumes without initiating", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1170,7 +1063,7 @@ describe("payLightningInvoice", () => {
 
   test("a fresh pay an operator cannot verify still requests the SSP send", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1195,7 +1088,7 @@ describe("payLightningInvoice", () => {
   test("a probed swap an operator serves differently is rejected as a verdict", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1243,7 +1136,7 @@ describe("payLightningInvoice", () => {
   test("a probed swap one operator cannot answer is retryable", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1286,7 +1179,7 @@ describe("payLightningInvoice", () => {
   test("a probed swap locked to a different payment hash is rejected", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1326,7 +1219,7 @@ describe("payLightningInvoice", () => {
   test("a probed swap carrying no intermediate refunds fails closed", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1359,7 +1252,7 @@ describe("payLightningInvoice", () => {
 
   test("an ssp send request bound to a different transfer id is rejected", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1378,7 +1271,7 @@ describe("payLightningInvoice", () => {
 
   test("an ssp send request echoing our transfer id proceeds", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1397,7 +1290,7 @@ describe("payLightningInvoice", () => {
   test("a terminal transfer under the caller's transfer id demands a fresh id", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1428,7 +1321,7 @@ describe("payLightningInvoice", () => {
   test("a probed swap whose committed fee exceeds maxFeeSats is rejected", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1", valueSats: 150_000n });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1463,7 +1356,7 @@ describe("payLightningInvoice", () => {
 
   test("a probed transfer under someone else's sender key is rejected", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1495,8 +1388,8 @@ describe("payLightningInvoice", () => {
 
   test("a commit naming leaves this call never selected deletes no chains", async () => {
     const signer = await testSigner();
-    const selected = await fabricateLeaf(signer, { leafId: "selected-1" });
-    const returned = await fabricateLeaf(signer, { leafId: "returned-9" });
+    const selected = await fabricateSignedLeaf(signer, { leafId: "selected-1" });
+    const returned = await fabricateSignedLeaf(signer, { leafId: "returned-9" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1511,7 +1404,7 @@ describe("payLightningInvoice", () => {
 
   test("exit chains are deleted before the ssp send request runs", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1534,7 +1427,7 @@ describe("payLightningInvoice", () => {
   test("a committed transfer to another receiver is rejected", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1560,7 +1453,7 @@ describe("payLightningInvoice", () => {
 
   test("a committed transfer from another sender is rejected", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1587,7 +1480,7 @@ describe("payLightningInvoice", () => {
   test("a probed transfer to another receiver does not count", async () => {
     const signer = await testSigner();
     const identityPublicKey = await signer.identityPublicKey();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,
@@ -1618,7 +1511,7 @@ describe("payLightningInvoice", () => {
 
   test("an ssp send request echoing a different invoice is rejected", async () => {
     const signer = await testSigner();
-    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const leaf = await fabricateSignedLeaf(signer, { leafId: "leaf-1" });
     const invoice = encodeTestBolt11({
       secretKey: INVOICE_SECRET,
       paymentHash: PAYMENT_HASH,

@@ -41,6 +41,7 @@ import type {
 import { createSparkSigner, sparkAccountKey } from "../../src/signer/index.ts";
 import type { SparkSigner } from "../../src/signer/types.ts";
 import { loadWasmBackend } from "./backend.ts";
+import { required } from "./fakes.ts";
 import { createTestSigner } from "./test-signer.ts";
 
 // Shared fixtures and mock-operator harnesses for the round-10 audit regression tests
@@ -48,12 +49,7 @@ import { createTestSigner } from "./test-signer.ts";
 // relationships, generated protobuf rows, per-operator router transports, and the bounded
 // single-mutation runners the external H1/H2 harnesses reduce to.
 
-export function required<T>(value: T | undefined, what: string): T {
-  if (value === undefined) {
-    throw new Error(`audit-r10 fixture: missing ${what}`);
-  }
-  return value;
-}
+export { required } from "./fakes.ts";
 
 export const OPERATORS: ReadonlyArray<SparkOperatorConfig> =
   sparkNetworkConfig("regtest").operators;

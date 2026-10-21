@@ -25,6 +25,7 @@ import {
 import type { QueryNodesRequest } from "../src/proto/gen/spark_pb.ts";
 import type { SparkLeafKey, SparkSigner } from "../src/signer/types.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
+import { required } from "./support/fakes.ts";
 
 const OPERATORS = ["id0001", "id0002"];
 const KEY = secp256k1.Point.BASE.multiply(5n).toBytes(true);
@@ -130,13 +131,6 @@ function nodeIdsFrom(req: QueryNodesRequest): ReadonlyArray<string> {
   return req.source.value.nodeIds;
 }
 
-function required<T>(value: T | undefined): T {
-  if (value === undefined) {
-    throw new Error("required value missing");
-  }
-  return value;
-}
-
 function sparkReturning(leaves: ReadonlyArray<SparkLeaf>) {
   const nodes: Record<string, ReturnType<typeof treeNodeProto>> = {};
   for (const leaf of leaves) {
@@ -230,10 +224,10 @@ describe("exitTransactions", () => {
   test("reports txids, parentTxid and relative timelocks", () => {
     const out = exitTransactions(buildExitChains(["leaf-b"], ALL_MAP, refundScripts("leaf-b")));
     const [rootTx, midTx, leafTx, refundTx] = out;
-    const root = required(rootTx);
-    const mid = required(midTx);
-    const leaf = required(leafTx);
-    const refund = required(refundTx);
+    const root = required(rootTx, "root exit tx");
+    const mid = required(midTx, "mid exit tx");
+    const leaf = required(leafTx, "leaf exit tx");
+    const refund = required(refundTx, "refund tx");
     expect(root.txid).toBe(txId(ROOT.nodeTx));
     expect(root.relativeTimelock).toBe(0);
     expect(mid.relativeTimelock).toBe(2000);

@@ -2,8 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, concatBytes, hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, test } from "vite-plus/test";
 
 import type { SigningTarget } from "../src/core/bitcoin/sighash.ts";
@@ -12,6 +11,7 @@ import { SparkInputError } from "../src/errors/index.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { FrostSignJob, SigningCommitment, SparkOperator } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
+import { seededRandom } from "./support/fakes.ts";
 import { be32 } from "./support/frost.ts";
 
 // External-audit round, group B: PoC d2 asserted a mid-batch validation failure inside signFrost
@@ -55,20 +55,6 @@ const backend = async (): Promise<SparkCrypto> => {
   cryptoPromise ??= loadWasmBackend();
   return cryptoPromise;
 };
-
-/** Deterministic non-repeating "randomness" — distinct sha256 blocks per call. */
-function seededRandom(seed: Uint8Array): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let offset = 0; offset < length; offset += 32) {
-      const block = sha256(concatBytes(seed, be32(BigInt(counter))));
-      counter += 1;
-      out.set(block.subarray(0, Math.min(32, length - offset)), offset);
-    }
-    return out;
-  };
-}
 
 function jobFor(commitment: SigningCommitment, identifier = VALID_IDENTIFIER): FrostSignJob {
   return {

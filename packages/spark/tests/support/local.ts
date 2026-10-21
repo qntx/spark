@@ -15,6 +15,7 @@ import { createSparkSigner, sparkAccountKey } from "../../src/signer/index.ts";
 import type { SparkTransfer } from "../../src/transfer/index.ts";
 import type { SparkLeaf } from "../../src/tree/index.ts";
 import { loadWasmBackend } from "./backend.ts";
+import { required } from "./fakes.ts";
 
 // Opt-in: SPARK_E2E_LOCAL=1. Operator identity keys derive from the committed
 // docker/keys/operator_{0,1,2}.key files (they equal upstream LOCAL_OPERATOR_PUBLIC_KEYS).
@@ -427,12 +428,7 @@ export async function localTestWallet(seed: Uint8Array): Promise<LocalTestWallet
   return { ...wallet, identity: await wallet.signer.identityPublicKey() };
 }
 
-export function required<T>(value: T | undefined, what: string): T {
-  if (value === undefined) {
-    throw new Error(what);
-  }
-  return value;
-}
+export { required } from "./fakes.ts";
 
 /** The BIP-68 timelock (blocks) on a leaf's current refund transaction. */
 export function refundTimelock(leaf: { refundTx: Uint8Array }): number {

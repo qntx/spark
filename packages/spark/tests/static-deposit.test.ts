@@ -12,7 +12,6 @@ import { describe, expect, test } from "vite-plus/test";
 
 import type { ClientContext } from "../src/client/context.ts";
 import { claimInboundTransfer } from "../src/client/deposits.ts";
-import { createSparkClientWith } from "../src/client/index.ts";
 import {
   createCurrentTimelockRefundTxs,
   p2trAddressFromPublicKey,
@@ -28,7 +27,6 @@ import {
   staticDepositStatementDigest,
 } from "../src/core/hashing/statements.ts";
 import { createMutex } from "../src/core/mutex.ts";
-import type { SparkOperatorConfig } from "../src/core/network.ts";
 import type { DepositCoordinator } from "../src/deposit/index.ts";
 import {
   claimStaticDeposit,
@@ -39,11 +37,6 @@ import {
 } from "../src/deposit/static.ts";
 import { SparkError, SparkInputError } from "../src/errors/index.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
-import {
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-  SparkAuthnService,
-} from "../src/proto/gen/spark_authn_pb.ts";
 import {
   AddressSchema,
   ClaimTransferResponseSchema,
@@ -56,7 +49,6 @@ import {
   Network,
   QueryNodesResponseSchema,
   QueryTransfersResponseSchema,
-  RequestedSigningCommitmentsSchema,
   SigningKeyshareSchema,
   SigningResultSchema,
   SparkService,
@@ -83,6 +75,17 @@ import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspClaimStaticDepositRequest } from "../src/ssp/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
 import {
+  commitmentGroup,
+  fixedRandom,
+  makeTestClient,
+  OPERATOR_SECRETS,
+  OPERATORS,
+  required,
+  SHARE_PUB,
+  THRESHOLD,
+  verifyingKeyFor,
+} from "./support/fakes.ts";
+import {
   be32,
   frostGroup,
   lagrangeCoefficient,
@@ -92,41 +95,8 @@ import {
 } from "./support/frost.ts";
 
 const COORDINATOR_ID = "0000000000000000000000000000000000000000000000000000000000000001";
-const OPERATOR_SECRETS = [
-  new Uint8Array(32).fill(9),
-  new Uint8Array(32).fill(8),
-  new Uint8Array(32).fill(3),
-];
-const OPERATORS: ReadonlyArray<SparkOperatorConfig> = OPERATOR_SECRETS.map((secret, id) => ({
-  id,
-  identifier: `${"0".repeat(62)}0${id + 1}`,
-  address: `https://op${id}.test`,
-  identityPublicKey: secp256k1.getPublicKey(secret, true),
-}));
-const THRESHOLD = 2;
-const SHARE_PUB = secp256k1.Point.BASE.multiply(0x5ea5n).toBytes(true);
 const TRANSFER_ID = "01989abc-def0-7000-8000-abcdef012345";
 const STATIC_LEAF_ID = "01989abc-def0-7abc-89ab-cdef01234567";
-
-/** Unwraps values the router captures — a missing capture is a test bug, not a branch. */
-function required<T>(value: T | undefined, name: string): T {
-  if (value === undefined) {
-    throw new Error(`${name} was not captured`);
-  }
-  return value;
-}
-
-function fixedRandom(): (length: number) => Uint8Array {
-  let counter = 0;
-  return (length) => {
-    const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      counter = (counter + 1) % 251;
-      out[i] = counter;
-    }
-    return out;
-  };
-}
 
 const STATIC_PUB_SLOT = { type: "static-deposit", index: 0 } as const;
 
@@ -214,7 +184,7 @@ function fabricateStaticAddress(options: {
     }
     addressSignatures[operator.identifier] = secp256k1.sign(
       addressHash,
-      OPERATOR_SECRETS[operator.id]!,
+      required(OPERATOR_SECRETS[operator.id], "operator secret"),
       { format: "der", prehash: false },
     );
   }
@@ -1451,32 +1421,6 @@ describe("deposits.claimStatic via the client", () => {
     };
   }
 
-  function operatorCommitments(): Record<string, { hiding: Uint8Array; binding: Uint8Array }> {
-    return Object.fromEntries(
-      OPERATORS.map((op, i) => [
-        op.identifier,
-        {
-          hiding: secp256k1.Point.BASE.toBytes(true),
-          binding: secp256k1.Point.BASE.multiply(BigInt(i + 2)).toBytes(true),
-        },
-      ]),
-    );
-  }
-
-  function commitmentGroup(count: number) {
-    return Array.from({ length: count }, () =>
-      create(RequestedSigningCommitmentsSchema, {
-        signingNonceCommitments: operatorCommitments(),
-      }),
-    );
-  }
-
-  function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
-    return secp256k1.Point.fromBytes(SHARE_PUB)
-      .add(secp256k1.Point.fromBytes(signingPublicKey))
-      .toBytes(true);
-  }
-
   /** An inbound SSP transfer whose leaf cipher seals a fresh secret to our identity. */
   async function sspTransfer(signer: SparkSigner): Promise<Transfer> {
     const identity = await signer.identityPublicKey();
@@ -1579,55 +1523,25 @@ describe("deposits.claimStatic via the client", () => {
   ) {
     return {
       store,
-      client: createSparkClientWith(
-        {
-          network: "regtest",
-          signer,
-          fetch: sspFetchImpl,
-          random: fixedRandom(),
-          operators: OPERATORS,
-          store,
-          ssp: {
-            baseUrl: "https://ssp.test",
-            graphqlPath: "graphql",
-            identityPublicKey: SSP_IDENTITY,
-          },
-          ...(sleeps === undefined
-            ? {}
-            : {
-                sleep: async (ms) => {
-                  sleeps.push(ms);
-                  return Promise.resolve();
-                },
-              }),
+      client: makeTestClient({
+        signer,
+        spark: sparkImpl,
+        fetch: sspFetchImpl,
+        store,
+        ssp: {
+          baseUrl: "https://ssp.test",
+          graphqlPath: "graphql",
+          identityPublicKey: SSP_IDENTITY,
         },
-        {
-          transportFactory: (interceptors) =>
-            createRouterTransport(
-              (router) => {
-                router.service(SparkAuthnService, {
-                  get_challenge: (req) => ({
-                    protectedChallenge: create(ProtectedChallengeSchema, {
-                      challenge: create(ChallengeSchema, {
-                        version: 1,
-                        timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                        nonce: new Uint8Array(4),
-                        publicKey: req.publicKey,
-                      }),
-                      serverHmac: new Uint8Array(4),
-                    }),
-                  }),
-                  verify_challenge: () => ({
-                    sessionToken: "so-tok",
-                    expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-                  }),
-                });
-                router.service(SparkService, sparkImpl as never);
+        ...(sleeps === undefined
+          ? {}
+          : {
+              sleep: async (ms) => {
+                sleeps.push(ms);
+                return Promise.resolve();
               },
-              { transport: { interceptors: [...interceptors] } },
-            ),
-        },
-      ),
+            }),
+      }),
     };
   }
 

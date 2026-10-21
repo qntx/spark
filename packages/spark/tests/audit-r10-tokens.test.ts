@@ -1,4 +1,3 @@
-import { create } from "@bufbuild/protobuf";
 import { createRouterTransport } from "@connectrpc/connect";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { numberToBytesBE } from "@noble/curves/utils.js";
@@ -8,16 +7,13 @@ import { describe, expect, test } from "vite-plus/test";
 import { createSparkClientWith } from "../src/client/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
 import { createMemorySparkStore } from "../src/exit/store.ts";
-import {
-  SparkAuthnService,
-  ChallengeSchema,
-  ProtectedChallengeSchema,
-} from "../src/proto/gen/spark_authn_pb.ts";
+import { SparkAuthnService } from "../src/proto/gen/spark_authn_pb.ts";
 import type {
   QueryTokenOutputsResponse,
   TokenOutputStatus as TokenOutputStatusType,
 } from "../src/proto/gen/spark_token_pb.ts";
 import { SparkTokenService, TokenOutputStatus } from "../src/proto/gen/spark_token_pb.ts";
+import { authnServiceImpl } from "./support/fakes.ts";
 import { createTestSigner } from "./support/test-signer.ts";
 
 // External-audit round 10, finding N-05: token outputs and balances used to trust the coordinator
@@ -84,23 +80,7 @@ function clientWith(perConnection: ReadonlyArray<() => Row[]>) {
         connectionIndex += 1;
         return createRouterTransport(
           (router) => {
-            router.service(SparkAuthnService, {
-              get_challenge: (req) => ({
-                protectedChallenge: create(ProtectedChallengeSchema, {
-                  challenge: create(ChallengeSchema, {
-                    version: 1,
-                    timestamp: BigInt(Math.floor(Date.now() / 1000)),
-                    nonce: new Uint8Array(4),
-                    publicKey: req.publicKey,
-                  }),
-                  serverHmac: new Uint8Array(4),
-                }),
-              }),
-              verify_challenge: () => ({
-                sessionToken: "so-tok",
-                expirationTimestamp: BigInt(Math.floor(Date.now() / 1000) + 600),
-              }),
-            });
+            router.service(SparkAuthnService, authnServiceImpl);
             router.service(SparkTokenService, {
               query_token_outputs: () => {
                 const rows = perConnection[index]?.() ?? perConnection[0]?.() ?? [];
