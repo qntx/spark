@@ -1,5 +1,5 @@
 export type { SparkTokenBalance, SparkTokenOutput } from "./model.ts";
-export { queryTokenOutputs } from "./query.ts";
+export { queryTokenOutputs, queryVerifiedTokenOutputs } from "./query.ts";
 export { tokenBalances } from "./model.ts";
 export {
   buildTransferPartial,

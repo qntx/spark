@@ -3,7 +3,7 @@ import {
   buildTransferPartial,
   broadcastPartialTokenTransaction,
   MAX_TOKEN_OUTPUTS_TX,
-  queryTokenOutputs,
+  queryVerifiedTokenOutputs,
   selectTokenOutputs,
   tokenBalances,
   transferWithInputIds,
@@ -26,7 +26,8 @@ export async function sendTokens(
   },
 ): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
   return context.tokenLock.run(async () => {
-    const { coordinatorConnection, signer, network, operators, config, now } = context;
+    const { coordinatorConnection, otherConnections, signer, network, operators, config, now } =
+      context;
     if (options.inputOutputIds !== undefined) {
       return transferWithInputIds({
         token: coordinatorConnection.token,
@@ -46,8 +47,9 @@ export async function sendTokens(
         ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
       });
     }
-    const owned = await queryTokenOutputs({
-      token: coordinatorConnection.token,
+    const owned = await queryVerifiedTokenOutputs({
+      coordinator: coordinatorConnection.token,
+      operators: otherConnections.map((connection) => connection.token),
       ownerPublicKey: await signer.identityPublicKey(),
       network,
       tokenIdentifiers: [options.tokenIdentifier],
@@ -81,16 +83,18 @@ export async function sendTokens(
 }
 
 export function createTokens(context: ClientContext): SparkClient["tokens"] {
-  const { coordinatorConnection, signer, network } = context;
+  const { coordinatorConnection, otherConnections, signer, network } = context;
   const { token } = coordinatorConnection;
+  const operatorTokens = otherConnections.map((connection) => connection.token);
   return {
     outputs: async (outputsOptions) => {
       const identifier =
         outputsOptions?.tokenIdentifier === undefined
           ? undefined
           : context.tokenIdentifierForNetwork(outputsOptions.tokenIdentifier);
-      return queryTokenOutputs({
-        token,
+      return queryVerifiedTokenOutputs({
+        coordinator: token,
+        operators: operatorTokens,
         ownerPublicKey: await signer.identityPublicKey(),
         network,
         tokenIdentifiers: identifier === undefined ? [] : [identifier],
@@ -98,8 +102,9 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
     },
     balances: async () =>
       tokenBalances(
-        await queryTokenOutputs({
-          token,
+        await queryVerifiedTokenOutputs({
+          coordinator: token,
+          operators: operatorTokens,
           ownerPublicKey: await signer.identityPublicKey(),
           network,
         }),
@@ -142,8 +147,9 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
           });
           return { transactionHash };
         }
-        const owned = await queryTokenOutputs({
-          token,
+        const owned = await queryVerifiedTokenOutputs({
+          coordinator: token,
+          operators: operatorTokens,
           ownerPublicKey: identityPublicKey,
           network,
           tokenIdentifiers: [tokenIdentifier],

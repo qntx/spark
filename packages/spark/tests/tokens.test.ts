@@ -1121,7 +1121,8 @@ describe("client.tokens", () => {
         status,
       },
       previousTransactionHash: hexToBytes("ee".repeat(32)),
-      previousTransactionVout: 0,
+      // Each id maps to a distinct outpoint — an outpoint identifies one output.
+      previousTransactionVout: Number(id.replaceAll(/\D/g, "")),
     };
   }
 
@@ -1329,7 +1330,8 @@ describe("client.tokens", () => {
     });
     const outputs = await client.tokens.outputs({ tokenIdentifier: identifier });
     expect(outputs).toHaveLength(3);
-    expect(cursors).toStrictEqual(["", "1", "11"]);
+    // Coordinator plus two operators each page the same three-page walk.
+    expect(cursors.toSorted()).toStrictEqual(["", "", "", "1", "1", "1", "11", "11", "11"]);
     client.close();
   });
 
@@ -1368,7 +1370,8 @@ describe("client.tokens", () => {
     await expect(client.tokens.outputs({ tokenIdentifier: identifier })).rejects.toThrow(
       "did not stop returning full pages",
     );
-    expect(pages).toBe(1000);
+    // Every connection walks its own pages; at least one reaches the bound.
+    expect(pages).toBeGreaterThanOrEqual(1000);
     client.close();
   });
 
