@@ -47,12 +47,12 @@ Android `.so`s additionally `llvm-strip --strip-unneeded`).
 
 | Artifact                                           | Size        | SHA-256 (first 16) |
 | -------------------------------------------------- | ----------- | ------------------ |
-| ios-arm64 `QntxSpark` (dylib)                      | 529,512 B   | `a50e11560c149cbc` |
-| ios-arm64+x86_64-simulator `QntxSpark` (fat dylib) | 1,123,504 B | `81b61dfd52b922e6` |
-| android `arm64-v8a/libqntx_spark.so`               | 563,288 B   | `3e4e97e819ca4230` |
-| android `armeabi-v7a/libqntx_spark.so`             | 376,640 B   | `15b1cce07e6a3264` |
-| android `x86_64/libqntx_spark.so`                  | 687,312 B   | `e6ea76f3311d41f6` |
-| android `x86/libqntx_spark.so`                     | 674,792 B   | `bc4ea52788b90883` |
+| ios-arm64 `QntxSpark` (dylib)                      | 529,520 B   | `7b0540290e8d76d0` |
+| ios-arm64+x86_64-simulator `QntxSpark` (fat dylib) | 1,123,504 B | `cfc9361fdf9a9e76` |
+| android `arm64-v8a/libqntx_spark.so`               | 564,040 B   | `eafb2e9b531d90b8` |
+| android `armeabi-v7a/libqntx_spark.so`             | 376,960 B   | `81dacd26494b4b85` |
+| android `x86_64/libqntx_spark.so`                  | 687,904 B   | `bcfdf7e1c1d3e1d2` |
+| android `x86/libqntx_spark.so`                     | 675,448 B   | `1ca2a4a32ec7f6f7` |
 
 Unlike `spark.wasm`, the native builds are not hermetic: these hashes are
 specific to the CI runner image and toolchain (`macos-latest` Xcode, NDK r27d
