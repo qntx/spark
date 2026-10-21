@@ -30,10 +30,13 @@ function copyOut(bytes: Uint8Array): ArrayBuffer {
   return new Uint8Array(bytes).buffer;
 }
 
-/** The C++ side reports ABI errors as `Error("qntx_spark:<code>")`; keep the message identical. */
-function toAbiError(error: unknown): Error {
+/**
+ * The C++ side reports ABI errors as `Error("qntx_spark:<code>")` and nitro rethrows them prefixed
+ * with the calling function, `funcName + ": " + e.what()` (HybridFunction.hpp) — mirror that here.
+ */
+function toAbiError(error: unknown, name: string): Error {
   if (error instanceof SparkCryptoError) {
-    return new Error(`qntx_spark:${error.code}`);
+    return new Error(`SparkNative.${name}(...): qntx_spark:${error.code}`);
   }
   if (error instanceof Error) {
     return error;
@@ -54,7 +57,7 @@ export async function fakeSparkNative(abiVersion = 1): Promise<FakeSparkNative> 
       try {
         return copyOut(invoke(args, crypto));
       } catch (error) {
-        throw toAbiError(error);
+        throw toAbiError(error, name);
       }
     };
   };
