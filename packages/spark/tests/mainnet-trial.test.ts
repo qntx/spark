@@ -278,7 +278,10 @@ function fakeDeps(
       network: "mainnet",
       account: 0,
       sparkAddress: "spark1fake",
-      seed: new Uint8Array(64),
+      accountAddress: async () => {
+        await Promise.resolve();
+        return "spark1other";
+      },
       store: {
         exitChains: async () => Promise.resolve([]),
         putExitChains: async () => Promise.resolve(),

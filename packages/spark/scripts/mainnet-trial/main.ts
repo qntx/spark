@@ -36,7 +36,7 @@ import {
 import type { TrialDeps } from "./commands.ts";
 import { createFileSparkStore } from "./file-store.ts";
 import { createLedger } from "./ledger.ts";
-import { trialSeed, trialWallet } from "./wallet.ts";
+import { accountSparkAddress, trialSeed, trialWallet } from "./wallet.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const DEFAULT_STATE_DIR = join(REPO_ROOT, ".mainnet-trial");
@@ -198,7 +198,7 @@ async function run(): Promise<number> {
     network,
     account,
     sparkAddress: wallet.sparkAddress,
-    seed,
+    accountAddress: async (n) => accountSparkAddress(seed, network, n),
     store,
     ledger,
     out,
@@ -339,6 +339,7 @@ async function run(): Promise<number> {
     return 0;
   } finally {
     wallet.client.close();
+    seed.fill(0);
   }
 }
 
