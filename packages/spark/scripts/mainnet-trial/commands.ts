@@ -8,12 +8,13 @@ import type { SparkClient } from "../../src/client/index.ts";
 import type { SparkEvent } from "../../src/connection/index.ts";
 import type { SparkNetwork } from "../../src/core/network.ts";
 import { uuidv7 } from "../../src/core/uuid.ts";
+import { COOP_EXIT_FAILED } from "../../src/exit/coop.ts";
 import type { CooperativeExitSpeed } from "../../src/exit/coop.ts";
 import type { SparkStore } from "../../src/exit/store.ts";
 import { requestInvoice, resolveLnurl } from "../../src/lnurl/index.ts";
 import type { Ledger, LedgerIds } from "./ledger.ts";
 import { formatLedgerReport } from "./ledger.ts";
-import { accountSparkAddress, esploraTxHex } from "./wallet.ts";
+import { esploraTxHex } from "./wallet.ts";
 
 /** Hard cap on every sats amount the trial can move or spend as fee — no override. */
 export const MAX_TRIAL_SATS = 200_000;
@@ -31,7 +32,7 @@ export type TrialDeps = {
   readonly network: SparkNetwork;
   readonly account: number;
   readonly sparkAddress: string;
-  readonly seed: Uint8Array;
+  readonly accountAddress: (account: number) => Promise<string>;
   readonly store: SparkStore;
   readonly ledger: Ledger;
   readonly out: (line: string) => void;
@@ -279,7 +280,7 @@ export async function resolveReceiver(deps: TrialDeps, to: string): Promise<stri
     return to;
   }
   const account = Number(match[1] ?? "0");
-  return accountSparkAddress(deps.seed, deps.network, account);
+  return deps.accountAddress(account);
 }
 
 export async function cmdSend(
@@ -425,14 +426,6 @@ export async function cmdOptimize(deps: TrialDeps): Promise<void> {
   );
   await record(deps, { command: "optimize", balanceBefore, expectedDelta: 0 });
 }
-
-const COOP_EXIT_FAILED = new Set([
-  "INBOUND_TRANSFER_CLAIMING_FAILED",
-  "EXPIRING_FAILED",
-  "EXPIRED",
-  "FAILING_FAILED",
-  "FAILED",
-]);
 
 export async function cmdCoopExit(
   deps: TrialDeps,

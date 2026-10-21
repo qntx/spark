@@ -67,7 +67,7 @@ const COOP_EXIT_ACCEPTED = new Set([
 ]);
 
 /** Terminal failure values of the same enum — no retry can change the outcome. */
-const COOP_EXIT_FAILED = new Set([
+export const COOP_EXIT_FAILED: ReadonlySet<string> = new Set([
   "INBOUND_TRANSFER_CLAIMING_FAILED",
   "EXPIRING_FAILED",
   "EXPIRED",
