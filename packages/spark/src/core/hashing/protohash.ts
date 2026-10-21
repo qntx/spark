@@ -5,7 +5,7 @@ import type { ReflectList, ReflectMap, ReflectMessage } from "@bufbuild/protobuf
 import { sha256 } from "@noble/hashes/sha2.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 
-import { SparkInputError } from "../../errors/index.ts";
+import { SparkError, SparkInputError } from "../../errors/index.ts";
 import { compareBytes, uint64be } from "../bytes.ts";
 
 // Upstream reference: signer/spark-token-primitives/src/protohash/*
@@ -21,12 +21,15 @@ import { compareBytes, uint64be } from "../bytes.ts";
 //   zero value and message fields whose sub-message has no set fields at all
 //   (a zero Timestamp therefore never reaches the digest).
 // - A repeated field hashing to an empty list, or a map hashing to no entries,
-//   makes the enclosing field disappear; the same propagation applies to
-//   google.protobuf.Value elements that hash to nothing.
-// - Map entries carrying a null google.protobuf.Value are skipped; a map whose
-//   surviving entries hash to nothing makes the whole map hash None.
+//   makes the enclosing field disappear.
 // - Floats canonicalize NaN to 0x7FF8000000000001 and -0 to +0; proto float is
 //   promoted to f64 by numeric value before hashing.
+//
+// Well-known types: the upstream port special-cases Struct, Value, ListValue,
+// Duration, Any and the scalar wrappers, but our protos only ever carry
+// Timestamp and Empty (Empty hashes as a regular message, as upstream). Any
+// other google.protobuf type throws rather than being hashed by speculative
+// code.
 
 const BOOL_TAG = utf8ToBytes("b");
 const MAP_TAG = utf8ToBytes("d");
@@ -40,20 +43,6 @@ const NAN_BITS = 0x7f_f8_00_00_00_00_00_01n;
 const MAX_UINT64 = 0xff_ff_ff_ff_ff_ff_ff_ffn;
 
 const WKT_PREFIX = "google.protobuf.";
-
-const TOP_LEVEL_REJECTED = new Set([
-  "google.protobuf.Value",
-  "google.protobuf.ListValue",
-  "google.protobuf.BoolValue",
-  "google.protobuf.Int32Value",
-  "google.protobuf.Int64Value",
-  "google.protobuf.UInt32Value",
-  "google.protobuf.UInt64Value",
-  "google.protobuf.FloatValue",
-  "google.protobuf.DoubleValue",
-  "google.protobuf.StringValue",
-  "google.protobuf.BytesValue",
-]);
 
 function expectNumber(value: unknown, context: string): number {
   if (typeof value !== "number") {
@@ -284,9 +273,6 @@ function hashMap(field: DescField, mapValue: unknown): Uint8Array | undefined {
   const map = expectReflectMap(mapValue, field.name);
   const entries: Array<{ k: Uint8Array; v: Uint8Array }> = [];
   for (const [key, value] of map.entries()) {
-    if (isGoogleValueNull(value)) {
-      continue;
-    }
     const kHash = hashScalar(field.mapKey, key);
     const vHash = hashElement(field, value);
     if (vHash === undefined) {
@@ -317,63 +303,6 @@ function hashFieldValue(field: DescField, value: unknown): Uint8Array | undefine
   return hashSingular(field, value);
 }
 
-// ---------------------------------------------------------------------------
-// google.protobuf well-known types
-// ---------------------------------------------------------------------------
-
-type GoogleValueKind =
-  | "any"
-  | "bool"
-  | "int32"
-  | "int64"
-  | "uint32"
-  | "uint64"
-  | "float"
-  | "double"
-  | "string"
-  | "struct"
-  | "timestamp"
-  | "duration"
-  | "list"
-  | "value";
-
-function googleValueKind(typeName: string): GoogleValueKind | undefined {
-  switch (typeName) {
-    case "google.protobuf.Any":
-      return "any";
-    case "google.protobuf.BoolValue":
-      return "bool";
-    case "google.protobuf.Int32Value":
-      return "int32";
-    case "google.protobuf.Int64Value":
-      return "int64";
-    case "google.protobuf.UInt32Value":
-      return "uint32";
-    case "google.protobuf.UInt64Value":
-      return "uint64";
-    case "google.protobuf.FloatValue":
-      return "float";
-    case "google.protobuf.DoubleValue":
-      return "double";
-    case "google.protobuf.StringValue":
-      return "string";
-    case "google.protobuf.Struct":
-      return "struct";
-    case "google.protobuf.Timestamp":
-      return "timestamp";
-    case "google.protobuf.Duration":
-      return "duration";
-    case "google.protobuf.ListValue":
-      return "list";
-    case "google.protobuf.Value":
-      return "value";
-    default:
-      // Notably absent upstream: google.protobuf.BytesValue and
-      // google.protobuf.Empty hash as regular messages.
-      return undefined;
-  }
-}
-
 function fieldByName(desc: DescMessage, name: string): DescField {
   const field = desc.fields.find((f) => f.name === name);
   if (field === undefined) {
@@ -396,129 +325,16 @@ function hashFieldsByNames(message: ReflectMessage, names: ReadonlyArray<string>
   return h.digest();
 }
 
-function hashWrapper(message: ReflectMessage): Uint8Array {
-  const field = fieldByName(message.desc, "value");
-  const hashed = hashSingular(field, message.get(field));
-  if (hashed === undefined) {
-    throw new SparkInputError(`protohash: ${message.desc.typeName} value is not hashable`);
-  }
-  return hashed;
-}
-
-function hashStruct(message: ReflectMessage): Uint8Array {
-  const field = fieldByName(message.desc, "fields");
-  const map = expectReflectMap(message.get(field), "struct fields");
-  const entries: Array<{ k: Uint8Array; v: Uint8Array }> = [];
-  for (const [key, value] of map.entries()) {
-    const kHash = hashString(expectString(key, "struct key"));
-    if (isGoogleValueNull(value)) {
-      continue;
-    }
-    const vHash = hashMessage(expectReflectMessage(value, "struct value"));
-    if (vHash !== undefined) {
-      entries.push({ k: kHash, v: vHash });
-    }
-  }
-  entries.sort((a, b) => compareBytes(a.k, b.k));
-  const h = sha256.create();
-  h.update(MAP_TAG);
-  for (const entry of entries) {
-    h.update(entry.k);
-    h.update(entry.v);
-  }
-  return h.digest();
-}
-
-function hashGoogleList(message: ReflectMessage): Uint8Array | undefined {
-  const field = fieldByName(message.desc, "values");
-  return hashList(field, message.get(field));
-}
-
-function hashGoogleValue(message: ReflectMessage): Uint8Array | undefined {
-  const active = activeKindField(message, "kind");
-  if (active === undefined) {
-    throw new SparkInputError("protohash: google.protobuf.Value has no kind set");
-  }
-  const value = message.get(active);
-  switch (active.name) {
-    case "number_value":
-      return hashF64(expectNumber(value, "number_value"));
-    case "string_value":
-      return hashString(expectString(value, "string_value"));
-    case "bool_value":
-      return hashBool(value === true);
-    case "struct_value":
-      return hashStruct(expectReflectMessage(value, "struct_value"));
-    case "list_value":
-      return hashGoogleList(expectReflectMessage(value, "list_value"));
-    case "null_value":
-      throw new SparkInputError("protohash: null google.protobuf.Value cannot be hashed");
-    default:
-      throw new SparkInputError(`protohash: unexpected google.protobuf.Value kind`);
-  }
-}
-
-function activeKindField(message: ReflectMessage, name: string | undefined): DescField | undefined {
-  if (name === undefined) {
-    return undefined;
-  }
-  const oneof = message.desc.oneofs.find((o) => o.name === name);
-  if (oneof === undefined) {
-    return undefined;
-  }
-  return message.oneofCase(oneof);
-}
-
-function isGoogleValueNull(value: unknown): boolean {
-  if (!isReflectMessage(value) || value.desc.typeName !== "google.protobuf.Value") {
-    return false;
-  }
-  const active = activeKindField(value, "kind");
-  return active === undefined || active.name === "null_value";
-}
-
-const WRAPPER_KINDS = new Set<GoogleValueKind>([
-  "bool",
-  "int32",
-  "int64",
-  "uint32",
-  "uint64",
-  "float",
-  "double",
-  "string",
-]);
-
-function hashGoogleValueMessage(
-  kind: GoogleValueKind,
-  message: ReflectMessage,
-): Uint8Array | undefined {
-  if (kind === "any") {
-    const typeUrl = message.get(fieldByName(message.desc, "type_url"));
-    throw new SparkInputError(
-      `protohash: Any is not supported (type_url ${typeof typeUrl === "string" ? typeUrl : "?"})`,
-    );
-  }
-  if (WRAPPER_KINDS.has(kind)) {
-    return hashWrapper(message);
-  }
-  if (kind === "struct") {
-    return hashStruct(message);
-  }
-  if (kind === "timestamp" || kind === "duration") {
-    return hashFieldsByNames(message, ["seconds", "nanos"]);
-  }
-  if (kind === "list") {
-    return hashGoogleList(message);
-  }
-  return hashGoogleValue(message);
-}
-
 function hashMessage(message: ReflectMessage): Uint8Array | undefined {
   const { typeName } = message.desc;
   if (typeName.startsWith(WKT_PREFIX)) {
-    const kind = googleValueKind(typeName);
-    if (kind !== undefined) {
-      return hashGoogleValueMessage(kind, message);
+    if (typeName === "google.protobuf.Timestamp") {
+      return hashFieldsByNames(message, ["seconds", "nanos"]);
+    }
+    // Empty hashes as a regular message upstream; every other well-known type is
+    // unreachable for our protos and throws instead of guessing at semantics.
+    if (typeName !== "google.protobuf.Empty") {
+      throw new SparkError(`protohash: unsupported well-known type ${typeName}`);
     }
   }
 
@@ -550,16 +366,13 @@ function hashMessage(message: ReflectMessage): Uint8Array | undefined {
 
 /**
  * Protoreflecthash over a protobuf-es message: the deterministic SHA-256 digest Go's
- * `protohash.Hash` and Rust `spark-token-primitives` produce identically. Top-level
- * `google.protobuf` scalar/value wrapper types are rejected (they have no field-number context);
- * every other message hashes to 32 bytes. Unknown fields are ignored.
+ * `protohash.Hash` and Rust `spark-token-primitives` produce identically. The well-known types
+ * handled by our protos (Timestamp, Empty) follow upstream; any other `google.protobuf` type
+ * throws. Unknown fields are ignored.
  */
 export function hashProto(schema: DescMessage, message: Message): Uint8Array {
   const reflected = reflect(schema, message);
   const { typeName } = reflected.desc;
-  if (TOP_LEVEL_REJECTED.has(typeName)) {
-    throw new SparkInputError(`protohash: top-level ${typeName} is not hashable`);
-  }
   const digest = hashMessage(reflected);
   if (digest === undefined) {
     throw new SparkInputError(`protohash: nothing to hash in ${typeName}`);

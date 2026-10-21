@@ -8,12 +8,11 @@ import {
   parseTransaction,
   txId,
 } from "../core/bitcoin/index.ts";
-import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
 import type { SparkService } from "../proto/gen/spark_pb.ts";
 import type { SparkSigner } from "../signer/types.ts";
-import { mapTreeNode } from "../tree/index.ts";
+import { mapTreeNode, queryNodesByIds } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { batchedPublicKeys } from "../tree/signing.ts";
 import type { SparkExitChain } from "./store.ts";
@@ -60,9 +59,6 @@ export type ExitTransaction = {
   /** BIP-68 blocks the input must wait after its parent confirms. */
   readonly relativeTimelock: number;
 };
-
-/** SO query_nodes caps `nodeIds` at DefaultMaxQueryNodesByID. */
-const MAX_QUERY_NODE_IDS = 1000;
 
 /**
  * Walks `leafId`'s ancestor chain root-first, following `parentNodeId` regardless of node status
@@ -442,31 +438,14 @@ async function queryNodeMaps(
   return Promise.all(
     sources.map(async (spark) => {
       const nodes = new Map<string, SparkLeaf>();
-      for (let i = 0; i < ids.length; i += MAX_QUERY_NODE_IDS) {
-        // oxlint-disable-next-line no-await-in-loop -- chunks are sequential by design
-        const response = await spark.query_nodes(
-          {
-            source: {
-              case: "nodeIds",
-              value: { nodeIds: ids.slice(i, i + MAX_QUERY_NODE_IDS) },
-            },
-            includeParents: true,
-            limit: 0n,
-            offset: 0n,
-            network: sparkNetworkProto(network),
-            statuses: [],
-          },
-          call,
-        );
-        for (const node of Object.values(response.nodes)) {
-          try {
-            const mapped = mapTreeNode(node);
-            if (!nodes.has(mapped.id)) {
-              nodes.set(mapped.id, mapped);
-            }
-          } catch {
-            // Unmappable rows count as unserved.
+      for (const node of await queryNodesByIds(spark, ids, network, true, call)) {
+        try {
+          const mapped = mapTreeNode(node);
+          if (!nodes.has(mapped.id)) {
+            nodes.set(mapped.id, mapped);
           }
+        } catch {
+          // Unmappable rows count as unserved.
         }
       }
       return nodes;

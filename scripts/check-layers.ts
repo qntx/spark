@@ -9,14 +9,11 @@ declare const Bun: {
 
 type JsonObject = Record<string, unknown>;
 
-// ---------------------------------------------------------------------------
 // Rust crates
 //
 // Allowed internal dependency edges. `spark-crypto` is the leaf library crate;
 // the FFI crate sits on top of it. crates/interop is a standalone project
 // excluded from the root workspace and is not checked here.
-// ---------------------------------------------------------------------------
-
 const ALLOWED: Record<string, string[]> = {
   "spark-crypto": [],
   "spark-ffi": ["spark-crypto"],
@@ -97,15 +94,12 @@ export function checkCrates(crates: CrateInfo[]): string[] {
   return errors;
 }
 
-// ---------------------------------------------------------------------------
 // TypeScript layers
 //
 // One-directional layering in packages/spark/src (AGENTS.md). Every layer may
 // import only the layers in its allow list; a layer not listed may not be
 // imported at all. Layers may contain nested directories — resolution maps the
 // first src-relative path segment of an import specifier to its layer.
-// ---------------------------------------------------------------------------
-
 const BASE = ["connection", "ssp", "core", "proto", "errors"] as const;
 
 const LAYERS: Record<string, ReadonlyArray<string>> = {
@@ -295,8 +289,6 @@ function normalize(path: string): string {
   }
   return out.join("/");
 }
-
-// ---------------------------------------------------------------------------
 
 if (import.meta.main) {
   const rootExclude = asRecord(
