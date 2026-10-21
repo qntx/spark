@@ -23,6 +23,9 @@ Please include:
 
 Do not open public issues for unfixed vulnerabilities.
 
+The audit scope, adversary model, claimed properties, and code guide live in
+[AUDIT.md](AUDIT.md).
+
 ## Threat model (summary)
 
 This library implements the Spark Bitcoin L2 protocol. Private keys live only

@@ -10,7 +10,8 @@ versioned C ABI (`crates/spark-ffi`).
 Status: **pre-release**. `@qntx/spark` exports the full platform-neutral client
 (`createSparkClient`), invoices, deposits, transfers, Lightning, tokens, exits and the LNURL
 server library, plus the `SparkCrypto` backend interface (`./crypto`) and signer (`./signer`).
-See the [package README](packages/spark/README.md) for the security model.
+See the [package README](packages/spark/README.md) for the security model. The audit scope and
+code guide live in [AUDIT.md](AUDIT.md).
 
 Changes are tracked in [CHANGELOG.md](CHANGELOG.md); contributor invariants and the local
 gate live in [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
