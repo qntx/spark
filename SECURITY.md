@@ -38,7 +38,13 @@ stack); no request carries them, so key-tweak shares and the deposit secret can 
 be sealed to the configured destinations. The signer enforces no
 transaction-semantics policy: it signs what the client layer asks it to, and
 funds safety relies on the client's local construction and validation of every
-transaction before signing.
+transaction before signing. `createSparkClient` requires an explicit
+`SparkStore`: stored exit chains are the wallet's unilateral-exit data and their
+durability is a caller decision. Every read that can move funds is unanimous
+across operators — leaves, token outputs, exit chains and committed transfers
+resumed by a caller-supplied id count only when all operators report them
+identically — so a malicious or stale
+coordinator cannot inflate a balance or erase exit data on its own.
 
 | Threat                                         | Severity | Mitigation                                                                                                                                                                                                                                  |
 | ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

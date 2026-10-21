@@ -13,7 +13,9 @@ Trust model: a leaf is spendable only with the signing-operator threshold plus t
 no single operator can move funds. The wallet verifies locally every transaction it signs
 (refunds and exit transactions), that every stored exit chain's refunds pay the wallet's own
 leaf key, that a deposit address's proof of possession is valid, and that every operator reports
-a leaf identically. Lightning sends and receives, leaves swaps, cooperative exits and
+a leaf identically — and token outputs and committed transfers likewise count only when
+every operator reports them identically, so a single operator cannot inflate a balance or
+forge a spend. Lightning sends and receives, leaves swaps, cooperative exits and
 static-deposit claims go through the SSP; the client validates the SSP responses it acts on
 (invoice and transfer-id echoes, payment-hash↔preimage proofs, connector and payout
 transactions, fee bounds).
@@ -41,13 +43,18 @@ and its relative timelock passes, it must confirm within 50 blocks; otherwise th
 watchtower may publish a self-fee variant instead. For intermediate nodes this strands
 descendants as WATCHTOWER_EXITED (recover with `recoverWatchtowerExit` while the SO is online);
 for refunds the watchtower publishes `direct_from_cpfp_refund_tx`, which pays the leaf key
-(sweep with `sweepRefund`). Keep each exit package confirming promptly.
+(sweep with `sweepRefund`). Keep each exit package confirming promptly. Exit chains persist in
+the `SparkStore` passed to `createSparkClient` (required — `createMemorySparkStore()` for
+ephemeral wallets); a chain is deleted only when every operator endorses it as no longer
+exitable by this wallet, so a withheld or fabricated coordinator response cannot erase the
+offline exit path.
 
 LNURL server (`apps/lnurl-server`): put per-IP rate limiting in front of the endpoints —
 invoice creation is unauthenticated. Zap receipt relays are payer-controlled URLs that can
 resolve to internal addresses (DNS rebinding): run the service where outbound connections to
 internal ranges are denied at the network layer.
 
-Status: multiple internal review rounds; no third-party audit yet; not yet run on mainnet.
+Status: multiple internal review rounds plus two external audit rounds scoped by
+[AUDIT.md](https://github.com/qntx/spark/blob/main/AUDIT.md); not yet run on mainnet.
 
 Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
