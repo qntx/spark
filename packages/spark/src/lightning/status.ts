@@ -87,27 +87,39 @@ export async function lightningSendStatus(
   };
 }
 
+/** A `LightningInvoice` satisfies this shape — pass the createInvoice result straight in. */
+export type LightningReceiveStatusRequest = {
+  readonly requestId: string;
+  /** The payment hash the invoice was created for — the proof target, not SSP-supplied data. */
+  readonly paymentHash: Uint8Array;
+};
+
 /**
- * `user_request` status of a lightning receive, with the inbound transfer id once present. A
- * reported preimage is returned only after `sha256(preimage)` is checked against the request
- * invoice's own payment hash — a mismatched preimage must not look like settlement proof.
+ * `user_request` status of a lightning receive, with the inbound transfer id once present. The
+ * request's invoice is checked against the payment hash of the invoice we actually created, and a
+ * reported preimage against the same hash — an SSP answering with a self-consistent status for a
+ * different payment must not look like settlement proof of ours.
  */
 export async function lightningReceiveStatus(
   ssp: SspClient,
-  requestId: string,
+  request: LightningReceiveStatusRequest,
 ): Promise<LightningReceiveStatus> {
-  const request = await ssp.lightningReceiveRequest(requestId);
-  if (request.paymentPreimage !== undefined) {
-    const invoice = decodeBolt11(request.invoice);
-    if (!equalBytes(sha256(request.paymentPreimage), invoice.paymentHash)) {
-      throw new SparkError(
-        "lightning receive status: preimage does not match the invoice payment hash",
-      );
-    }
+  const status = await ssp.lightningReceiveRequest(request.requestId);
+  const invoice = decodeBolt11(status.invoice);
+  if (!equalBytes(invoice.paymentHash, request.paymentHash)) {
+    throw new SparkError("lightning receive status: request invoice is not the invoice we created");
+  }
+  if (
+    status.paymentPreimage !== undefined &&
+    !equalBytes(sha256(status.paymentPreimage), request.paymentHash)
+  ) {
+    throw new SparkError(
+      "lightning receive status: preimage does not match the request payment hash",
+    );
   }
   return {
-    status: request.status,
-    ...(request.transferId === undefined ? {} : { transferId: request.transferId }),
-    ...(request.paymentPreimage === undefined ? {} : { preimage: request.paymentPreimage }),
+    status: status.status,
+    ...(status.transferId === undefined ? {} : { transferId: status.transferId }),
+    ...(status.paymentPreimage === undefined ? {} : { preimage: status.paymentPreimage }),
   };
 }

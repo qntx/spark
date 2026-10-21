@@ -1,5 +1,4 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { equalBytes } from "@noble/curves/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 
@@ -445,12 +444,14 @@ export function createLightningAddressServer(options: {
     record: LightningAddressInvoice,
   ): Promise<LightningAddressInvoice | undefined> {
     try {
-      const status = await client.lightning.receiveStatus(record.requestId);
+      // receiveStatus throws unless the request invoice and any reported preimage match the
+      // payment hash we stored for it, so a defined preimage here is verified.
+      const status = await client.lightning.receiveStatus({
+        requestId: record.requestId,
+        paymentHash: hexToBytes(record.paymentHash),
+      });
       const { preimage } = status;
       if (preimage === undefined) {
-        return undefined;
-      }
-      if (!equalBytes(sha256(preimage), hexToBytes(record.paymentHash))) {
         return undefined;
       }
       return await store.settleInvoice(record.paymentHash, bytesToHex(preimage));

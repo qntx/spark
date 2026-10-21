@@ -91,7 +91,12 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     console.log("send status:", settled2.status);
     expect(settled2.outcome).toBe("succeeded");
     console.log("preimage surfaced:", settled2.preimage !== undefined);
-    await expect(clientB.lightning.receiveStatus(invoice2.id)).resolves.toMatchObject({
+    await expect(
+      clientB.lightning.receiveStatus({
+        requestId: invoice2.id,
+        paymentHash: invoice2.paymentHash,
+      }),
+    ).resolves.toMatchObject({
       status: expect.any(String),
     });
 
