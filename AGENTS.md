@@ -52,6 +52,8 @@ bun run --cwd packages/spark-wasm build:wasm     # hermetic docker build (pinned
 # The regtest workflow (.github/workflows/regtest.yml) runs these serially:
 SPARK_E2E_LOCAL=1 bunx vp test --no-file-parallelism tests/e2e-local-*.test.ts   # needs `bun scripts/spark-local.ts up` with SPARK_REF set first
 SPARK_E2E_HOSTED=1 bunx vp test --no-file-parallelism tests/e2e-hosted-*.test.ts  # both run from packages/spark
+# Do not run hosted e2e locally between 04:30 and 05:30 UTC — the nightly regtest workflow spends
+# from the same seed and balance assertions fail on overlap.
 bun packages/spark/scripts/hosted-balance.ts   # account 0 sats; the hosted job fails below 100_000
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
