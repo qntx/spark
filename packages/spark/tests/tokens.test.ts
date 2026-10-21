@@ -428,16 +428,20 @@ function recoverableTokenClient(handlers: {
       broadcastCalls += 1;
       return required(behavior, "broadcast behavior")();
     },
-    query_token_transactions: async () => {
+    query_token_transactions: async (req: { limit: bigint; offset: bigint }) => {
       await Promise.resolve();
       queryCalls += 1;
       if (handlers.queryError !== undefined) {
         throw handlers.queryError;
       }
+      const rows = handlers.rows ?? [];
+      const limit = Number(req.limit);
+      const offset = Number(req.offset);
+      const page = rows.slice(offset, offset + limit);
       return {
         $typeName: "spark_token.QueryTokenTransactionsResponse",
-        tokenTransactionsWithStatus: [...(handlers.rows ?? [])],
-        offset: 0n,
+        tokenTransactionsWithStatus: [...page],
+        offset: page.length === limit ? BigInt(offset + page.length) : -1n,
       };
     },
   } as unknown as Client<typeof SparkTokenService>;
@@ -766,6 +770,7 @@ describe("transferWithInputIds", () => {
   }) {
     let broadcastCalls = 0;
     const requests: BroadcastTransactionRequest[] = [];
+    let queryCalls = 0;
     const client = {
       broadcast_transaction: async (req: BroadcastTransactionRequest) => {
         await Promise.resolve();
@@ -773,16 +778,26 @@ describe("transferWithInputIds", () => {
         requests.push(req);
         return required(handlers.broadcast, "broadcast handler")(req);
       },
-      query_token_transactions: async () => {
+      query_token_transactions: async (req: { limit: bigint; offset: bigint }) => {
         await Promise.resolve();
+        queryCalls += 1;
+        const rows = handlers.rows ?? [];
+        const limit = Number(req.limit);
+        const offset = Number(req.offset);
+        const page = rows.slice(offset, offset + limit);
         return {
           $typeName: "spark_token.QueryTokenTransactionsResponse",
-          tokenTransactionsWithStatus: [...(handlers.rows ?? [])],
-          offset: 0n,
+          tokenTransactionsWithStatus: [...page],
+          offset: page.length === limit ? BigInt(offset + page.length) : -1n,
         };
       },
     } as unknown as Client<typeof SparkTokenService>;
-    return { client, broadcastCalls: () => broadcastCalls, requests: () => requests };
+    return {
+      client,
+      broadcastCalls: () => broadcastCalls,
+      queryCalls: () => queryCalls,
+      requests: () => requests,
+    };
   }
 
   const retryOptions = {
@@ -810,6 +825,29 @@ describe("transferWithInputIds", () => {
       ],
     });
     const result = await transferWithInputIds({ token: client, ...retryOptions });
+    expect(result.transactionHash).toBe(bytesToHex(committedHash));
+    expect(broadcastCalls()).toBe(0);
+  });
+
+  test("resolves creators and the spender spread over more than one page", async () => {
+    const fillers = Array.from({ length: 100 }, (_, i) =>
+      creatorRow(`filler-${i}`, 0, 1n, {
+        hash: hexToBytes((i % 256).toString(16).padStart(2, "0").repeat(32)),
+      }),
+    );
+    const { client, broadcastCalls, queryCalls } = retryClient({
+      rows: [
+        ...fillers,
+        ...creators,
+        statusRow(
+          v2TxFor(expectedPartial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          committedHash,
+        ),
+      ],
+    });
+    const result = await transferWithInputIds({ token: client, ...retryOptions });
+    expect(queryCalls()).toBe(2);
     expect(result.transactionHash).toBe(bytesToHex(committedHash));
     expect(broadcastCalls()).toBe(0);
   });
@@ -1000,7 +1038,7 @@ describe("client.tokens", () => {
                   tokenTransactionsWithStatus: [
                     ...(impl.transactions?.().tokenTransactionsWithStatus ?? []),
                   ],
-                  offset: 0n,
+                  offset: -1n,
                 }),
               });
             },
