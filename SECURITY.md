@@ -31,7 +31,10 @@ The audit scope, adversary model, claimed properties, and code guide live in
 This library implements the Spark Bitcoin L2 protocol. Private keys live only
 inside the `SparkSigner` implementation; the client never holds them. No signer
 method returns plaintext private key material — `claimStaticDeposit` returns the
-static-deposit key ECIES-sealed to the SSP identity.
+static-deposit key ECIES-sealed to the SSP identity. The signer enforces no
+transaction-semantics policy: it signs what the client layer asks it to, and
+funds safety relies on the client's local construction and validation of every
+transaction before signing.
 
 | Threat                                         | Severity | Mitigation                                                                                                                                                                                                                                  |
 | ---------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
