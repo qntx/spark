@@ -129,13 +129,19 @@ pub fn split_secret_with_proofs(
     )
     .map_err(|_| Error::Internal);
     secret_scalar.zeroize();
-    let (vsss_shares, verifier_set): (Vec<VsssShare>, Vec<VsssVerifier>) = split?;
+    let (mut vsss_shares, verifier_set): (Vec<VsssShare>, Vec<VsssVerifier>) = split?;
 
     let proofs = verifier_set_to_proofs(&verifier_set)?;
     let share_bytes = vsss_shares
         .iter()
         .map(|share| scalar_to_bytes(&share.value().0))
         .collect();
+    // k256 Scalar does not zeroize on drop; overwrite the share scalars in
+    // place. The vsss-rs polynomial — which holds the secret as coefficient 0 —
+    // is dropped inside `split_secret` and is not reachable for wiping.
+    for share in &mut vsss_shares {
+        share.1.0 = Scalar::ZERO;
+    }
 
     Ok(Split {
         proofs,
