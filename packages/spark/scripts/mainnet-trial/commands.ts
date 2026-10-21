@@ -254,6 +254,9 @@ export async function cmdClaimStatic(
     txid: options.txid,
     vout: options.vout,
     maxFeeSats: options.maxFeeSats,
+    ...(utxo.rawTx === undefined
+      ? { rawTx: await esploraTxHex(deps.network, options.txid, globalThis.fetch) }
+      : {}),
   });
   deps.out(
     `credit ${result.creditAmountSats} sats, fee ${result.feeSats} sats${
