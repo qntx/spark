@@ -5,7 +5,7 @@ import { describe, expect, test } from "vite-plus/test";
 import { connectOperator } from "../src/connection/index.ts";
 import { sparkNetworkConfig, sparkNetworkProto } from "../src/core/network.ts";
 import { encodeTokenIdentifier } from "../src/core/token-identifier.ts";
-import { SparkError } from "../src/errors/index.ts";
+import { SparkError, SparkTokenBroadcastError } from "../src/errors/index.ts";
 import type { PartialTokenTransaction } from "../src/proto/gen/spark_token_pb.ts";
 import type { SparkSigner } from "../src/signer/types.ts";
 import { broadcastPartialTokenTransaction } from "../src/tokens/index.ts";
@@ -169,6 +169,44 @@ function dropBroadcastResponses(): {
   return { fetch, dropped: () => dropped };
 }
 
+/**
+ * Drops every broadcast response AND every `query_token_transactions` probe (the connection retries
+ * idempotent reads, so a single drop is not enough) until `stopDroppingProbes` is called: the
+ * in-call recovery cannot resolve the outcome, so the caller gets SparkTokenBroadcastError carrying
+ * the input output ids it must retry with.
+ */
+function dropBroadcastsAndProbes(): {
+  fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  dropped: () => number;
+  stopDroppingProbes: () => void;
+} {
+  const inner = localFetch();
+  let dropped = 0;
+  let dropProbes = true;
+  const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("SparkTokenService/broadcast_transaction")) {
+      const response = await inner(input, init);
+      void response.body?.cancel();
+      dropped += 1;
+      return new Response("simulated lost response", { status: 503 });
+    }
+    if (url.includes("SparkTokenService/query_token_transactions") && dropProbes) {
+      const response = await inner(input, init);
+      void response.body?.cancel();
+      return new Response("simulated lost probe", { status: 503 });
+    }
+    return inner(input, init);
+  };
+  return {
+    fetch,
+    dropped: () => dropped,
+    stopDroppingProbes: () => {
+      dropProbes = false;
+    },
+  };
+}
+
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("token broadcast recovery", () => {
   test(
     "a broadcast that commits but loses its response resolves via the committed transaction",
@@ -197,6 +235,52 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("token broadcast recover
       expect(dropper.dropped()).toBe(2);
 
       // The receiver got the amount exactly once — no double payment.
+      await balanceUntil(walletA.client, tokenIdentifier, 600n, Date.now() + DEADLINE_MS);
+      await balanceUntil(walletB.client, tokenIdentifier, 400n, Date.now() + DEADLINE_MS);
+      const bOutputs = await walletB.client.tokens.outputs({ tokenIdentifier });
+      expect(bOutputs).toHaveLength(1);
+      expect(bOutputs[0]?.amount).toBe(400n);
+    },
+  );
+
+  test(
+    "a caller retry with the error's inputOutputIds resolves the committed transaction",
+    { timeout: 300_000 },
+    async () => {
+      const dropper = dropBroadcastsAndProbes();
+      const walletA = await localWallet(randomBytes(32), { fetch: dropper.fetch });
+      const walletB = await localWallet(randomBytes(32));
+      const issuer = await walletA.signer.identityPublicKey();
+      const now = () => Date.now();
+
+      const created = await broadcast(walletA.signer, createPartial(issuer, now));
+      const rawIdentifier = requiredIdentifier(created.tokenIdentifier);
+      const tokenIdentifier = encodeTokenIdentifier(rawIdentifier, "regtest");
+      await broadcast(walletA.signer, mintPartial(issuer, rawIdentifier, 1000n, now));
+      await balanceUntil(walletA.client, tokenIdentifier, 1000n, Date.now() + DEADLINE_MS);
+
+      // Both broadcasts and the first probe are swallowed: the call fails unsure whether the
+      // transaction committed and hands back the input output ids it selected.
+      const receiver = await walletB.signer.identityPublicKey();
+      const failure = await walletA.client.tokens
+        .transfer({ tokenIdentifier, amount: 400n, receiver })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SparkTokenBroadcastError);
+      const { inputOutputIds } = failure as SparkTokenBroadcastError;
+      expect(inputOutputIds.length).toBeGreaterThan(0);
+      dropper.stopDroppingProbes();
+
+      // The retry is bound to the exact inputs of the failed call: it probes the committed
+      // transaction and returns its hash — nothing else is broadcast, so B is paid once.
+      const hash = await walletA.client.tokens.transfer({
+        tokenIdentifier,
+        amount: 400n,
+        receiver,
+        inputOutputIds,
+      });
+      expect(hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(dropper.dropped()).toBe(2);
+
       await balanceUntil(walletA.client, tokenIdentifier, 600n, Date.now() + DEADLINE_MS);
       await balanceUntil(walletB.client, tokenIdentifier, 400n, Date.now() + DEADLINE_MS);
       const bOutputs = await walletB.client.tokens.outputs({ tokenIdentifier });
