@@ -377,30 +377,52 @@ function sameV2Outputs(tx: TokenTransaction, partial: PartialTokenTransaction): 
  * different outputs means an unknown transaction consumed the inputs — fail loudly rather than let
  * a retry double-pay.
  */
-/** `query_token_transactions` filtered by output ids — matches both creators and spenders. */
+/** The SO caps `query_token_transactions` pages at 100 (upstream maxTokenTransactionPageSize). */
+const TOKEN_TX_PAGE_SIZE = 100;
+const TOKEN_TX_MAX_PAGES = 1000;
+
+/**
+ * `query_token_transactions` filtered by output ids — matches both creators and spenders. A retry
+ * can name up to MAX_TOKEN_OUTPUTS_TX inputs minted by as many transactions, so the row set does
+ * not fit one page; page until the SO's explicit -1 end offset like `queryOwnerNodes`.
+ */
 async function queryTransactionsByOutputIds(options: {
   readonly token: Client<typeof SparkTokenService>;
   readonly outputIds: ReadonlyArray<string>;
   readonly call?: CallOptions;
 }): Promise<TokenTransactionWithStatus[]> {
-  const response = await options.token.query_token_transactions(
-    {
-      queryType: {
-        case: "byFilters",
-        value: { outputIds: [...options.outputIds] },
+  const rows: TokenTransactionWithStatus[] = [];
+  let offset = 0;
+  for (let pageIndex = 0; pageIndex < TOKEN_TX_MAX_PAGES; pageIndex++) {
+    // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
+    const response = await options.token.query_token_transactions(
+      {
+        queryType: {
+          case: "byFilters",
+          value: { outputIds: [...options.outputIds] },
+        },
+        outputIds: [],
+        ownerPublicKeys: [],
+        issuerPublicKeys: [],
+        tokenIdentifiers: [],
+        tokenTransactionHashes: [],
+        order: Order.DESCENDING,
+        limit: BigInt(TOKEN_TX_PAGE_SIZE),
+        offset: BigInt(offset),
       },
-      outputIds: [],
-      ownerPublicKeys: [],
-      issuerPublicKeys: [],
-      tokenIdentifiers: [],
-      tokenTransactionHashes: [],
-      order: Order.DESCENDING,
-      limit: 128n,
-      offset: 0n,
-    },
-    options.call,
-  );
-  return [...response.tokenTransactionsWithStatus];
+      options.call,
+    );
+    rows.push(...response.tokenTransactionsWithStatus);
+    const nextOffset = Number(response.offset);
+    if (nextOffset < 0) {
+      return rows;
+    }
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+      throw new SparkError("query token transactions: coordinator returned a non-advancing offset");
+    }
+    offset = nextOffset;
+  }
+  throw new SparkError("query token transactions: coordinator did not stop returning full pages");
 }
 
 /**
@@ -693,6 +715,10 @@ export async function transferWithInputIds(options: {
     outputIds: options.inputOutputIds,
     ...(options.call === undefined ? {} : { call: options.call }),
   });
+  // No separate "currently available" check: the byFilters rows cover every transaction that
+  // created or spent these outputs — query_token_transactions rows do not carry live output
+  // status — so no live spending row means the outputs are unspent, and any other spend state is
+  // rejected definitively at broadcast.
   const resolved = resolveInputOutputs(rows, options.inputOutputIds);
   let available = 0n;
   for (const input of resolved) {
