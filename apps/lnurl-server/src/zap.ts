@@ -4,8 +4,9 @@
 // (`publish_zap_receipt`) @956ff90.
 //
 // SSRF note: the `relays` tag is payer-controlled and this server connects to whatever it names,
-// so `isAcceptedRelayUrl` only admits `wss://` on plausibly public hosts — no localhost names, no
-// IPv6 literals, no IPv4 literals in private/reserved ranges. A public DNS name can still resolve
+// so `isAcceptedRelayUrl` only admits `wss://` on plausibly public hosts — no single-label or
+// internal-TLD names (localhost, `.local`, `.lan`, `.home.arpa`, …), no IPv6 literals, no IPv4
+// literals in private/reserved ranges. A public DNS name can still resolve
 // to a private address (DNS rebinding); operators must mitigate that residual at the network
 // layer — see README.
 
@@ -161,10 +162,31 @@ function isPublicIpv4(host: string): boolean | undefined {
 }
 
 /**
+ * Hostnames that can name an internal target instead of a public relay: the mDNS and private-DNS
+ * zones (`.local`, `.lan`, `.home`, `.home.arpa`, `.internal`, `.intranet`, `.corp`,
+ * `.localdomain`, `.localhost`) plus `.onion` (Tor-only, unreachable without a proxy). Checked
+ * against the full host and every suffix, so `x.home.arpa` and `printer.lan` are rejected along
+ * with the bare names. The RFC 2606 documentation TLDs (`.test`, `.invalid`, `.example`) are not
+ * listed: they resolve nowhere, so naming one is a no-op rather than an internal probe.
+ */
+const INTERNAL_TLDS: ReadonlyArray<string> = [
+  "local",
+  "lan",
+  "home",
+  "home.arpa",
+  "internal",
+  "intranet",
+  "corp",
+  "localdomain",
+  "localhost",
+  "onion",
+];
+
+/**
  * The payer names receipt relays, so only `wss://` URLs with a plausibly public host are
- * publishable targets: no `ws://`, no localhost (or `*.localhost`), no IPv6 literals and no
- * private/reserved IPv4 literals. The WHATWG parser normalizes hex/octal/integer IPv4 spellings to
- * dotted-quad, so those forms are rejected by the same rule.
+ * publishable targets: no `ws://`, no single-label or internal-TLD hostnames (localhost, `*.local`,
+ * `*.lan`, …), no IPv6 literals and no private/reserved IPv4 literals. The WHATWG parser normalizes
+ * hex/octal/integer IPv4 spellings to dotted-quad, so those forms are rejected by the same rule.
  */
 function isAcceptedRelayUrl(url: string): boolean {
   let parsed: URL;
@@ -185,7 +207,12 @@ function isAcceptedRelayUrl(url: string): boolean {
   if (host === "" || host.includes(":")) {
     return false;
   }
-  if (host === "localhost" || host.endsWith(".localhost")) {
+  if (INTERNAL_TLDS.some((tld) => host === tld || host.endsWith(`.${tld}`))) {
+    return false;
+  }
+  // A dotted-quad is handled by isPublicIpv4; any other single-label name only resolves via
+  // private DNS, never the public relay network.
+  if (isPublicIpv4(host) === undefined && !host.includes(".")) {
     return false;
   }
   return isPublicIpv4(host) !== false;
