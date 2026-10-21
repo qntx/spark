@@ -8,7 +8,7 @@ LTO, `codegen-units = 1`, stripped, `panic = "abort"`) and post-processed by
 
 | Artifact   | Raw       | Gzip     |
 | ---------- | --------- | -------- |
-| spark.wasm | 197,467 B | 82,638 B |
+| spark.wasm | 197,515 B | 82,659 B |
 
 ## Reproducibility
 
