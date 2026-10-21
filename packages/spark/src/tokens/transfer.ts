@@ -8,6 +8,7 @@ import { compareBytes } from "../core/bytes.ts";
 import { hashFinalTokenTransaction } from "../core/hashing/token.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
+import { defaultSleep } from "../core/time.ts";
 import {
   SparkError,
   SparkInputError,
@@ -27,6 +28,7 @@ import type {
   TokenTransactionWithStatus,
 } from "../proto/gen/spark_token_pb.ts";
 import {
+  CommitStatus,
   TokenTransactionStatus,
   InvoiceAttachmentSchema,
   PartialTokenOutputSchema,
@@ -46,6 +48,8 @@ import type { SparkTokenOutput } from "./model.ts";
 /** Upstream cap on inputs per token transaction (`MAX_TOKEN_OUTPUTS_TX`). */
 export const MAX_TOKEN_OUTPUTS_TX = 500;
 const PREV_TX_HASH_LENGTH = 32;
+/** Probe backoff for a broadcast that returned COMMIT_PROCESSING — about 31 seconds total. */
+const PROCESSING_PROBE_DELAYS_MS: ReadonlyArray<number> = [1000, 2000, 4000, 8000, 8000, 8000];
 const TOKEN_AMOUNT_LENGTH = 16;
 const TOKEN_VERSION = 3;
 
@@ -507,6 +511,23 @@ async function probeCommittedTransfer(options: {
 }
 
 /**
+ * The retry-contract error for a transaction the SO reports as still in progress: carries the spent
+ * input output ids so the caller can retry with `inputOutputIds` once it resolves.
+ */
+function inProgressError(
+  inputOutputIds: ReadonlyArray<string>,
+  hash: string,
+  requestOptions?: ErrorOptions & { code?: string; operator?: string },
+): SparkTokenBroadcastError {
+  return new SparkTokenBroadcastError(
+    `token transaction ${hash} spending these inputs is still in ` +
+      `progress; input output ids ${inputOutputIds.join(",")}; retry with inputOutputIds ` +
+      `and the same receiver and amount once it resolves`,
+    { ...requestOptions, inputOutputIds },
+  );
+}
+
+/**
  * `broadcast_transaction` — signs the partial transaction's hash once per input index with the
  * identity key (BIP-340), submits it to the coordinator, and verifies the returned final
  * transaction carries the same inputs, outputs (order, owner, identifier, amount, withdraw
@@ -534,6 +555,8 @@ export async function broadcastPartialTokenTransaction(options: {
   readonly call?: CallOptions;
   /** Output ids of the spent inputs; enables lost-response recovery (transfers only). */
   readonly inputOutputIds?: ReadonlyArray<string>;
+  /** Backoff source for COMMIT_PROCESSING polling; defaults to a setTimeout sleep. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
   const { partial } = options;
   const metadata = partial.tokenTransactionMetadata;
@@ -568,9 +591,30 @@ export async function broadcastPartialTokenTransaction(options: {
     return { response, final };
   };
 
-  let committed: { response: BroadcastTransactionResponse; final: FinalTokenTransaction };
+  // A transport-level probe failure tells us nothing — treat it like "not found" so a polling
+  // loop simply retries within its budget. The probe's own verdict (inputs consumed by a
+  // different transaction) is a SparkError and must still propagate.
+  const probeForCommitted = async (
+    inputOutputIds: ReadonlyArray<string>,
+  ): Promise<{ transactionHash: string } | { inProgressHash: string } | undefined> => {
+    try {
+      return await probeCommittedTransfer({
+        token: options.token,
+        partial,
+        inputOutputIds,
+        ...(options.call === undefined ? {} : { call: options.call }),
+      });
+    } catch (probeError) {
+      if (!(probeError instanceof SparkRequestError)) {
+        throw probeError;
+      }
+      return undefined;
+    }
+  };
+
+  let broadcast: { response: BroadcastTransactionResponse; final: FinalTokenTransaction };
   try {
-    committed = await attempt();
+    broadcast = await attempt();
   } catch (error) {
     const { inputOutputIds } = options;
     if (
@@ -581,28 +625,12 @@ export async function broadcastPartialTokenTransaction(options: {
       throw error;
     }
     try {
-      committed = await attempt();
+      broadcast = await attempt();
     } catch (retryError) {
-      if (isDefinitiveBroadcastRejection(retryError)) {
-        throw retryError;
-      }
-      let recovered: { transactionHash: string } | { inProgressHash: string } | undefined;
-      try {
-        recovered = await probeCommittedTransfer({
-          token: options.token,
-          partial,
-          inputOutputIds,
-          ...(options.call === undefined ? {} : { call: options.call }),
-        });
-      } catch (probeError) {
-        // A failed query tells us nothing — fall through to the error that carries the input
-        // output ids. The probe's own verdict (inputs consumed by a different transaction) is a
-        // SparkError and must still propagate.
-        if (!(probeError instanceof SparkRequestError)) {
-          throw probeError;
-        }
-        recovered = undefined;
-      }
+      // Whatever the retry reported — even a definitive rejection like already_exists — the
+      // first attempt may still have committed, so probe for a transaction spending these
+      // inputs before deciding what to surface.
+      const recovered = await probeForCommitted(inputOutputIds);
       const requestOptions: ErrorOptions & { code?: string; operator?: string } = {
         cause: error,
       };
@@ -618,12 +646,10 @@ export async function broadcastPartialTokenTransaction(options: {
         if ("transactionHash" in recovered) {
           return recovered;
         }
-        throw new SparkTokenBroadcastError(
-          `token transaction ${recovered.inProgressHash} spending these inputs is still in ` +
-            `progress; input output ids ${inputOutputIds.join(",")}; retry with inputOutputIds ` +
-            `and the same receiver and amount once it resolves`,
-          { ...requestOptions, inputOutputIds },
-        );
+        throw inProgressError(inputOutputIds, recovered.inProgressHash, requestOptions);
+      }
+      if (isDefinitiveBroadcastRejection(retryError)) {
+        throw retryError;
       }
       throw new SparkTokenBroadcastError(
         `broadcast_transaction may have committed; input output ids ${inputOutputIds.join(
@@ -635,12 +661,50 @@ export async function broadcastPartialTokenTransaction(options: {
     }
   }
 
-  return {
-    transactionHash: bytesToHex(hashFinalTokenTransaction(committed.final)),
-    ...(committed.response.tokenIdentifier === undefined
-      ? {}
-      : { tokenIdentifier: committed.response.tokenIdentifier }),
-  };
+  const { response, final } = broadcast;
+  if (response.commitStatus === CommitStatus.COMMIT_FINALIZED) {
+    return {
+      transactionHash: bytesToHex(hashFinalTokenTransaction(final)),
+      ...(response.tokenIdentifier === undefined
+        ? {}
+        : { tokenIdentifier: response.tokenIdentifier }),
+    };
+  }
+  if (response.commitStatus !== CommitStatus.COMMIT_PROCESSING) {
+    throw new SparkError(
+      `broadcast_transaction: unexpected commit status ${response.commitStatus}`,
+    );
+  }
+  // COMMIT_PROCESSING: the coordinator committed but peer operator fan-out is still pending
+  // (upstream broadcast_token_handler.go:393-398) — the transaction may finalize or expire, so
+  // this is not a success. Poll the committed-transaction probe until it reports the
+  // transaction finalized; past the backoff budget the retry contract applies.
+  const { inputOutputIds } = options;
+  if (inputOutputIds === undefined || partial.tokenInputs.case !== "transferInput") {
+    throw new SparkError(
+      "broadcast_transaction: commit still processing and cannot be probed for the outcome",
+    );
+  }
+  const sleep = options.sleep ?? defaultSleep;
+  let inProgressHash = bytesToHex(hashFinalTokenTransaction(final));
+  for (const delayMs of PROCESSING_PROBE_DELAYS_MS) {
+    // oxlint-disable-next-line no-await-in-loop -- bounded backoff by design
+    await sleep(delayMs);
+    // oxlint-disable-next-line no-await-in-loop -- probes are sequential by design
+    const recovered = await probeForCommitted(inputOutputIds);
+    if (recovered !== undefined) {
+      if ("transactionHash" in recovered) {
+        return {
+          transactionHash: recovered.transactionHash,
+          ...(response.tokenIdentifier === undefined
+            ? {}
+            : { tokenIdentifier: response.tokenIdentifier }),
+        };
+      }
+      ({ inProgressHash } = recovered);
+    }
+  }
+  throw inProgressError(inputOutputIds, inProgressHash);
 }
 
 /**
@@ -709,6 +773,7 @@ export async function transferWithInputIds(options: {
   readonly amount?: bigint;
   readonly invoiceAttachments?: ReadonlyArray<string>;
   readonly call?: CallOptions;
+  readonly sleep?: (ms: number) => Promise<void>;
 }): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
   const rows = await queryTransactionsByOutputIds({
     token: options.token,
@@ -776,6 +841,7 @@ export async function transferWithInputIds(options: {
     operators: options.operators,
     tokens: options.tokens,
     ...(options.call === undefined ? {} : { call: options.call }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
     inputOutputIds: options.inputOutputIds,
   });
 }

@@ -412,6 +412,8 @@ function statusRow(
 function recoverableTokenClient(handlers: {
   readonly broadcasts: ReadonlyArray<() => BroadcastTransactionResponse>;
   readonly rows?: ReadonlyArray<TokenTransactionWithStatus>;
+  /** Per-call row providers; index clamped like `broadcasts`. Takes precedence over `rows`. */
+  readonly queries?: ReadonlyArray<() => ReadonlyArray<TokenTransactionWithStatus>>;
   readonly queryError?: SparkRequestError;
 }): {
   client: Client<typeof SparkTokenService>;
@@ -434,7 +436,13 @@ function recoverableTokenClient(handlers: {
       if (handlers.queryError !== undefined) {
         throw handlers.queryError;
       }
-      const rows = handlers.rows ?? [];
+      const rows =
+        handlers.queries === undefined
+          ? (handlers.rows ?? [])
+          : required(
+              handlers.queries[Math.min(queryCalls - 1, handlers.queries.length - 1)],
+              "query behavior",
+            )();
       const limit = Number(req.limit);
       const offset = Number(req.offset);
       const page = rows.slice(offset, offset + limit);
@@ -675,6 +683,130 @@ describe("broadcastPartialTokenTransaction recovery", () => {
     ).rejects.toThrow("connection lost mid-response");
     expect(broadcastCalls()).toBe(1);
     expect(queryCalls()).toBe(0);
+  });
+
+  test("COMMIT_PROCESSING polls the probe until the transaction finalizes", async () => {
+    const { client, queryCalls } = recoverableTokenClient({
+      broadcasts: [
+        () => ({
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_PROCESSING,
+          finalTokenTransaction: finalFor(partial),
+        }),
+      ],
+      queries: [
+        () => [
+          statusRow(
+            v2TxFor(partial),
+            TokenTransactionStatus.TOKEN_TRANSACTION_STARTED,
+            committedHash,
+          ),
+        ],
+        () => [
+          statusRow(
+            v2TxFor(partial),
+            TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+            committedHash,
+          ),
+        ],
+      ],
+    });
+    const delays: number[] = [];
+    const { transactionHash } = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+      sleep: async (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    });
+    expect(transactionHash).toBe(bytesToHex(committedHash));
+    expect(queryCalls()).toBe(2);
+    expect(delays).toStrictEqual([1000, 2000]);
+  });
+
+  test("COMMIT_PROCESSING that never finalizes throws SparkTokenBroadcastError", async () => {
+    const { client } = recoverableTokenClient({
+      broadcasts: [
+        () => ({
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_PROCESSING,
+          finalTokenTransaction: finalFor(partial),
+        }),
+      ],
+      rows: [
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_REVEALED,
+          committedHash,
+        ),
+      ],
+    });
+    const delays: number[] = [];
+    const failure = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+      sleep: async (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SparkTokenBroadcastError);
+    expect((failure as SparkTokenBroadcastError).inputOutputIds).toStrictEqual(["out-1", "out-2"]);
+    expect((failure as Error).message).toContain(bytesToHex(committedHash));
+    expect(delays).toStrictEqual([1000, 2000, 4000, 8000, 8000, 8000]);
+  });
+
+  test("an unknown commit status fails closed", async () => {
+    const { client } = recoverableTokenClient({
+      broadcasts: [
+        () => ({
+          $typeName: "spark_token.BroadcastTransactionResponse",
+          commitStatus: CommitStatus.COMMIT_UNSPECIFIED,
+          finalTokenTransaction: finalFor(partial),
+        }),
+      ],
+    });
+    await expect(
+      broadcastPartialTokenTransaction({ token: client, ...broadcastOptions }),
+    ).rejects.toThrow(/unexpected commit status/);
+  });
+
+  test("a definitive retry rejection still probes for the committed transaction", async () => {
+    const exists = () => {
+      throw new SparkRequestError("transaction already broadcast", { code: "already_exists" });
+    };
+    const { client, broadcastCalls, queryCalls } = recoverableTokenClient({
+      broadcasts: [LOST, exists],
+      rows: [
+        statusRow(
+          v2TxFor(partial),
+          TokenTransactionStatus.TOKEN_TRANSACTION_FINALIZED,
+          committedHash,
+        ),
+      ],
+    });
+    const { transactionHash } = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    });
+    expect(transactionHash).toBe(bytesToHex(committedHash));
+    expect(broadcastCalls()).toBe(2);
+    expect(queryCalls()).toBe(1);
+  });
+
+  test("a definitive retry rejection with nothing committed is preserved", async () => {
+    const exists = () => {
+      throw new SparkRequestError("transaction already broadcast", { code: "already_exists" });
+    };
+    const { client } = recoverableTokenClient({ broadcasts: [LOST, exists], rows: [] });
+    const failure = await broadcastPartialTokenTransaction({
+      token: client,
+      ...broadcastOptions,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SparkRequestError);
+    expect(failure).not.toBeInstanceOf(SparkTokenBroadcastError);
+    expect((failure as Error).message).toContain("transaction already broadcast");
   });
 });
 
