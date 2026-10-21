@@ -4,7 +4,7 @@ import { bytesToHex, concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 
 import type { SparkCrypto } from "../crypto/index.ts";
 import { SparkCryptoError, SparkError, SparkInputError } from "../errors/index.ts";
-import { backendCall, commitmentKey, MAX_JOBS, PUBLIC_KEY_LENGTH, randomBytes } from "./backend.ts";
+import { backendCall, commitmentKey, MAX_JOBS, PUBLIC_KEY_LENGTH, withRandom } from "./backend.ts";
 import type { SigningCommitment } from "./types.ts";
 
 const FROST_COMMITMENT_ITEM = 130; // nonces(64) ‖ commitments(66)
@@ -40,8 +40,11 @@ export function createNonceStore(
       if (nonces.size + count > MAX_OUTSTANDING) {
         throw new SparkError("newCommitments: too many outstanding signing commitments");
       }
-      const items = backendCall(() => crypto.frostCommit(hedge, randomBytes(random, 32 * count)));
+      const items = backendCall(() =>
+        withRandom(random, 32 * count, (seed) => crypto.frostCommit(hedge, seed)),
+      );
       if (items.length !== count * FROST_COMMITMENT_ITEM) {
+        items.fill(0);
         throw new SparkCryptoError(8);
       }
       const commitments: SigningCommitment[] = [];

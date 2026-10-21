@@ -21,8 +21,8 @@ import {
   operatorShare,
   parseSplit,
   PUBLIC_KEY_LENGTH,
-  randomBytes,
   randomScalar,
+  withRandom,
 } from "./backend.ts";
 import type { SignerKeys } from "./keys.ts";
 import { ecdsaSign, statementDigest } from "./statements.ts";
@@ -66,7 +66,9 @@ function splitTweak(
 ): TweakSplit {
   const { crypto, random } = context;
   const split = backendCall(() =>
-    crypto.splitSecretWithProofs(tweak, threshold, operators.length, randomBytes(random, 32)),
+    withRandom(random, 32, (seed) =>
+      crypto.splitSecretWithProofs(tweak, threshold, operators.length, seed),
+    ),
   );
   secrets.push(split);
   const { proofs, shares } = parseSplit(split, threshold, operators.length);
@@ -94,7 +96,9 @@ function sealPerOperator(
     const plaintext = plaintextFor(operator);
     plaintexts.push(plaintext);
     operatorPackages[operator.identifier] = backendCall(() =>
-      crypto.eciesEncrypt(operator.identityPublicKey, plaintext, randomBytes(random, 32)),
+      withRandom(random, 32, (seed) =>
+        crypto.eciesEncrypt(operator.identityPublicKey, plaintext, seed),
+      ),
     );
   }
   return operatorPackages;
@@ -129,7 +133,9 @@ export function prepareTransferPackage(
       const newPrivateKey = randomScalar(random);
       secrets.push(oldPrivateKey, newPrivateKey);
       const secretCipher = backendCall(() =>
-        crypto.eciesEncrypt(leaf.receiverIdentityPublicKey, newPrivateKey, randomBytes(random, 32)),
+        withRandom(random, 32, (seed) =>
+          crypto.eciesEncrypt(leaf.receiverIdentityPublicKey, newPrivateKey, seed),
+        ),
       );
       const signature = ecdsaSign(
         sendLeafSigningDigest(leaf.leafId, request.transferId, secretCipher),
@@ -298,11 +304,8 @@ export function prepareLightningReceivePackage(
     const preimage = randomScalar(random);
     secrets.push(preimage);
     const split = backendCall(() =>
-      crypto.splitSecretWithProofs(
-        preimage,
-        request.threshold,
-        request.operators.length,
-        randomBytes(random, 32),
+      withRandom(random, 32, (seed) =>
+        crypto.splitSecretWithProofs(preimage, request.threshold, request.operators.length, seed),
       ),
     );
     secrets.push(split);
@@ -360,7 +363,9 @@ export function claimStaticDepositPackage(
   try {
     return {
       encryptedSecretKey: backendCall(() =>
-        crypto.eciesEncrypt(request.sspIdentityPublicKey, secret, randomBytes(random, 32)),
+        withRandom(random, 32, (seed) =>
+          crypto.eciesEncrypt(request.sspIdentityPublicKey, secret, seed),
+        ),
       ),
       signature: ecdsaSign(digest, keys.identityPrivateKey, "der"),
     };
