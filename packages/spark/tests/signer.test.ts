@@ -637,6 +637,37 @@ describe("FROST commitments", () => {
   });
 });
 
+describe("backend randomness seeds", () => {
+  test("every seed passed to the backend is wiped after the call", async () => {
+    const produced: Uint8Array[] = [];
+    const draw = seededRandom(new Uint8Array(32).fill(3));
+    const recording = (length: number): Uint8Array => {
+      const out = draw(length);
+      produced.push(out);
+      return out;
+    };
+    const accountKey = sparkAccountKey(hexToBytes(derivation.cases[0]!.seed_hex), "regtest", 0);
+    const signer = createSparkSigner({
+      crypto: await backend(),
+      accountKey,
+      network: "regtest",
+      random: recording,
+    });
+    try {
+      // frostCommit (nonces) then a VSS split + per-operator ECIES seals.
+      await signer.newCommitments(2);
+      const operators = [testOperator(0, 0x21n), testOperator(1, 0x22n), testOperator(2, 0x23n)];
+      await signer.prepareLightningReceive({ operators, threshold: 2 });
+      expect(produced.length).toBeGreaterThan(0);
+      for (const seed of produced) {
+        expect(seed.every((byte) => byte === 0)).toBe(true);
+      }
+    } finally {
+      signer.dispose();
+    }
+  });
+});
+
 describe("FROST sign + aggregate round trip", () => {
   test("two batched jobs aggregate to BIP-340 signatures under the tweaked key", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);

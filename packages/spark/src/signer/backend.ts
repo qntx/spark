@@ -55,6 +55,24 @@ export function randomBytes(random: (length: number) => Uint8Array, length: numb
   return bytes;
 }
 
+/**
+ * Draws `length` bytes of caller-supplied randomness for a single backend call, then wipes the
+ * seed. The seed is secret-equivalent material: it determines FROST nonces, the VSS polynomial, and
+ * the ECIES ephemeral key — knowing it undoes the secret the call protects.
+ */
+export function withRandom<T>(
+  random: (length: number) => Uint8Array,
+  length: number,
+  use: (seed: Uint8Array) => T,
+): T {
+  const seed = randomBytes(random, length);
+  try {
+    return use(seed);
+  } finally {
+    seed.fill(0);
+  }
+}
+
 /** A fresh 32-byte scalar, retrying on the (negligible) chance the RNG output is invalid. */
 export function randomScalar(random: (length: number) => Uint8Array): Uint8Array {
   for (;;) {
