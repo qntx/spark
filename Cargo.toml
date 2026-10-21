@@ -4,7 +4,7 @@ exclude  = ["crates/interop", "fuzz"]
 resolver = "3"
 
 [workspace.package]
-version      = "0.0.0"
+version      = "0.1.0"
 edition      = "2024"
 rust-version = "1.99"
 license      = "Apache-2.0"
@@ -15,7 +15,7 @@ keywords     = ["spark", "bitcoin", "frost", "ecies", "vss"]
 categories   = ["cryptography", "no-std"]
 
 [workspace.dependencies]
-spark-crypto       = { path = "crates/spark-crypto", version = "=0.0.0" }
+spark-crypto       = { path = "crates/spark-crypto", version = "=0.1.0" }
 aes-gcm            = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 frost-core         = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
 frost-secp256k1-tr = { git = "https://github.com/lightsparkdev/frost", rev = "997427e5c09e62459230ad711ef3a33fb64b9424", version = "3.0.0", default-features = false }
