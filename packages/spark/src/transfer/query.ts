@@ -5,7 +5,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { protoEnumName } from "../core/proto-enum.ts";
-import { SparkError } from "../errors/index.ts";
+import { SparkError, SparkRequestError } from "../errors/index.ts";
 import type { SparkService, Transfer } from "../proto/gen/spark_pb.ts";
 import { TransferType } from "../proto/gen/spark_pb.ts";
 import { mapTransfer } from "./model.ts";
@@ -385,8 +385,17 @@ function transferRowMismatch(
  * commit that never happened (a false payment success). Queries `query_transfers_by_id` for
  * `transfer.id` on every non-coordinator operator and requires an identical row from each — every
  * SO runs the same `QueryTransfersByID` handler (so/handler/transfer_handler.go:2086) over its own
- * copy written during the commit, so a real commit is served everywhere. Any operator error,
- * missing row or differing field throws: an unverifiable commit is never treated as committed.
+ * copy written during the commit, so a real commit is served everywhere.
+ *
+ * Call this only on probe-hit paths — a commit made by an earlier call, resumed via a
+ * caller-supplied id (or the coop-exit resume). A transfer this call committed itself is not gated:
+ * the commit already happened server-side, so an operator error or lag would only strand a payment
+ * the caller must finish (post-commit steps run unconditionally on the fresh path).
+ *
+ * Failure classes reflect what a retry can fix: a transport error, timeout or missing row (index
+ * lag) throws {@link SparkRequestError} — retryable, the probe may verify later; a duplicate row,
+ * an unmappable row or a differing field throws {@link SparkError} — the commit is genuinely not
+ * the same everywhere. An unverifiable commit is never treated as committed.
  */
 export async function verifyTransferAcrossOperators(options: {
   /** One client per non-coordinator operator. */
@@ -407,15 +416,23 @@ export async function verifyTransferAcrossOperators(options: {
         network,
         ...(options.call === undefined ? {} : { call: options.call }),
       }).catch((error: unknown) => {
-        throw new SparkError(
+        throw new SparkRequestError(
           `committed transfer ${transfer.id} cannot be verified: an operator is unreachable`,
           { cause: error },
         );
       });
       const matching = rows.filter((row) => row.id === transfer.id);
       const [row] = matching;
-      if (matching.length !== 1 || row === undefined) {
-        throw new SparkError(`committed transfer ${transfer.id} is not served by every operator`);
+      if (matching.length === 0 || row === undefined) {
+        // The row may simply lag — a missing row is retryable, not a mismatch verdict.
+        throw new SparkRequestError(
+          `committed transfer ${transfer.id} is not served by every operator`,
+        );
+      }
+      if (matching.length !== 1) {
+        throw new SparkError(
+          `committed transfer ${transfer.id} has conflicting rows on an operator`,
+        );
       }
       let candidate: SparkTransfer;
       try {

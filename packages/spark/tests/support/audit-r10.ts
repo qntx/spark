@@ -320,6 +320,8 @@ export async function sendHarness(state: {
   sendLeafId: string;
   otherLeafId: string;
   transferId: string;
+  /** Operator identifiers whose `query_transfers_by_id` rejects — a transient failure. */
+  failingOps?: ReadonlyArray<string>;
 }): Promise<{
   client: ReturnType<typeof createSparkClientWith>;
   store: SparkStore;
@@ -400,6 +402,11 @@ export async function sendHarness(state: {
         }
       : {}),
     query_transfers_by_id: () => {
+      if ((state.failingOps ?? []).includes(identifier)) {
+        throw new SparkRequestError(`operator ${identifier} unreachable`, {
+          code: "unavailable",
+        });
+      }
       if (identifier !== COORDINATOR && state.operatorTransfers === "honest") {
         return { transfers: [honestTransfer(identifier)] };
       }

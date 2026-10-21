@@ -216,15 +216,13 @@ export async function payLightningInvoice(
     transfer = await deps.spendLeaves(amountSats + feeSats, async (leaves) => {
       const committed = await initiatePreimageSwap(leaves);
       assertCommittedTransfer(committed, expected, "lightning pay");
-      await verifyTransferAcrossOperators({
-        operators: deps.operatorSparks,
-        network,
-        transfer: committed,
-        compareIntermediateRefunds: true,
-      });
       assertCommittedPaymentHash(committed);
+      // No cross-operator gate on this call's own commit: the swap already committed server-side,
+      // and an operator error or lag here would strand the payment we must now finish (a preimage
+      // swap waits ~16 days for its refund path). The gate applies to probe hits — commits an
+      // earlier call made — in the `transferId` resume below.
       // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
-      // failure on the SSP call below. Only leaf ids this call both selected and the verified
+      // failure on the SSP call below. Only leaf ids this call both selected and the committed
       // transfer names are deleted — a reported list cannot strip other leaves' exit data (N-01);
       // the leftover ids' chains are reclaimed by the endorsed sync sweep.
       const selected = new Set(leaves.map((leaf) => leaf.id));

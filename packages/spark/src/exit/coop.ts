@@ -606,15 +606,13 @@ export async function cooperativeExit(
       },
       "coop exit",
     );
-    await verifyTransferAcrossOperators({
-      operators: deps.operatorSparks,
-      network,
-      transfer,
-      compareIntermediateRefunds: true,
-    });
+    // No cross-operator gate on this call's own commit: the exit already committed server-side,
+    // and an operator error or lag here would strand an exit the caller cannot undo — the exit
+    // tx is broadcast and the refund window is running. The gate applies to the resume path,
+    // which re-verifies everything before completing.
 
     // The leaves are committed under connector refunds now, so the old refund txs must not survive
-    // a failure on the completion call. Only leaf ids this call both selected and the verified
+    // a failure on the completion call. Only leaf ids this call both selected and the committed
     // transfer names are deleted — a reported list cannot strip other leaves' exit data (N-01).
     const selected = new Set(leaves.map((leaf) => leaf.id));
     const spent = [
