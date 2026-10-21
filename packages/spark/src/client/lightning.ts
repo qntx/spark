@@ -4,6 +4,7 @@ import {
   lightningReceiveStatus,
   lightningSendStatus,
   payLightningInvoice,
+  sweepHtlcTimeout,
 } from "../lightning/index.ts";
 import type { LightningDeps } from "../lightning/index.ts";
 import type { ClientContext } from "./context.ts";
@@ -48,5 +49,13 @@ export function createLightning(context: ClientContext): SparkClient["lightning"
       ),
     sendStatus: async (request) => lightningSendStatus(context.sspClient, request),
     receiveStatus: async (request) => lightningReceiveStatus(context.sspClient, request),
+    sweepHtlcTimeout: async (options) =>
+      sweepHtlcTimeout(
+        {
+          signer: context.signer,
+          sspIdentityPublicKey: context.config.ssp.identityPublicKey,
+        },
+        options,
+      ),
   };
 }

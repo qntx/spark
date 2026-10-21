@@ -214,6 +214,25 @@ export type PreparedLightningReceive = {
 };
 
 /**
+ * A Lightning HTLC timeout spend: the sequence-lock-leaf path the sender takes once the refund
+ * transaction's HTLC output has confirmed for `LIGHTNING_HTLC_SEQUENCE` blocks. `transaction` is
+ * the unsigned single-input sweep (`constructHtlcSenderSpend`'s `txBytes`); the signer rebuilds the
+ * HTLC output script from `paymentHash`, `hashLockPublicKey` and its own identity key, checks the
+ * input's sequence satisfies the CSV, sighashes the sequence-lock leaf and BIP-340-signs.
+ */
+export type HtlcTimeoutSignRequest = {
+  readonly transaction: Uint8Array;
+  /** Index of the input spending the HTLC output — 0 for the single-input sweep shape. */
+  readonly inputIndex: number;
+  /** The HTLC output's amount in sats. */
+  readonly prevoutAmountSats: number;
+  /** 32-byte payment hash locking the HTLC's hash-lock leaf. */
+  readonly paymentHash: Uint8Array;
+  /** 33-byte compressed public key on the hash-lock leaf (the SSP identity for sends). */
+  readonly hashLockPublicKey: Uint8Array;
+};
+
+/**
  * The static-deposit claim request: which key index, the statement the SSP expects signed, and the
  * SSP identity public key the deposit secret is sealed to.
  */
@@ -269,6 +288,14 @@ export type SparkSigner = {
    * `TapTweak` (empty merkle root) and BIP-340-signed with fresh aux randomness. Returns 64 bytes.
    */
   readonly signKeySpend: (key: SparkKey, target: SigningTarget) => Promise<Uint8Array>;
+  /**
+   * BIP-342 script-path signature over the sequence-lock leaf of a Lightning HTLC output — the
+   * sender's timeout path. The signer rebuilds the leaf and the prevout's HTLC output script from
+   * `paymentHash`, `hashLockPublicKey` and its own identity key, requires the input's sequence to
+   * satisfy the `LIGHTNING_HTLC_SEQUENCE` CSV, then BIP-340-signs with the identity key. Accepts
+   * only the single-input sweep shape; returns 64 bytes.
+   */
+  readonly signHtlcTimeout: (request: HtlcTimeoutSignRequest) => Promise<Uint8Array>;
   /** Builds the sender transfer package: per-leaf fresh keys, VSS tweaks, per-SO ECIES packages. */
   readonly prepareTransfer: (request: PrepareTransferRequest) => Promise<PreparedTransfer>;
   /** Builds the receiver claim package: VSS `received − LEAF{leafId}` tweaks, per-SO ECIES packages. */

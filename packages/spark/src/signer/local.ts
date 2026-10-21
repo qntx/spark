@@ -1,7 +1,17 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { taprootTweakPrivKey } from "@scure/btc-signer/utils.js";
 
-import { taprootKeySpendSighash } from "../core/bitcoin/sighash.ts";
+import {
+  createSequenceLockScript,
+  LIGHTNING_HTLC_SEQUENCE,
+  lightningHtlcOutputScript,
+} from "../core/bitcoin/htlc.ts";
+import { checkIfValidSequence, getTimelockFromSequence } from "../core/bitcoin/sequence.ts";
+import {
+  parseTransaction,
+  taprootKeySpendSighash,
+  taprootScriptSpendSighash,
+} from "../core/bitcoin/sighash.ts";
 import type { SigningTarget } from "../core/bitcoin/sighash.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SPARK_ABI_VERSION } from "../crypto/index.ts";
@@ -25,6 +35,7 @@ import type { StatementContext } from "./statements.ts";
 import type {
   FrostAggregateJob,
   FrostSignJob,
+  HtlcTimeoutSignRequest,
   IdentityStatement,
   PrepareClaimRequest,
   PreparedClaim,
@@ -158,6 +169,49 @@ export function createSparkSigner(options: {
     }
   };
 
+  const signHtlcTimeout = async (request: HtlcTimeoutSignRequest): Promise<Uint8Array> => {
+    ensureAlive();
+    await ready;
+    ensureAlive();
+    const tx = parseTransaction(request.transaction);
+    if (tx.inputsLength !== 1 || request.inputIndex !== 0) {
+      throw new SparkInputError("htlc timeout: only the single-input sender sweep is supported");
+    }
+    const { sequence } = tx.getInput(0);
+    if (sequence === undefined) {
+      throw new SparkInputError("htlc timeout: input has no sequence");
+    }
+    checkIfValidSequence(sequence);
+    if (getTimelockFromSequence(sequence) < LIGHTNING_HTLC_SEQUENCE) {
+      throw new SparkInputError(
+        `htlc timeout: input sequence ${String(sequence)} does not satisfy the ` +
+          `${LIGHTNING_HTLC_SEQUENCE}-block HTLC CSV`,
+      );
+    }
+    const sequenceLockScript = createSequenceLockScript(
+      LIGHTNING_HTLC_SEQUENCE,
+      keys.identityPublicKey,
+    );
+    const sighash = taprootScriptSpendSighash(
+      {
+        transaction: request.transaction,
+        inputIndex: request.inputIndex,
+        prevouts: [
+          {
+            script: lightningHtlcOutputScript(
+              request.paymentHash,
+              request.hashLockPublicKey,
+              keys.identityPublicKey,
+            ),
+            amount: request.prevoutAmountSats,
+          },
+        ],
+      },
+      sequenceLockScript,
+    );
+    return signDigest(sighash, "schnorr", keys.identityPrivateKey, random);
+  };
+
   const prepareTransfer = async (request: PrepareTransferRequest): Promise<PreparedTransfer> => {
     ensureAlive();
     await ready;
@@ -209,6 +263,7 @@ export function createSparkSigner(options: {
     aggregateFrost,
     signIdentity,
     signKeySpend,
+    signHtlcTimeout,
     prepareTransfer,
     prepareClaim,
     prepareLightningReceive,

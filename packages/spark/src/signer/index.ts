@@ -4,6 +4,7 @@ export type { LnurlAuthSigner } from "./lnurl-auth.ts";
 export type {
   FrostAggregateJob,
   FrostSignJob,
+  HtlcTimeoutSignRequest,
   IdentityStatement,
   OperatorCommitment,
   PrepareClaimRequest,

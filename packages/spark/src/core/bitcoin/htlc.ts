@@ -10,8 +10,7 @@ import {
 import type { ScriptType } from "@scure/btc-signer";
 
 import { SparkInputError } from "../../errors/index.ts";
-import type { SparkNetwork } from "../network.ts";
-import { EPHEMERAL_ANCHOR_SCRIPT, p2trScriptFromPublicKey, xOnlyPublicKey } from "./script.ts";
+import { EPHEMERAL_ANCHOR_SCRIPT, xOnlyPublicKey } from "./script.ts";
 import { checkIfValidSequence, DEFAULT_FEE_SATS } from "./sequence.ts";
 import { parseTransaction, taprootScriptSpendSighash } from "./sighash.ts";
 import { maybeApplyFee, txIdInputBytes } from "./transactions.ts";
@@ -177,7 +176,8 @@ export function constructHtlcTransaction(
 
 function buildHtlcSpend(
   htlcTx: Uint8Array,
-  destinationPublicKey: Uint8Array,
+  vout: number,
+  destinationScript: Uint8Array,
   paymentHash: Uint8Array,
   hashLockPublicKey: Uint8Array,
   sequenceLockPublicKey: Uint8Array,
@@ -185,15 +185,20 @@ function buildHtlcSpend(
   inputSequence: number,
   spendLeafScript: Uint8Array,
   feeSats: number,
-  network: SparkNetwork,
 ): HtlcSpend {
   checkIfValidSequence(htlcSequence);
+  if (destinationScript.length === 0) {
+    throw new SparkInputError("destinationScript: must not be empty");
+  }
   const node = parseTransaction(htlcTx);
-  const output = node.getOutput(0);
+  if (!Number.isSafeInteger(vout) || vout < 0 || vout >= node.outputsLength) {
+    throw new SparkInputError("vout: out of range for the HTLC transaction's outputs");
+  }
+  const output = node.getOutput(vout);
   const prevAmount = output.amount;
   const prevScript = output.script;
   if (prevAmount === undefined || prevScript === undefined) {
-    throw new SparkInputError("htlcTx: output 0 is missing script or amount");
+    throw new SparkInputError("vout: HTLC output is missing script or amount");
   }
   const outAmount = maybeApplyFee(Number(prevAmount), feeSats);
   const hashLockScript = createHashLockScript(paymentHash, hashLockPublicKey);
@@ -202,9 +207,9 @@ function buildHtlcSpend(
   const [controlBlockData] = findLeafScript(leafScripts, spendLeafScript);
 
   const tx = new Transaction({ version: 3, allowUnknownOutputs: true });
-  tx.addInput({ txid: txIdInputBytes(htlcTx), index: 0, sequence: inputSequence });
+  tx.addInput({ txid: txIdInputBytes(htlcTx), index: vout, sequence: inputSequence });
   tx.addOutput({
-    script: p2trScriptFromPublicKey(destinationPublicKey, network),
+    script: destinationScript,
     amount: BigInt(outAmount),
   });
   const txBytes = tx.toBytes(true);
@@ -225,23 +230,24 @@ function buildHtlcSpend(
 }
 
 /**
- * Timeout path: spends the HTLC output through the sequence-lock leaf to the sender's destination
- * key. Input sequence equals `htlcSequence` so the leaf's CSV is satisfied.
+ * Timeout path: spends `htlcTx`'s `vout` output through the sequence-lock leaf to
+ * `destinationScript`. Input sequence equals `htlcSequence` so the leaf's CSV is satisfied.
  */
 export function constructHtlcSenderSpend(
   htlcTx: Uint8Array,
-  destinationPublicKey: Uint8Array,
+  vout: number,
+  destinationScript: Uint8Array,
   paymentHash: Uint8Array,
   hashLockPublicKey: Uint8Array,
   sequenceLockPublicKey: Uint8Array,
   htlcSequence: number,
   feeSats: number,
-  network: SparkNetwork,
 ): HtlcSpend {
   const spendLeafScript = createSequenceLockScript(htlcSequence, sequenceLockPublicKey);
   return buildHtlcSpend(
     htlcTx,
-    destinationPublicKey,
+    vout,
+    destinationScript,
     paymentHash,
     hashLockPublicKey,
     sequenceLockPublicKey,
@@ -249,28 +255,28 @@ export function constructHtlcSenderSpend(
     htlcSequence,
     spendLeafScript,
     feeSats,
-    network,
   );
 }
 
 /**
- * Preimage path: spends the HTLC output through the hash-lock leaf to the receiver's destination
- * key. The input sequence is 0xffffffff (final).
+ * Preimage path: spends `htlcTx`'s `vout` output through the hash-lock leaf to `destinationScript`.
+ * The input sequence is 0xffffffff (final).
  */
 export function constructHtlcReceiverSpend(
   htlcTx: Uint8Array,
-  destinationPublicKey: Uint8Array,
+  vout: number,
+  destinationScript: Uint8Array,
   paymentHash: Uint8Array,
   hashLockPublicKey: Uint8Array,
   sequenceLockPublicKey: Uint8Array,
   htlcSequence: number,
   feeSats: number,
-  network: SparkNetwork,
 ): HtlcSpend {
   const spendLeafScript = createHashLockScript(paymentHash, hashLockPublicKey);
   return buildHtlcSpend(
     htlcTx,
-    destinationPublicKey,
+    vout,
+    destinationScript,
     paymentHash,
     hashLockPublicKey,
     sequenceLockPublicKey,
@@ -278,8 +284,23 @@ export function constructHtlcReceiverSpend(
     0xff_ff_ff_ff,
     spendLeafScript,
     feeSats,
-    network,
   );
+}
+
+/**
+ * Attaches the 64-byte BIP-340 leaf signature plus the spend's leaf script and control block as
+ * input 0's witness — `<sig> <script> <control block>` — and returns the network-serialized signed
+ * spend.
+ */
+export function finalizeHtlcSpend(spend: HtlcSpend, signature: Uint8Array): Uint8Array {
+  if (signature.length !== 64) {
+    throw new SparkInputError("signature: must be a 64-byte schnorr signature");
+  }
+  const tx = parseTransaction(spend.txBytes);
+  tx.updateInput(0, {
+    finalScriptWitness: [signature, spend.script, spend.controlBlock],
+  });
+  return tx.toBytes(true, true);
 }
 
 export type RefundTxsForLightningParams = {

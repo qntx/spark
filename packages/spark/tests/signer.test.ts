@@ -6,10 +6,18 @@ import { secp256k1, schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
+import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
+import {
+  constructHtlcSenderSpend,
+  constructHtlcTransaction,
+  createSequenceLockScript,
+  LIGHTNING_HTLC_SEQUENCE,
+  lightningHtlcOutputScript,
+} from "../src/core/bitcoin/htlc.ts";
 import type { SigningTarget } from "../src/core/bitcoin/sighash.ts";
-import { taprootKeySpendSighash } from "../src/core/bitcoin/sighash.ts";
+import { taprootKeySpendSighash, taprootScriptSpendSighash } from "../src/core/bitcoin/sighash.ts";
 import {
   authnChallengeDigest,
   claimPackageDigest,
@@ -71,6 +79,12 @@ const transactions = JSON.parse(
     prevOutValues: number[];
     sighash: string;
     tx: string;
+  }>;
+  htlc: Array<{
+    name: string;
+    htlcTx?: string;
+    paymentHash: string;
+    hashLockPublicKey: string;
   }>;
 };
 
@@ -561,6 +575,136 @@ describe("signKeySpend", () => {
     expect(
       schnorr.verify(signature, taprootKeySpendSighash(TARGET), be32(tweaked.toAffine().x)),
     ).toBe(true);
+    signer.dispose();
+  });
+});
+
+describe("signHtlcTimeout", () => {
+  const htlcVector = transactions.htlc.find(
+    (c) => c.name === "sender-spend" && c.htlcTx !== undefined,
+  )!;
+  const PARENT_TX = hexToBytes(htlcVector.htlcTx!);
+  const PAYMENT_HASH = hexToBytes(htlcVector.paymentHash);
+  const HASH_LOCK_KEY = hexToBytes(htlcVector.hashLockPublicKey);
+  const DESTINATION = hexToBytes(`5120${"11".repeat(32)}`);
+
+  // The "refund transaction" carrying the HTLC output — built with the signer's own identity on
+  // the sequence-lock leaf, so output 0 is exactly what signHtlcTimeout rebuilds.
+  const htlcTxFor = (identity: Uint8Array) =>
+    constructHtlcTransaction(
+      PARENT_TX,
+      0,
+      2000,
+      PAYMENT_HASH,
+      HASH_LOCK_KEY,
+      identity,
+      LIGHTNING_HTLC_SEQUENCE,
+      false,
+      0,
+    ).txBytes;
+  const prevoutSats = (htlcTx: Uint8Array) =>
+    Number(Transaction.fromRaw(htlcTx, { allowUnknownOutputs: true }).getOutput(0).amount);
+  const senderSweep = (htlcTx: Uint8Array, identity: Uint8Array) =>
+    constructHtlcSenderSpend(
+      htlcTx,
+      0,
+      DESTINATION,
+      PAYMENT_HASH,
+      HASH_LOCK_KEY,
+      identity,
+      LIGHTNING_HTLC_SEQUENCE,
+      0,
+    );
+
+  test("BIP-340-signs the sequence-lock-leaf sighash with the identity key", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const identity = await signer.identityPublicKey();
+    const htlcTx = htlcTxFor(identity);
+    const spend = senderSweep(htlcTx, identity);
+    const signature = await signer.signHtlcTimeout({
+      transaction: spend.txBytes,
+      inputIndex: 0,
+      prevoutAmountSats: prevoutSats(htlcTx),
+      paymentHash: PAYMENT_HASH,
+      hashLockPublicKey: HASH_LOCK_KEY,
+    });
+    expect(signature).toHaveLength(64);
+    expect(schnorr.verify(signature, spend.sighash, identity.subarray(1))).toBe(true);
+    signer.dispose();
+  });
+
+  test("the sighash is exactly the sequence-lock-leaf script spend", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const identity = await signer.identityPublicKey();
+    const htlcTx = htlcTxFor(identity);
+    const spend = senderSweep(htlcTx, identity);
+    const expected = taprootScriptSpendSighash(
+      {
+        transaction: spend.txBytes,
+        inputIndex: 0,
+        prevouts: [
+          {
+            script: lightningHtlcOutputScript(PAYMENT_HASH, HASH_LOCK_KEY, identity),
+            amount: prevoutSats(htlcTx),
+          },
+        ],
+      },
+      createSequenceLockScript(LIGHTNING_HTLC_SEQUENCE, identity),
+    );
+    expect(bytesToHex(spend.sighash)).toBe(bytesToHex(expected));
+    signer.dispose();
+  });
+
+  test.each([
+    {
+      name: "relative timelock below the HTLC CSV",
+      sequence: LIGHTNING_HTLC_SEQUENCE - 1,
+    },
+    {
+      name: "relative timelock disabled",
+      sequence: (0x80_00_00_00 | LIGHTNING_HTLC_SEQUENCE) >>> 0,
+    },
+    { name: "final sequence", sequence: 0xff_ff_ff_ff },
+  ])("rejects an input with $name", async ({ sequence }) => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const tx = new Transaction({ version: 3, allowUnknownOutputs: true });
+    tx.addInput({ txid: new Uint8Array(32).fill(1), index: 0, sequence });
+    tx.addOutput({ script: DESTINATION, amount: 1000n });
+    await expect(
+      signer.signHtlcTimeout({
+        transaction: tx.toBytes(true),
+        inputIndex: 0,
+        prevoutAmountSats: 1000,
+        paymentHash: PAYMENT_HASH,
+        hashLockPublicKey: HASH_LOCK_KEY,
+      }),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test.each([
+    { name: "a two-input transaction", inputs: 2, inputIndex: 0 },
+    { name: "a nonzero input index", inputs: 1, inputIndex: 1 },
+  ])("rejects $name", async ({ inputs, inputIndex }) => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const tx = new Transaction({ version: 3, allowUnknownOutputs: true });
+    for (let i = 0; i < inputs; i += 1) {
+      tx.addInput({
+        txid: new Uint8Array(32).fill(1),
+        index: i,
+        sequence: LIGHTNING_HTLC_SEQUENCE,
+      });
+    }
+    tx.addOutput({ script: DESTINATION, amount: 1000n });
+    await expect(
+      signer.signHtlcTimeout({
+        transaction: tx.toBytes(true),
+        inputIndex,
+        prevoutAmountSats: 1000,
+        paymentHash: PAYMENT_HASH,
+        hashLockPublicKey: HASH_LOCK_KEY,
+      }),
+    ).rejects.toThrow(SparkInputError);
     signer.dispose();
   });
 });

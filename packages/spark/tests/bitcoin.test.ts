@@ -11,6 +11,7 @@ import {
   constructHtlcTransaction,
   createHashLockScript,
   createSequenceLockScript,
+  finalizeHtlcSpend,
   NUMS_INTERNAL_KEY,
 } from "../src/core/bitcoin/htlc.ts";
 import {
@@ -297,13 +298,13 @@ function spendResult(
 ): { tx: string; sighash: string; script: string; controlBlock: string } {
   const result = fn(
     hexToBytes(c.htlcTx),
-    hexToBytes(c.destinationPublicKey),
+    0,
+    p2trScriptFromPublicKey(hexToBytes(c.destinationPublicKey), c.network),
     hexToBytes(c.paymentHash),
     hexToBytes(c.hashLockPublicKey),
     hexToBytes(c.sequenceLockPublicKey),
     c.htlcSequence,
     c.feeSats,
-    c.network,
   );
   return {
     tx: bytesToHex(result.txBytes),
@@ -542,6 +543,31 @@ test("HTLC sender/receiver spend input sequences match upstream", () => {
   );
   expect(inputSequence(hexToBytes(sender.tx), 0)).toBe(2160);
   expect(inputSequence(hexToBytes(receiver.tx), 0)).toBe(0xff_ff_ff_ff);
+});
+
+test("finalizeHtlcSpend attaches the <sig> <script> <control block> witness", () => {
+  const c = required(senderSpend[0], "sender-spend");
+  const spend = constructHtlcSenderSpend(
+    hexToBytes(c.htlcTx),
+    0,
+    p2trScriptFromPublicKey(hexToBytes(c.destinationPublicKey), c.network),
+    hexToBytes(c.paymentHash),
+    hexToBytes(c.hashLockPublicKey),
+    hexToBytes(c.sequenceLockPublicKey),
+    c.htlcSequence,
+    c.feeSats,
+  );
+  const signature = new Uint8Array(64).fill(0xaa);
+  const signed = Transaction.fromRaw(finalizeHtlcSpend(spend, signature), {
+    allowUnknownOutputs: true,
+  });
+  const witness = required(signed.getInput(0).finalScriptWitness, "witness");
+  expect(witness.map(bytesToHex)).toStrictEqual([
+    bytesToHex(signature),
+    bytesToHex(spend.script),
+    bytesToHex(spend.controlBlock),
+  ]);
+  expect(() => finalizeHtlcSpend(spend, new Uint8Array(63))).toThrow(SparkInputError);
 });
 
 test("hash-lock and sequence-lock scripts match the Rust byte format", () => {
