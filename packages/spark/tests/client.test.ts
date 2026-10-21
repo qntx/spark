@@ -115,6 +115,25 @@ function makeLeaf(id: string, valueSats: bigint, status = "AVAILABLE"): TreeNode
   });
 }
 
+/**
+ * A `query_nodes` handler serving `leaves` in pages of `pageSize` with the SO's offset semantics: a
+ * full page advances, a short one ends the walk with -1.
+ */
+function pagedLeaves(leaves: ReadonlyArray<TreeNode>, pageSize: number) {
+  return (req: QueryNodesRequest) => {
+    const offset = Number(req.offset);
+    const page = leaves.slice(offset, offset + pageSize);
+    const nodes: Record<string, TreeNode> = {};
+    for (const leaf of page) {
+      nodes[leaf.id] = leaf;
+    }
+    return {
+      nodes,
+      offset: page.length === pageSize ? BigInt(offset + page.length) : -1n,
+    };
+  };
+}
+
 const SSP_IDENTITY_KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
 
 const sspFetch: typeof globalThis.fetch = async (_input, init) => {
@@ -217,16 +236,11 @@ test("leaves and balance page through query_nodes until a short page", async () 
   const leaves = Array.from({ length: 51 }, (_, i) =>
     ownedLeaf(`leaf-${i}`, BigInt(100 + i), secrets[i]!),
   );
+  const serve = pagedLeaves(leaves, 50);
   const client = makeClient(signer, {
     query_nodes: (req: QueryNodesRequest) => {
       pageRequests.push(req);
-      const offset = Number(req.offset);
-      const page = leaves.slice(offset, offset + Number(req.limit));
-      const nodes: Record<string, TreeNode> = {};
-      for (const leaf of page) {
-        nodes[leaf.id] = leaf;
-      }
-      return { nodes, offset: BigInt(offset + page.length) };
+      return serve(req);
     },
   });
   const result = await client.leaves();
@@ -279,7 +293,7 @@ test("pending and all transfers map to plain SparkTransfer", async () => {
   const pubkey = await signer.identityPublicKey();
   let listLimit = 0n;
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
     query_pending_transfers: () =>
       create(QueryTransfersResponseSchema, {
         transfers: [
@@ -377,7 +391,7 @@ test("transfers.pending() pages until a short page", async () => {
     { transfers: [transfer("t-last")], offset: -1n },
   ];
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
     query_pending_transfers: (req: { limit: bigint; offset: bigint }) => {
       requests.push({ limit: req.limit, offset: req.offset });
       const page = pages[requests.length - 1]!;
@@ -420,7 +434,7 @@ test("transfers.pending() keeps paging when a short page carries a positive offs
     { transfers: [transfer("t-last")], offset: -1n },
   ];
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
     query_pending_transfers: (req: { limit: bigint; offset: bigint }) => {
       requests.push({ limit: req.limit, offset: req.offset });
       const page = pages[requests.length - 1]!;
@@ -440,7 +454,7 @@ test("transfers.pending() throws when the coordinator's offset does not advance"
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const pubkey = await signer.identityPublicKey();
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
     query_pending_transfers: () =>
       create(QueryTransfersResponseSchema, {
         transfers: Array.from({ length: 100 }, (_, i) => ({
@@ -464,7 +478,7 @@ test("transfers.pending() throws when the coordinator's offset does not advance"
 test("swapFeeEstimate goes through SSP auth and returns sats", async () => {
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
   });
   const estimate = await client.swapFeeEstimate(100_000);
   expect(estimate).toBe(150);
@@ -473,7 +487,7 @@ test("swapFeeEstimate goes through SSP auth and returns sats", async () => {
 test("close() stops an event stream started with a caller signal", async () => {
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
     async *subscribe_to_events(_req: unknown, context: HandlerContext) {
       yield create(SubscribeToEventsResponseSchema, {
         event: { case: "connected", value: {} },
@@ -498,7 +512,7 @@ test("breaking out of events() aborts the stream and does not resubscribe", asyn
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const streamCalls = { calls: 0 };
   const client = makeClient(signer, {
-    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_nodes: () => ({ nodes: {}, offset: -1n }),
     async *subscribe_to_events(_req: unknown, context: HandlerContext) {
       streamCalls.calls++;
       yield create(SubscribeToEventsResponseSchema, {
@@ -557,7 +571,7 @@ test("leaves() reconciles stored exit chains with the current leaf set", async (
     {
       query_nodes: () => ({
         nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)) },
-        offset: 1n,
+        offset: -1n,
       }),
     },
     store,
@@ -585,11 +599,11 @@ test("leaves() withholds a leaf one operator does not report but keeps its chain
       "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!),
       "leaf-2": ownedLeaf("leaf-2", 200n, secrets[1]!),
     },
-    offset: 2n,
+    offset: -1n,
   };
   const client = makeClient(signer, { query_nodes: () => both }, store, {
     [OPERATOR1_ID]: {
-      query_nodes: () => ({ nodes: { "leaf-1": both.nodes["leaf-1"] }, offset: 1n }),
+      query_nodes: () => ({ nodes: { "leaf-1": both.nodes["leaf-1"] }, offset: -1n }),
     },
   });
   const leaves = await client.leaves();
@@ -615,12 +629,12 @@ test("leaves() withholds a leaf operators report differently", async () => {
   const client = makeClient(
     signer,
     {
-      query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": leaf2 }, offset: 2n }),
+      query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": leaf2 }, offset: -1n }),
     },
     store,
     {
       [OPERATOR1_ID]: {
-        query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": inflated }, offset: 2n }),
+        query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": inflated }, offset: -1n }),
       },
     },
   );
@@ -648,7 +662,7 @@ test("leaves() drops a leaf the wallet does not own and deletes its chain", asyn
     {
       query_nodes: () => ({
         nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)), "leaf-2": foreign },
-        offset: 2n,
+        offset: -1n,
       }),
     },
     store,
@@ -678,15 +692,17 @@ test("leaves() drops a leaf carrying a malformed transaction", async () => {
     {
       query_nodes: () => ({
         nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)), "leaf-2": malformed },
-        offset: 2n,
+        offset: -1n,
       }),
     },
     store,
   );
   const leaves = await client.leaves();
   expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  // The malformed leaf is unspendable but still reported, so its previously verified stored
+  // chain survives the sweep — same as a quarantined leaf's.
   const chains = await store.exitChains();
-  expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
 });
 
 test("leaves() quarantines a leaf whose exit chain fails verification", async () => {
@@ -714,7 +730,7 @@ test("leaves() quarantines a leaf whose exit chain fails verification", async ()
     {
       query_nodes: () => ({
         nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!), "leaf-2": poisoned },
-        offset: 2n,
+        offset: -1n,
       }),
     },
     store,
@@ -741,7 +757,7 @@ test("leaves() throws when an operator query fails", async () => {
     {
       query_nodes: () => ({
         nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, leafSecret(0)) },
-        offset: 1n,
+        offset: -1n,
       }),
     },
     undefined,
@@ -754,6 +770,131 @@ test("leaves() throws when an operator query fails", async () => {
     },
   );
   await expect(client.leaves()).rejects.toThrow(SparkRequestError);
+});
+
+test("leaves keep paging when a short page carries a positive offset", async () => {
+  const secrets = Array.from({ length: 35 }, (_, i) => leafSecret(i));
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap(secrets.map((secret, i) => [`leaf-${i}`, secret])),
+  );
+  const all = Array.from({ length: 35 }, (_, i) => ownedLeaf(`leaf-${i}`, 100n, secrets[i]!));
+  const requests: number[] = [];
+  // A short first page must not terminate the walk — only the explicit -1 offset does.
+  const serve = pagedLeaves(all, 30);
+  const client = makeClient(signer, {
+    query_nodes: (req: QueryNodesRequest) => {
+      requests.push(Number(req.offset));
+      return serve(req);
+    },
+  });
+  const leaves = await client.leaves();
+  expect(leaves).toHaveLength(35);
+  expect(requests.toSorted((a, b) => a - b)).toStrictEqual([0, 0, 30, 30]);
+});
+
+test("leaves() keeps the chain of a leaf the coordinator omits but an operator reports", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const client = makeClient(
+    signer,
+    {
+      // The coordinator drops leaf-2 entirely while operator 1 still reports it — the leaf is
+      // not spendable, but its stored chain must survive for an offline exit.
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!) },
+        offset: -1n,
+      }),
+    },
+    store,
+    {
+      [OPERATOR1_ID]: {
+        query_nodes: () => ({
+          nodes: {
+            "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!),
+            "leaf-2": ownedLeaf("leaf-2", 200n, secrets[1]!),
+          },
+          offset: -1n,
+        }),
+      },
+    },
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
+});
+
+test("leaves() excludes a coordinator row too big to map without losing the rest", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const oversized = ownedLeaf("leaf-2", 200n, secrets[1]!);
+  oversized.value = 2n ** 63n;
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!), "leaf-2": oversized },
+        offset: -1n,
+      }),
+    },
+    store,
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  // The unmappable leaf is still reported — its previously verified chain survives the sweep.
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
+});
+
+test("leaves() quarantines only the leaf one operator reports unmappable", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const healthy = {
+    nodes: {
+      "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!),
+      "leaf-2": ownedLeaf("leaf-2", 200n, secrets[1]!),
+    },
+    offset: -1n,
+  };
+  const poisoned = ownedLeaf("leaf-2", 200n, secrets[1]!);
+  poisoned.value = 2n ** 63n;
+  const client = makeClient(signer, { query_nodes: () => healthy }, store, {
+    [OPERATOR1_ID]: {
+      query_nodes: () => ({
+        nodes: { "leaf-1": healthy.nodes["leaf-1"], "leaf-2": poisoned },
+        offset: -1n,
+      }),
+    },
+  });
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
 });
 
 test("unilateralExit persists the queried exit chain in the store", async () => {

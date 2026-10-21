@@ -649,7 +649,7 @@ describe("transfers.send renewal", () => {
     let startReq: StartTransferRequest | undefined;
     const client = makeWalletClient(signer, {
       query_nodes: () =>
-        create(QueryNodesResponseSchema, { nodes: { [leaf.id]: node }, offset: 0n }),
+        create(QueryNodesResponseSchema, { nodes: { [leaf.id]: node }, offset: -1n }),
       get_signing_commitments: (req) =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(req.count),
