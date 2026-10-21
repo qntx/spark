@@ -1,14 +1,19 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromMs } from "@bufbuild/protobuf/wkt";
 import type { CallOptions, Client } from "@connectrpc/connect";
-import { equalBytes, numberToBytesBE } from "@noble/curves/utils.js";
+import { bytesToNumberBE, equalBytes, numberToBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 import { compareBytes } from "../core/bytes.ts";
 import { hashFinalTokenTransaction } from "../core/hashing/token.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
-import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.ts";
+import {
+  SparkError,
+  SparkInputError,
+  SparkRequestError,
+  SparkTokenBroadcastError,
+} from "../errors/index.ts";
 import { Order } from "../proto/gen/spark_pb.ts";
 import type {
   BroadcastTransactionResponse,
@@ -19,6 +24,7 @@ import type {
   SparkTokenService,
   TokenOutputToSpend,
   TokenTransaction,
+  TokenTransactionWithStatus,
 } from "../proto/gen/spark_token_pb.ts";
 import {
   TokenTransactionStatus,
@@ -39,6 +45,7 @@ import type { SparkTokenOutput } from "./model.ts";
 
 /** Upstream cap on inputs per token transaction (`MAX_TOKEN_OUTPUTS_TX`). */
 export const MAX_TOKEN_OUTPUTS_TX = 500;
+const PREV_TX_HASH_LENGTH = 32;
 const TOKEN_AMOUNT_LENGTH = 16;
 const TOKEN_VERSION = 3;
 
@@ -370,22 +377,17 @@ function sameV2Outputs(tx: TokenTransaction, partial: PartialTokenTransaction): 
  * different outputs means an unknown transaction consumed the inputs — fail loudly rather than let
  * a retry double-pay.
  */
-async function probeCommittedTransfer(options: {
+/** `query_token_transactions` filtered by output ids — matches both creators and spenders. */
+async function queryTransactionsByOutputIds(options: {
   readonly token: Client<typeof SparkTokenService>;
-  readonly partial: PartialTokenTransaction;
-  readonly inputOutputIds: ReadonlyArray<string>;
+  readonly outputIds: ReadonlyArray<string>;
   readonly call?: CallOptions;
-}): Promise<{ transactionHash: string } | { inProgressHash: string } | undefined> {
-  const inputs = options.partial.tokenInputs;
-  if (inputs.case !== "transferInput") {
-    return undefined;
-  }
-  const expectedInputs = inputs.value.outputsToSpend;
+}): Promise<TokenTransactionWithStatus[]> {
   const response = await options.token.query_token_transactions(
     {
       queryType: {
         case: "byFilters",
-        value: { outputIds: [...options.inputOutputIds] },
+        value: { outputIds: [...options.outputIds] },
       },
       outputIds: [],
       ownerPublicKeys: [],
@@ -398,7 +400,21 @@ async function probeCommittedTransfer(options: {
     },
     options.call,
   );
-  for (const row of response.tokenTransactionsWithStatus) {
+  return [...response.tokenTransactionsWithStatus];
+}
+
+/**
+ * Scans `rows` for a live transfer spending `expectedInputs` with the partial's outputs: a live
+ * match with different inputs or outputs means an unknown transaction consumed the inputs — fail
+ * loudly rather than let a retry double-pay.
+ */
+function matchSpendingTransfer(options: {
+  readonly rows: ReadonlyArray<TokenTransactionWithStatus>;
+  readonly expectedInputs: ReadonlyArray<TokenOutputToSpend>;
+  readonly partial: PartialTokenTransaction;
+}): { transactionHash: string } | { inProgressHash: string } | undefined {
+  const { expectedInputs, partial } = options;
+  for (const row of options.rows) {
     if (
       row.status === TokenTransactionStatus.TOKEN_TRANSACTION_STARTED_CANCELLED ||
       row.status === TokenTransactionStatus.TOKEN_TRANSACTION_SIGNED_CANCELLED
@@ -422,7 +438,7 @@ async function probeCommittedTransfer(options: {
     }
     const hash =
       row.tokenTransactionHash.length > 0 ? bytesToHex(row.tokenTransactionHash) : "pending";
-    if (!sameInputSet(actualInputs, expectedInputs) || !sameV2Outputs(tx, options.partial)) {
+    if (!sameInputSet(actualInputs, expectedInputs) || !sameV2Outputs(tx, partial)) {
       throw new SparkError(
         `broadcast_transaction: inputs were consumed by a different token transaction ${hash}`,
       );
@@ -439,6 +455,33 @@ async function probeCommittedTransfer(options: {
     return { inProgressHash: hash };
   }
   return undefined;
+}
+
+/**
+ * `query_token_transactions` probe for a broadcast whose response may have been lost: the
+ * output-ids filter returns transactions that spent OR created the given outputs, so candidates
+ * must be live (non-cancelled) transfers whose input set equals the partial's.
+ */
+async function probeCommittedTransfer(options: {
+  readonly token: Client<typeof SparkTokenService>;
+  readonly partial: PartialTokenTransaction;
+  readonly inputOutputIds: ReadonlyArray<string>;
+  readonly call?: CallOptions;
+}): Promise<{ transactionHash: string } | { inProgressHash: string } | undefined> {
+  const inputs = options.partial.tokenInputs;
+  if (inputs.case !== "transferInput") {
+    return undefined;
+  }
+  const rows = await queryTransactionsByOutputIds({
+    token: options.token,
+    outputIds: options.inputOutputIds,
+    ...(options.call === undefined ? {} : { call: options.call }),
+  });
+  return matchSpendingTransfer({
+    rows,
+    expectedInputs: inputs.value.outputsToSpend,
+    partial: options.partial,
+  });
 }
 
 /**
@@ -553,19 +596,19 @@ export async function broadcastPartialTokenTransaction(options: {
         if ("transactionHash" in recovered) {
           return recovered;
         }
-        throw new SparkRequestError(
+        throw new SparkTokenBroadcastError(
           `token transaction ${recovered.inProgressHash} spending these inputs is still in ` +
-            `progress; check tokens.outputs() for input output ids ${inputOutputIds.join(
-              ",",
-            )} before retrying`,
-          requestOptions,
+            `progress; input output ids ${inputOutputIds.join(",")}; retry with inputOutputIds ` +
+            `and the same receiver and amount once it resolves`,
+          { ...requestOptions, inputOutputIds },
         );
       }
-      throw new SparkRequestError(
-        `broadcast_transaction may have committed; check tokens.outputs() for input output ids ${inputOutputIds.join(
+      throw new SparkTokenBroadcastError(
+        `broadcast_transaction may have committed; input output ids ${inputOutputIds.join(
           ",",
-        )} before retrying`,
-        requestOptions,
+        )}; retry with inputOutputIds and the same receiver and amount, or check ` +
+          `tokens.outputs() first`,
+        { ...requestOptions, inputOutputIds },
       );
     }
   }
@@ -576,4 +619,137 @@ export async function broadcastPartialTokenTransaction(options: {
       ? {}
       : { tokenIdentifier: committed.response.tokenIdentifier }),
   };
+}
+
+/**
+ * Rebuilds the spent outputs of a previous call from the `byFilters` rows: each remembered output
+ * id appears in its creating transaction's `tokenOutputs`, whose array index is the vout and whose
+ * transaction hash is the previous-transaction hash the partial input needs.
+ */
+function resolveInputOutputs(
+  rows: ReadonlyArray<TokenTransactionWithStatus>,
+  inputOutputIds: ReadonlyArray<string>,
+): SparkTokenOutput[] {
+  const wanted = new Set(inputOutputIds);
+  const found = new Map<string, SparkTokenOutput>();
+  for (const row of rows) {
+    const tx = row.tokenTransaction;
+    if (tx === undefined || row.tokenTransactionHash.length !== PREV_TX_HASH_LENGTH) {
+      continue;
+    }
+    for (const [vout, output] of tx.tokenOutputs.entries()) {
+      const { id } = output;
+      if (id === undefined || !wanted.has(id) || found.has(id)) {
+        continue;
+      }
+      found.set(id, {
+        id,
+        tokenIdentifier: output.tokenIdentifier ?? new Uint8Array(),
+        amount: bytesToNumberBE(output.tokenAmount),
+        prevTransactionHash: row.tokenTransactionHash,
+        prevTransactionVout: vout,
+        ownerPublicKey: output.ownerPublicKey,
+      });
+    }
+  }
+  return inputOutputIds.map((id) => {
+    const output = found.get(id);
+    if (output === undefined) {
+      throw new SparkInputError(`token transfer: input output ${id} is not a known token output`);
+    }
+    return output;
+  });
+}
+
+/**
+ * Retries a transfer whose earlier broadcast threw {@link SparkTokenBroadcastError}, bound to the
+ * exact inputs of the failed call instead of a fresh selection: `inputOutputIds` are the output ids
+ * the error carried. The creating transactions of those ids are read off the same
+ * `query_token_transactions` rows the committed-transaction probe scans, so a committed transfer
+ * with the same inputs and outputs returns its hash without broadcasting; one still in progress
+ * throws {@link SparkTokenBroadcastError} again; a live transaction spending them with different
+ * terms throws {@link SparkError}. With nothing committed, every resolved input must be owned by
+ * `senderPublicKey` and carry `tokenIdentifier` — then exactly those inputs are built into a new
+ * partial and broadcast. `amount` omitted pays the inputs' whole sum to the receiver (the
+ * consolidate shape); giving it produces the receiver output plus change like a fresh call.
+ */
+export async function transferWithInputIds(options: {
+  readonly token: Client<typeof SparkTokenService>;
+  readonly signer: SparkSigner;
+  readonly network: SparkNetwork;
+  readonly operators: ReadonlyArray<SparkOperatorConfig>;
+  readonly tokens: TokenNetworkParams;
+  readonly now: () => number;
+  readonly tokenIdentifier: Uint8Array;
+  readonly receiverPublicKey: Uint8Array;
+  readonly senderPublicKey: Uint8Array;
+  readonly inputOutputIds: ReadonlyArray<string>;
+  readonly amount?: bigint;
+  readonly invoiceAttachments?: ReadonlyArray<string>;
+  readonly call?: CallOptions;
+}): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
+  const rows = await queryTransactionsByOutputIds({
+    token: options.token,
+    outputIds: options.inputOutputIds,
+    ...(options.call === undefined ? {} : { call: options.call }),
+  });
+  const resolved = resolveInputOutputs(rows, options.inputOutputIds);
+  let available = 0n;
+  for (const input of resolved) {
+    if (!equalBytes(input.ownerPublicKey, options.senderPublicKey)) {
+      throw new SparkInputError(
+        `token transfer: input output ${input.id} is not owned by this identity`,
+      );
+    }
+    if (!equalBytes(input.tokenIdentifier, options.tokenIdentifier)) {
+      throw new SparkInputError(
+        `token transfer: input output ${input.id} carries a different token identifier`,
+      );
+    }
+    available += input.amount;
+  }
+  const amount = options.amount ?? available;
+  const partial = buildTransferPartial({
+    selectedOutputs: resolved,
+    receiverPublicKey: options.receiverPublicKey,
+    tokenIdentifier: options.tokenIdentifier,
+    amount,
+    senderPublicKey: options.senderPublicKey,
+    network: options.network,
+    operators: options.operators,
+    tokens: options.tokens,
+    now: options.now,
+    ...(options.invoiceAttachments === undefined
+      ? {}
+      : { invoiceAttachments: options.invoiceAttachments }),
+  });
+  const inputs = partial.tokenInputs;
+  if (inputs.case !== "transferInput") {
+    throw new SparkError("token transfer: partial built without transfer inputs");
+  }
+  const verdict = matchSpendingTransfer({
+    rows,
+    expectedInputs: inputs.value.outputsToSpend,
+    partial,
+  });
+  if (verdict !== undefined) {
+    if ("transactionHash" in verdict) {
+      return verdict;
+    }
+    throw new SparkTokenBroadcastError(
+      `token transaction ${verdict.inProgressHash} spending these inputs is still in ` +
+        `progress; retry with the same inputOutputIds once it resolves`,
+      { inputOutputIds: options.inputOutputIds },
+    );
+  }
+  return broadcastPartialTokenTransaction({
+    token: options.token,
+    signer: options.signer,
+    partial,
+    network: options.network,
+    operators: options.operators,
+    tokens: options.tokens,
+    ...(options.call === undefined ? {} : { call: options.call }),
+    inputOutputIds: options.inputOutputIds,
+  });
 }

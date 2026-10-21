@@ -6,5 +6,6 @@ export {
   broadcastPartialTokenTransaction,
   MAX_TOKEN_OUTPUTS_TX,
   selectTokenOutputs,
+  transferWithInputIds,
 } from "./transfer.ts";
 export type { TokenNetworkParams } from "./transfer.ts";

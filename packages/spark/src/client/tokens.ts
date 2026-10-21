@@ -1,3 +1,4 @@
+import { SparkInputError } from "../errors/index.ts";
 import {
   buildTransferPartial,
   broadcastPartialTokenTransaction,
@@ -5,6 +6,7 @@ import {
   queryTokenOutputs,
   selectTokenOutputs,
   tokenBalances,
+  transferWithInputIds,
 } from "../tokens/index.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
@@ -20,10 +22,29 @@ export async function sendTokens(
     readonly amount: bigint;
     readonly receiver: Uint8Array;
     readonly invoiceAttachments?: ReadonlyArray<string>;
+    readonly inputOutputIds?: ReadonlyArray<string>;
   },
 ): Promise<{ transactionHash: string; tokenIdentifier?: Uint8Array }> {
   return context.tokenLock.run(async () => {
     const { coordinatorConnection, signer, network, operators, config, now } = context;
+    if (options.inputOutputIds !== undefined) {
+      return transferWithInputIds({
+        token: coordinatorConnection.token,
+        signer,
+        network,
+        operators,
+        tokens: config.tokens,
+        now,
+        tokenIdentifier: options.tokenIdentifier,
+        amount: options.amount,
+        receiverPublicKey: options.receiver,
+        senderPublicKey: await signer.identityPublicKey(),
+        inputOutputIds: options.inputOutputIds,
+        ...(options.invoiceAttachments === undefined
+          ? {}
+          : { invoiceAttachments: options.invoiceAttachments }),
+      });
+    }
     const owned = await queryTokenOutputs({
       token: coordinatorConnection.token,
       ownerPublicKey: await signer.identityPublicKey(),
@@ -87,6 +108,9 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
         tokenIdentifier: context.tokenIdentifierForNetwork(transferOptions.tokenIdentifier),
         amount: transferOptions.amount,
         receiver: context.receiverIdentityKey(transferOptions.receiver),
+        ...(transferOptions.inputOutputIds === undefined
+          ? {}
+          : { inputOutputIds: transferOptions.inputOutputIds }),
       });
       return transactionHash;
     },
@@ -95,6 +119,26 @@ export function createTokens(context: ClientContext): SparkClient["tokens"] {
       return context.tokenLock.run(async () => {
         const { operators, config, now } = context;
         const identityPublicKey = await signer.identityPublicKey();
+        if (consolidateOptions.inputOutputIds !== undefined) {
+          if (consolidateOptions.inputOutputIds.length < 2) {
+            throw new SparkInputError(
+              "token consolidate: inputOutputIds needs at least two outputs",
+            );
+          }
+          const { transactionHash } = await transferWithInputIds({
+            token,
+            signer,
+            network,
+            operators,
+            tokens: config.tokens,
+            now,
+            tokenIdentifier,
+            receiverPublicKey: identityPublicKey,
+            senderPublicKey: identityPublicKey,
+            inputOutputIds: consolidateOptions.inputOutputIds,
+          });
+          return { transactionHash };
+        }
         const owned = await queryTokenOutputs({
           token,
           ownerPublicKey: identityPublicKey,

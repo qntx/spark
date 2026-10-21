@@ -106,6 +106,7 @@ test("root runtime exports are exactly the core surface", () => {
     "SparkError",
     "SparkInputError",
     "SparkRequestError",
+    "SparkTokenBroadcastError",
     "buildCpfpChild",
     "createMemorySparkStore",
     "createSatsInvoice",
