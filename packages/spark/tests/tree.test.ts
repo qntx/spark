@@ -247,6 +247,40 @@ test("operatorsDisagree compares the fields a spend commits to", () => {
   ).toBe(true);
 });
 
+test("operatorsDisagree compares the direct refund variants too", () => {
+  const directTx = txSpending(new Uint8Array(32).fill(3));
+  const directRefundTx = txSpending(new Uint8Array(32).fill(4));
+  const directFromCpfpRefundTx = txSpending(new Uint8Array(32).fill(5));
+  const leaf = verifyLeaf({ directTx, directRefundTx, directFromCpfpRefundTx });
+  expect(
+    operatorsDisagree(leaf, verifyLeaf({ directTx, directRefundTx, directFromCpfpRefundTx })),
+  ).toBe(false);
+  // Absent on one side and present on the other is a real disagreement: mapTreeNode already
+  // normalized empty bytes to undefined.
+  expect(operatorsDisagree(leaf, verifyLeaf({ directTx }))).toBe(true);
+  expect(operatorsDisagree(verifyLeaf({ directTx }), leaf)).toBe(true);
+  expect(
+    operatorsDisagree(
+      leaf,
+      verifyLeaf({
+        directTx,
+        directRefundTx: txSpending(new Uint8Array(32).fill(6)),
+        directFromCpfpRefundTx,
+      }),
+    ),
+  ).toBe(true);
+  expect(
+    operatorsDisagree(
+      leaf,
+      verifyLeaf({
+        directTx,
+        directRefundTx,
+        directFromCpfpRefundTx: txSpending(new Uint8Array(32).fill(7)),
+      }),
+    ),
+  ).toBe(true);
+});
+
 test("ownsLeaf checks our key plus the share reaches the verifying key", () => {
   const ourSecret = new Uint8Array(32).fill(3);
   const shareSecret = new Uint8Array(32).fill(4);

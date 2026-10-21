@@ -59,8 +59,19 @@ export function operatorsDisagree(coordinator: SparkLeaf, operator: SparkLeaf): 
     !equalBytes(operator.verifyingPublicKey, coordinator.verifyingPublicKey) ||
     !equalBytes(operator.signingKeyshare.publicKey, coordinator.signingKeyshare.publicKey) ||
     !equalBytes(operator.nodeTx, coordinator.nodeTx) ||
-    !equalBytes(operator.refundTx, coordinator.refundTx)
+    !equalBytes(operator.refundTx, coordinator.refundTx) ||
+    !sameOptionalBytes(operator.directTx, coordinator.directTx) ||
+    !sameOptionalBytes(operator.directRefundTx, coordinator.directRefundTx) ||
+    !sameOptionalBytes(operator.directFromCpfpRefundTx, coordinator.directFromCpfpRefundTx)
   );
+}
+
+/**
+ * `mapTreeNode` normalizes absent `direct*` fields to undefined, so undefined-versus-bytes is a
+ * genuine disagreement, not an encoding artifact.
+ */
+function sameOptionalBytes(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined && equalBytes(a, b));
 }
 
 /**
