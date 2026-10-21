@@ -31,6 +31,7 @@ import { mapTreeNode } from "./index.ts";
 import type { SparkLeaf } from "./index.ts";
 import { signUserJobs } from "./signing.ts";
 import type { UserSigningSpec } from "./signing.ts";
+import { malformedLeafTx } from "./verify.ts";
 
 // Leaf timelock renewal (upstream leaf-manager `checkRenewLeaves` classification plus the
 // `renewNodeTxn`/`renewRefundTxn`/`renewZeroTimelockNodeTxn` job builders, buildonspark/spark
@@ -269,5 +270,14 @@ export async function renewLeaf(options: {
       `renewLeaf: coordinator returned ${result.case ?? "no result"}, expected ${expectedCase}`,
     );
   }
-  return mapTreeNode(result.value.node);
+  const renewed = mapTreeNode(result.value.node);
+  // The renewed leaf is spent from coordinator-only data (a send can select it immediately), so
+  // it must clear the same bar sync applies — including its value label being bound to what its
+  // node tx output 0 pays. The renewal already committed; throwing names the leaf and aborts the
+  // spend before anything is signed, and the next sync reconciles the leaf.
+  const malformed = malformedLeafTx(renewed);
+  if (malformed !== undefined) {
+    throw new SparkError(`renewLeaf: coordinator returned a leaf whose ${malformed}`);
+  }
+  return renewed;
 }

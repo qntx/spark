@@ -74,6 +74,7 @@ export function createClientContext(
   ): Promise<ReadonlyArray<string>> => {
     const { chains, rejected } = await queryExitChains({
       spark: coordinatorConnection.spark,
+      operators: otherConnections.map((connection) => connection.spark),
       network,
       signer,
       leaves: forLeaves,

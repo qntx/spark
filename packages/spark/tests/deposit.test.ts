@@ -37,6 +37,7 @@ import {
   GenerateDepositAddressResponseSchema,
   GetSigningCommitmentsResponseSchema,
   Network,
+  QueryNodesResponseSchema,
   QueryUnusedDepositAddressesResponseSchema,
   RequestedSigningCommitmentsSchema,
   SparkService,
@@ -48,6 +49,8 @@ import type {
   GenerateDepositAddressRequest,
   GetSigningCommitmentsRequest,
   InputSigningData,
+  QueryNodesRequest,
+  TreeNode,
 } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
@@ -178,9 +181,29 @@ function fabricateDepositAddress(options: {
 type SparkImpl = Partial<{
   generate_deposit_address: (req: GenerateDepositAddressRequest) => unknown;
   query_unused_deposit_addresses: (req: unknown) => unknown;
+  query_nodes: (req: unknown) => unknown;
   get_signing_commitments: (req: GetSigningCommitmentsRequest) => unknown;
   finalize_deposit_tree_creation: (req: FinalizeDepositTreeCreationRequest) => unknown;
 }>;
+
+/** `query_nodes` fake over `served()`: nodeIds lookups match by id, anything else returns all. */
+function nodesQuery(served: () => ReadonlyArray<TreeNode>) {
+  return (req: unknown) => {
+    const request = req as QueryNodesRequest;
+    const all = served();
+    if (request.source.case === "nodeIds") {
+      const wanted = new Set(request.source.value.nodeIds);
+      return create(QueryNodesResponseSchema, {
+        nodes: Object.fromEntries(all.filter((node) => wanted.has(node.id)).map((n) => [n.id, n])),
+        offset: -1n,
+      });
+    }
+    return create(QueryNodesResponseSchema, {
+      nodes: Object.fromEntries(all.map((n) => [n.id, n])),
+      offset: -1n,
+    });
+  };
+}
 
 function makeClient(signer: SparkSigner, sparkImpl: SparkImpl, store?: SparkStore) {
   return createSparkClientWith(
@@ -609,6 +632,7 @@ describe("deposits.claim", () => {
 
     let commitmentsReq: GetSigningCommitmentsRequest | undefined;
     let finalizeReq: FinalizeDepositTreeCreationRequest | undefined;
+    const served: TreeNode[] = [];
     const opCommitments = Object.fromEntries(
       OPERATORS.map((op, i) => [
         op.identifier,
@@ -619,6 +643,7 @@ describe("deposits.claim", () => {
       ]),
     );
     const client = makeClient(signer, {
+      query_nodes: nodesQuery(() => served),
       query_unused_deposit_addresses: () =>
         create(QueryUnusedDepositAddressesResponseSchema, {
           depositAddresses: [
@@ -643,9 +668,9 @@ describe("deposits.claim", () => {
       },
       finalize_deposit_tree_creation: (req) => {
         finalizeReq = req;
-        return create(FinalizeDepositTreeCreationResponseSchema, {
-          rootNode: finalizedRootNode(req, { secret: VERIFYING_SECRET, verifyingKey }),
-        });
+        const rootNode = finalizedRootNode(req, { secret: VERIFYING_SECRET, verifyingKey });
+        served.push(rootNode);
+        return create(FinalizeDepositTreeCreationResponseSchema, { rootNode });
       },
     });
 
@@ -701,9 +726,11 @@ describe("deposits.claim", () => {
     const transaction = depositTxTo(address, 100_000n);
 
     const store = createMemorySparkStore();
+    const served: TreeNode[] = [];
     const client = makeClient(
       signer,
       {
+        query_nodes: nodesQuery(() => served),
         query_unused_deposit_addresses: () =>
           create(QueryUnusedDepositAddressesResponseSchema, {
             depositAddresses: [
@@ -724,10 +751,11 @@ describe("deposits.claim", () => {
               }),
             ),
           }),
-        finalize_deposit_tree_creation: (req) =>
-          create(FinalizeDepositTreeCreationResponseSchema, {
-            rootNode: finalizedRootNode(req, { secret: VERIFYING_SECRET, verifyingKey }),
-          }),
+        finalize_deposit_tree_creation: (req) => {
+          const rootNode = finalizedRootNode(req, { secret: VERIFYING_SECRET, verifyingKey });
+          served.push(rootNode);
+          return create(FinalizeDepositTreeCreationResponseSchema, { rootNode });
+        },
       },
       store,
     );
@@ -801,7 +829,9 @@ describe("deposits.claim", () => {
     const addrA = p2trAddressFromPublicKey(VERIFYING_KEY, "regtest");
     const addrB = p2trAddressFromPublicKey(OTHER_KEY, "regtest");
     let finalizedVout = -1;
+    const served: TreeNode[] = [];
     const client = makeClient(signer, {
+      query_nodes: nodesQuery(() => served),
       query_unused_deposit_addresses: () =>
         create(QueryUnusedDepositAddressesResponseSchema, {
           depositAddresses: [
@@ -835,13 +865,13 @@ describe("deposits.claim", () => {
         }),
       finalize_deposit_tree_creation: (req) => {
         finalizedVout = required(req.onChainUtxo, "onChainUtxo").vout;
-        return create(FinalizeDepositTreeCreationResponseSchema, {
-          rootNode: finalizedRootNode(
-            req,
-            { secret: OTHER_SECRET, verifyingKey: OTHER_KEY },
-            "leaf-1",
-          ),
-        });
+        const rootNode = finalizedRootNode(
+          req,
+          { secret: OTHER_SECRET, verifyingKey: OTHER_KEY },
+          "leaf-1",
+        );
+        served.push(rootNode);
+        return create(FinalizeDepositTreeCreationResponseSchema, { rootNode });
       },
     });
     const transaction = depositTxTo(addrA, 100_000n, [addrB]);
@@ -952,7 +982,9 @@ describe("deposits.claim", () => {
       leafId?: string;
     } = {},
   ) {
+    const served: TreeNode[] = [];
     return makeClient(signer, {
+      query_nodes: nodesQuery(() => served),
       query_unused_deposit_addresses: () =>
         create(QueryUnusedDepositAddressesResponseSchema, {
           depositAddresses: addresses.map((entry) =>
@@ -977,12 +1009,12 @@ describe("deposits.claim", () => {
       },
       finalize_deposit_tree_creation: (req) => {
         hooks.onFinalize?.(req);
-        return create(FinalizeDepositTreeCreationResponseSchema, {
-          rootNode: finalizedRootNode(req, {
-            secret: VERIFYING_SECRET,
-            verifyingKey: VERIFYING_KEY,
-          }),
+        const rootNode = finalizedRootNode(req, {
+          secret: VERIFYING_SECRET,
+          verifyingKey: VERIFYING_KEY,
         });
+        served.push(rootNode);
+        return create(FinalizeDepositTreeCreationResponseSchema, { rootNode });
       },
     });
   }

@@ -60,6 +60,7 @@ import type {
   StartTransferV3Request,
   Transfer,
   TransferLeaf,
+  TreeNode,
 } from "../src/proto/gen/spark_pb.ts";
 import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { MAX_JOBS } from "../src/signer/backend.ts";
@@ -340,6 +341,22 @@ function nodesResponse(nodes: Array<ReturnType<typeof create<typeof TreeNodeSche
 }
 
 /**
+ * A `query_nodes` fake over `served()`: nodeIds lookups (the exit-chain queries every operator must
+ * answer identically) match by id, anything else returns all served nodes.
+ */
+function nodesQuery(served: () => ReadonlyArray<TreeNode>) {
+  return (req: unknown) => {
+    const request = req as QueryNodesRequest;
+    const all = served();
+    if (request.source.case === "nodeIds") {
+      const wanted = new Set(request.source.value.nodeIds);
+      return nodesResponse(all.filter((node) => wanted.has(node.id)));
+    }
+    return nodesResponse([...all]);
+  };
+}
+
+/**
  * A `query_nodes` handler that serves `nodes` page by page — `queryLeaves` keeps paging while a
  * page comes back full, so a fake that ignores `offset` and always returns every node loops
  * forever. `LEAF_PAGE_SIZE` mirrors the client's page size (50).
@@ -347,7 +364,12 @@ function nodesResponse(nodes: Array<ReturnType<typeof create<typeof TreeNodeSche
 function pagedNodes(nodes: Array<ReturnType<typeof create<typeof TreeNodeSchema>>>) {
   const PAGE = 50;
   return (req: unknown) => {
-    const offset = Number((req as QueryNodesRequest).offset);
+    const request = req as QueryNodesRequest;
+    if (request.source.case === "nodeIds") {
+      const wanted = new Set(request.source.value.nodeIds);
+      return nodesResponse(nodes.filter((node) => wanted.has(node.id)));
+    }
+    const offset = Number(request.offset);
     return create(QueryNodesResponseSchema, {
       nodes: Object.fromEntries(nodes.slice(offset, offset + PAGE).map((node) => [node.id, node])),
       offset: Math.min(PAGE, nodes.length - offset) === PAGE ? BigInt(offset + PAGE) : -1n,
@@ -868,19 +890,23 @@ describe("transfers.claim", () => {
     const receivedSecret = new Uint8Array(32).fill(88);
     const pending = await pendingTransfer({ receiverSigner: receiver, receivedSecret });
     const [newLeafKey] = await receiver.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const claimedProto = await claimedLeaves(receiver, [
+      required(pending.leaves[0], "pending leaf"),
+    ]);
 
     let commitmentsReq: GetSigningCommitmentsRequest | undefined;
     let claimReq: ClaimTransferRequest | undefined;
     const client = makeClient(receiver, {
       query_pending_transfers: () =>
         create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
+      query_nodes: nodesQuery(() => claimedProto.map((leaf) => required(leaf.leaf, "leaf"))),
       get_signing_commitments: (req) => {
         commitmentsReq = req;
         return create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         });
       },
-      claim_transfer: async (req) => {
+      claim_transfer: (req) => {
         claimReq = req;
         return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
@@ -888,7 +914,7 @@ describe("transfers.claim", () => {
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
+            leaves: claimedProto,
           }),
         });
       },
@@ -945,9 +971,11 @@ describe("transfers.claim", () => {
     });
     const foreignKey = secp256k1.getPublicKey(new Uint8Array(32).fill(77), true);
     const store = createMemorySparkStore();
+    const served: TreeNode[] = [];
     const client = makeClient(
       receiver,
       {
+        query_nodes: nodesQuery(() => served),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
@@ -972,6 +1000,7 @@ describe("transfers.claim", () => {
               }).cpfpRefund.txBytes,
             }),
           });
+          served.push(required(poisoned.leaf, "leaf"));
           return create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
               id: req.transferId,
@@ -1026,43 +1055,55 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
       typedSig: true,
     });
+    const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_nodes: nodesQuery(() => served),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         }),
-      claim_transfer: async (req) =>
-        create(ClaimTransferResponseSchema, {
+      claim_transfer: async (req) => {
+        const leaves = await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]);
+        served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+        return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
+            leaves,
           }),
-        }),
+        });
+      },
     });
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
   });
 
-  const legacyClaimFakes = (pending: Transfer, receiver: SparkSigner) => ({
-    get_signing_commitments: () =>
-      create(GetSigningCommitmentsResponseSchema, {
-        signingCommitments: commitmentGroup(3),
-      }),
-    claim_transfer: async (req: ClaimTransferRequest) =>
-      create(ClaimTransferResponseSchema, {
-        transfer: create(TransferSchema, {
-          id: req.transferId,
-          status: TransferStatus.COMPLETED,
-          type: TransferType.TRANSFER,
-          network: Network.REGTEST,
-          leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
+  const legacyClaimFakes = (pending: Transfer, receiver: SparkSigner) => {
+    const served: TreeNode[] = [];
+    return {
+      query_nodes: nodesQuery(() => served),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
         }),
-      }),
-  });
+      claim_transfer: async (req: ClaimTransferRequest) => {
+        const leaves = await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]);
+        served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+        return create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves,
+          }),
+        });
+      },
+    };
+  };
 
   test("accepts a legacy compact sender signature", async () => {
     const receiver = await testSigner();
@@ -1155,23 +1196,30 @@ describe("transfers.claim", () => {
       transferId: "01989abc-def0-7000-8000-abcdef000002",
       leafId: "01989abc-def0-7abc-89ab-cdef00000002",
     });
+    const served: TreeNode[] = [];
     const client = makeClient(receiver, {
       query_pending_transfers: () =>
         create(QueryTransfersResponseSchema, { transfers: [poison, good], offset: -1n }),
+      query_nodes: nodesQuery(() => served),
       get_signing_commitments: (req) =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3 * req.nodeIdCount),
         }),
-      claim_transfer: async (req) =>
-        create(ClaimTransferResponseSchema, {
+      claim_transfer: async (req) => {
+        const leaves = await claimedLeaves(receiver, [
+          required(good.leaves[0], "good pending leaf"),
+        ]);
+        served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+        return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: await claimedLeaves(receiver, [required(good.leaves[0], "good pending leaf")]),
+            leaves,
           }),
-        }),
+        });
+      },
     });
     const claimed = await client.transfers.claimPending();
     expect(claimed.leaves.map((leaf) => leaf.id)).toStrictEqual([
@@ -1217,21 +1265,26 @@ describe("transfers.claim", () => {
       receivers: [{ id: "r-self", identityPublicKey: self }],
       transferReceiverId: "r-self",
     });
+    const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_nodes: nodesQuery(() => served),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         }),
-      claim_transfer: async (req) =>
-        create(ClaimTransferResponseSchema, {
+      claim_transfer: async (req) => {
+        const leaves = await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]);
+        served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+        return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
+            leaves,
           }),
-        }),
+        });
+      },
     });
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
@@ -1261,7 +1314,9 @@ describe("transfers.claim", () => {
 
     let commitmentsReq: GetSigningCommitmentsRequest | undefined;
     let claimReq: ClaimTransferRequest | undefined;
+    const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_nodes: nodesQuery(() => served),
       get_signing_commitments: (req) => {
         commitmentsReq = req;
         return create(GetSigningCommitmentsResponseSchema, {
@@ -1271,16 +1326,15 @@ describe("transfers.claim", () => {
       claim_transfer: async (req) => {
         claimReq = req;
         // The SO response carries every receiver's leaves; only ours may be claimed.
+        const own = await claimedLeaf(receiver, required(pending.leaves[0], "own leaf"));
+        served.push(required(own.leaf, "leaf"), required(otherLeaf.leaf, "leaf"));
         return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: [
-              await claimedLeaf(receiver, required(pending.leaves[0], "own leaf")),
-              otherLeaf,
-            ],
+            leaves: [own, otherLeaf],
           }),
         });
       },
@@ -1311,6 +1365,7 @@ describe("transfers.claim", () => {
         leaves: await claimedLeaves(receiver, pending.leaves),
       });
       const client = makeClient(receiver, {
+        query_nodes: nodesQuery(() => completed.leaves.map((leaf) => required(leaf.leaf, "leaf"))),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
@@ -1425,6 +1480,7 @@ describe("transfers.claim", () => {
         ],
       });
       const client = makeClient(receiver, {
+        query_nodes: nodesQuery(() => updated.leaves.map((leaf) => required(leaf.leaf, "leaf"))),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
@@ -1465,25 +1521,32 @@ describe("transfers.claim", () => {
     const receivedSecret = new Uint8Array(32).fill(88);
     const pending = await pendingTransfer({ receiverSigner: receiver, receivedSecret });
     const store = createMemorySparkStore();
+    const served: TreeNode[] = [];
     const client = makeClient(
       receiver,
       {
         query_pending_transfers: () =>
           create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
+        query_nodes: nodesQuery(() => served),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
           }),
-        claim_transfer: async (req) =>
-          create(ClaimTransferResponseSchema, {
+        claim_transfer: async (req) => {
+          const leaves = await claimedLeaves(receiver, [
+            required(pending.leaves[0], "pending leaf"),
+          ]);
+          served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+          return create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
               id: req.transferId,
               status: TransferStatus.COMPLETED,
               type: TransferType.TRANSFER,
               network: Network.REGTEST,
-              leaves: await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]),
+              leaves,
             }),
-          }),
+          });
+        },
       },
       store,
     );
@@ -1617,22 +1680,26 @@ describe("transfers.claim", () => {
     });
 
     let claimReq: ClaimTransferRequest | undefined;
+    const served: TreeNode[] = [];
     const client = makeClient(receiver, {
       query_pending_transfers: () =>
         create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
+      query_nodes: nodesQuery(() => served),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3 * leafIds.length),
         }),
       claim_transfer: async (req) => {
         claimReq = req;
+        const claimed = await claimedLeaves(receiver, leaves);
+        served.push(...claimed.map((leaf) => required(leaf.leaf, "leaf")));
         return create(ClaimTransferResponseSchema, {
           transfer: create(TransferSchema, {
             id: req.transferId,
             status: TransferStatus.COMPLETED,
             type: TransferType.TRANSFER,
             network: Network.REGTEST,
-            leaves: await claimedLeaves(receiver, leaves),
+            leaves: claimed,
           }),
         });
       },

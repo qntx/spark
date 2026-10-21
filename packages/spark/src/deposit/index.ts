@@ -30,7 +30,7 @@ import {
 } from "../proto/gen/spark_pb.ts";
 import type { Address, SparkService } from "../proto/gen/spark_pb.ts";
 import type { SigningTarget, SparkKey, SparkSigner } from "../signer/types.ts";
-import { mapTreeNode } from "../tree/index.ts";
+import { malformedLeafTx, mapTreeNode } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { signUserJobs } from "../tree/signing.ts";
 import type { UserSigningSpec } from "../tree/signing.ts";
@@ -486,5 +486,12 @@ export async function claimDeposit(
   ) {
     throw new SparkError("claimDeposit: root node refundTx has an invalid taproot signature");
   }
-  return mapTreeNode(rootNode);
+  const leaf = mapTreeNode(rootNode);
+  // The claimed leaf joins the spendable pool straight from coordinator data, so its value label
+  // must be bound to its node tx like any synced leaf.
+  const malformed = malformedLeafTx(leaf);
+  if (malformed !== undefined) {
+    throw new SparkError(`claimDeposit: coordinator returned a leaf whose ${malformed}`);
+  }
+  return leaf;
 }
