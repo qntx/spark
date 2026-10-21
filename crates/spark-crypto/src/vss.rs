@@ -136,11 +136,12 @@ pub fn split_secret_with_proofs(
         .iter()
         .map(|share| scalar_to_bytes(&share.value().0))
         .collect();
-    // k256 Scalar does not zeroize on drop; overwrite the share scalars in
-    // place. The vsss-rs polynomial — which holds the secret as coefficient 0 —
-    // is dropped inside `split_secret` and is not reachable for wiping.
+    // k256 Scalar implements Zeroize but does not zeroize on drop; a plain
+    // store could be eliminated as a dead write, so use the volatile wipe.
+    // The vsss-rs polynomial — which holds the secret as coefficient 0 — is
+    // dropped inside `split_secret` and is not reachable for wiping.
     for share in &mut vsss_shares {
-        share.1.0 = Scalar::ZERO;
+        share.1.0.zeroize();
     }
 
     Ok(Split {
