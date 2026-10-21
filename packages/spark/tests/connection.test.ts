@@ -602,3 +602,41 @@ test("clean stream closes back off with growing delays before resubscribing", as
   // Backoff caps double per failure: 1000ms → floor(500+250)=750, then 2000ms → floor(1000+500)=1500.
   expect(sleeps).toStrictEqual([750, 1500]);
 });
+
+test("return() on the event iterator aborts the stream and stops resubscribing", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const streamCalls = { calls: 0 };
+  const conn = connectTest(signer, (router) => {
+    router.service(
+      SparkAuthnService,
+      authnImpl({ get_challenge: 0, verify_challenge: 0, signaturesVerified: 0 }),
+    );
+    router.service(SparkService, {
+      async *subscribe_to_events(_req: unknown, context: HandlerContext) {
+        streamCalls.calls++;
+        yield create(SubscribeToEventsResponseSchema, {
+          event: { case: "connected", value: {} },
+        });
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => {
+            resolve();
+          });
+        });
+      },
+      query_nodes: () => ({ nodes: {}, offset: 0n }),
+    });
+  });
+  const iterator = sparkEvents(conn, await signer.identityPublicKey(), undefined, {
+    sleep: async () => Promise.resolve(),
+    random: fixedRandom,
+  })[Symbol.asyncIterator]();
+  expect(eventType(await iterator.next())).toBe("connected");
+  const done = await iterator.return?.();
+  expect(done?.done).toBe(true);
+  // The in-flight attempt was aborted — the generator saw its context signal and returned; no
+  // clean-close resubscribe follows a stopped iterator.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(streamCalls.calls).toBe(1);
+  const last = await iterator.next();
+  expect(last.done).toBe(true);
+});

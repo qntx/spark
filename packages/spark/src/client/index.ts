@@ -536,6 +536,15 @@ export function createSparkClientWith(
               throw error;
             }
           },
+          // A `for await…break`/early abandonment must stop the stream — without return() the
+          // reconnect loop keeps resubscribing inside the pending next() and the abort listeners
+          // leak until close().
+          return: async (): Promise<IteratorResult<SparkEvent>> => {
+            controller.abort();
+            cleanup();
+            await inner.return?.();
+            return { done: true, value: undefined };
+          },
         };
       },
     };

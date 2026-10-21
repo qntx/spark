@@ -439,6 +439,9 @@ export function sparkEvents(
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let attemptAbort: AbortController | undefined;
   let onCallerAbort: (() => void) | undefined;
+  // The caller's iterator `return()` (e.g. `for await…break`) stops the loop for good: without it
+  // the resubscribe chain kept running inside an abandoned pending `next()`.
+  let stopped = false;
 
   const clearAttempt = (): void => {
     current = undefined;
@@ -461,18 +464,45 @@ export function sparkEvents(
     idleTimer = setTimeout(() => attemptAbort?.abort(), idleTimeoutMs);
   };
 
+  /** `sleep` resolving early on abort — a stopped stream must not sit out a 60s backoff. */
+  const abortableBackoff = async (ms: number): Promise<void> => {
+    if (signal === undefined) {
+      await sleep(ms);
+      return;
+    }
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        sleep(ms),
+        new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          onAbort = () => resolve();
+          signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (onAbort !== undefined) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+  };
+
   /** Backoff-then-resubscribe shared by stream errors and clean closes. */
   const resubscribe = async (): Promise<IteratorResult<SparkEvent>> => {
     clearAttempt();
     const cap = Math.min(EVENT_RECONNECT_BASE_MS * 2 ** failures, EVENT_RECONNECT_MAX_MS);
     failures++;
     const jitter = deps?.random === undefined ? cap / 2 : (cap * (deps.random(1)[0] ?? 0)) / 512;
-    await sleep(Math.floor(cap / 2 + jitter));
+    await abortableBackoff(Math.floor(cap / 2 + jitter));
     return pull();
   };
 
   const pull = async (): Promise<IteratorResult<SparkEvent>> => {
-    if (aborted()) {
+    if (stopped || aborted()) {
+      attemptAbort?.abort();
       clearAttempt();
       return { done: true, value: undefined };
     }
@@ -503,7 +533,8 @@ export function sparkEvents(
       failures = 0;
       return { done: false, value: event };
     } catch (error) {
-      if (aborted()) {
+      if (stopped || aborted()) {
+        attemptAbort?.abort();
         clearAttempt();
         return { done: true, value: undefined };
       }
@@ -518,7 +549,18 @@ export function sparkEvents(
 
   return {
     [Symbol.asyncIterator]() {
-      return { next: pull };
+      return {
+        next: pull,
+        // The caller owns `signal` — abort the in-flight attempt directly instead.
+        return: async (): Promise<IteratorResult<SparkEvent>> => {
+          stopped = true;
+          // clearAttempt only drops the reference — abort so the in-flight stream actually ends.
+          attemptAbort?.abort();
+          await current?.return?.();
+          clearAttempt();
+          return { done: true, value: undefined };
+        },
+      };
     },
   };
 }
