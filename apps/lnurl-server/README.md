@@ -35,6 +35,7 @@ invoices, so it needs no balance.
 | `LNURL_INVOICE_EXPIRY_SECS`           | `3600`       | BOLT-11 expiry on issued invoices                                         |
 | `LNURL_MAX_PENDING_INVOICES_PER_USER` | `100`        | Pending-invoice quota per payee                                           |
 | `LNURL_MAX_PENDING_INVOICES`          | `10000`      | Pending-invoice quota across the server                                   |
+| `LNURL_MAX_USERS`                     | `100000`     | Registered-name quota across the server                                   |
 | `LNURL_SETTLE_BATCH`                  | `200`        | Invoices status-checked per round, least-recently-checked first           |
 | `LNURL_PRUNE_EVERY_ROUNDS`            | `720`        | Prune expired invoices and stale receipts every N rounds (≈ hourly at 5s) |
 | `LNURL_SETTLED_RETENTION_MS`          | `2592000000` | Settled invoices kept 30d past expiry                                     |
@@ -58,7 +59,10 @@ Secrets are never logged or echoed in errors.
 With `LNURL_ZAP_SECRET_KEY` set the pay request advertises `allowsNostr`/`nostrPubkey` (LUD-06
 zaps extension): `nostr` invoice parameters are validated per NIP-57 appendix D, and every
 settled zapped invoice produces a signed kind-9735 receipt persisted in `zap_receipts` and
-published to the request's `relays` (up to 10 URLs, retried up to 5 rounds).
+published to the request's `relays` (up to 10 URLs, retried up to 5 rounds). The zap request's
+`p` tag — the nostr pubkey the receipt attributes the zap to — is not bound to the payee: the
+server never learns a registered user's nostr key (registration binds a Spark identity), so a
+payer may attribute the zap to an arbitrary pubkey. Same behavior as the Breez implementation.
 
 Receipt relays are payer-controlled, so the server only connects to `wss://` URLs on port 443
 whose host is plausibly public (no `localhost`/`*.localhost`, no IPv6 literals, no private or
@@ -74,6 +78,11 @@ The per-payee quota is a storage bound, not abuse protection: the invoice callba
 unauthenticated, so anyone can fill one name's `LNURL_MAX_PENDING_INVOICES_PER_USER` slots with
 invoices they never pay — for up to `LNURL_INVOICE_EXPIRY_SECS` each — and that name cannot be
 paid until a slot frees. Put per-IP rate limiting on the invoice route at your reverse proxy.
+
+`LNURL_MAX_USERS` is the same kind of bound on the `users` table: registration needs a valid
+signed statement but pubkeys are free to generate, so registrations past the cap fail with
+`registered user limit reached` while re-registrations always succeed. Put per-IP rate limiting
+on the register route at your reverse proxy.
 
 ## Layout
 

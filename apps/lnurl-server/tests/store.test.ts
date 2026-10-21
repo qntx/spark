@@ -48,17 +48,21 @@ describe("lnurl sqlite store", () => {
 
   test("users: name conflicts fail, same-key re-registration replaces the name", async () => {
     const store = open();
+    await expect(store.countUsers()).resolves.toBe(0);
     await expect(store.putUser(ALICE)).resolves.toBe(true);
+    await expect(store.countUsers()).resolves.toBe(1);
     await expect(store.userByName("alice")).resolves.toStrictEqual(ALICE);
     // Another key cannot take the name.
     await expect(store.putUser(BOB)).resolves.toBe(false);
     // The same key renames: the old name is released.
     await expect(store.putUser(ALICE2)).resolves.toBe(true);
+    await expect(store.countUsers()).resolves.toBe(1);
     await expect(store.userByName("alice")).resolves.toBeUndefined();
     await expect(store.userByName("alice2")).resolves.toStrictEqual(ALICE2);
     await expect(store.userByPublicKey(ALICE.pubkeyHex)).resolves.toStrictEqual(ALICE2);
     // Bob can now take the released name.
     await expect(store.putUser(BOB)).resolves.toBe(true);
+    await expect(store.countUsers()).resolves.toBe(2);
     // deleteUser only removes a matching (name, key) pair.
     await expect(store.deleteUser(BOB.pubkeyHex, "alice2")).resolves.toBe(false);
     await expect(store.deleteUser(ALICE.pubkeyHex, "alice2")).resolves.toBe(true);

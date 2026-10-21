@@ -166,6 +166,7 @@ function serverWith(
     readonly invoiceExpirySecs?: number;
     readonly maxPendingInvoicesPerUser?: number;
     readonly maxPendingInvoices?: number;
+    readonly maxUsers?: number;
     readonly settleBatch?: number;
   },
 ) {
@@ -297,6 +298,23 @@ describe("register", () => {
     await expect(
       statusOf(server.register(PUBKEY_HEX_B, registerBody("alice", SECRET_B, NOW_SECS + 2))),
     ).resolves.toBe(200);
+  });
+
+  test("the maxUsers cap blocks new pubkeys but never a re-registration", async () => {
+    const { server } = serverWith(fakeClient().client, undefined, { maxUsers: 1 });
+    await expect(
+      statusOf(server.register(PUBKEY_HEX_A, registerBody("alice", SECRET_A))),
+    ).resolves.toBe(200);
+    // A second pubkey is over the cap.
+    await expect(
+      statusOf(server.register(PUBKEY_HEX_B, registerBody("bob", SECRET_B, NOW_SECS + 1))),
+    ).resolves.toBe(409);
+    await expect(statusOf(server.payRequest("bob"))).resolves.toBe(404);
+    // A re-registers a different name: same pubkey, count unchanged — still allowed at the cap.
+    await expect(
+      statusOf(server.register(PUBKEY_HEX_A, registerBody("alice2", SECRET_A, NOW_SECS + 2))),
+    ).resolves.toBe(200);
+    await expect(statusOf(server.payRequest("alice2"))).resolves.toBe(200);
   });
 });
 

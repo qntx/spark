@@ -81,6 +81,10 @@ export function validateZapRequest(
   if (event.tags.length === 0) {
     fail("missing tags");
   }
+  // `p` names the nostr pubkey the receipt will attribute the zap to. The server never learns the
+  // payee's nostr key — registration binds a Spark identity, not a nostr pubkey — so `p` cannot be
+  // bound to the registered user: a payer may attribute the zap to an arbitrary pubkey. Same
+  // behavior as the Breez implementation this is ported from.
   const pTags = tagsNamed(event, "p");
   if (pTags.length !== 1 || pTags[0]?.[1] === undefined || !isHex32(pTags[0][1])) {
     fail("missing or multiple 'p' tags");

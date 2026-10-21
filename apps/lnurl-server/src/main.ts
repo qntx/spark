@@ -73,6 +73,7 @@ export async function startLnurlServer(
     invoiceExpirySecs: config.invoiceExpirySecs,
     maxPendingInvoicesPerUser: config.maxPendingInvoicesPerUser,
     maxPendingInvoices: config.maxPendingInvoices,
+    maxUsers: config.maxUsers,
     settleBatch: config.settleBatch,
     ...(zapKeys === undefined
       ? {}

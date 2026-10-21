@@ -152,6 +152,14 @@ export function createLnurlStore(path: string, now: () => number = Date.now): Ln
       return userOf(row);
     },
 
+    countUsers: async () => {
+      await Promise.resolve();
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM users`).get() as
+        | Record<string, unknown>
+        | undefined;
+      return int(row?.["n"]);
+    },
+
     putUser: async (user) => {
       await Promise.resolve();
       const holder = userOf(
