@@ -1,6 +1,6 @@
 # Security audit scope and code guide
 
-Commit under review: <sha>
+Commit under review: dc95b87dad92b71b4318e91aae463fce997bb772
 
 ## Purpose and deliverables
 
