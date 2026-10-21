@@ -278,7 +278,11 @@ async function resumeCommittedExit(
   deps: CoopExitDeps & {
     readonly deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
   },
-  options: { readonly address: string; readonly speed: SspCoopExitSpeed },
+  options: {
+    readonly address: string;
+    readonly speed: SspCoopExitSpeed;
+    readonly transferId: string;
+  },
   transfer: SparkTransfer,
 ): Promise<CooperativeExitResult> {
   const { ssp, sspIdentityPublicKey, signer, network } = deps;
@@ -286,6 +290,7 @@ async function resumeCommittedExit(
   assertCommittedTransfer(
     transfer,
     {
+      transferId: options.transferId,
       type: TransferType.COOPERATIVE_EXIT,
       senderIdentityPublicKey: identityPublicKey,
       receiverIdentityPublicKeys: [sspIdentityPublicKey],
@@ -409,7 +414,7 @@ export async function cooperativeExit(
     });
     if (committed !== undefined) {
       assertLiveTransfer(committed);
-      return resumeCommittedExit(deps, options, committed);
+      return resumeCommittedExit(deps, { ...options, transferId: options.transferId }, committed);
     }
   }
 
@@ -574,6 +579,7 @@ export async function cooperativeExit(
     assertCommittedTransfer(
       transfer,
       {
+        transferId,
         type: TransferType.COOPERATIVE_EXIT,
         senderIdentityPublicKey: identityPublicKey,
         receiverIdentityPublicKeys: [sspIdentityPublicKey],

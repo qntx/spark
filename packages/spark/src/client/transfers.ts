@@ -64,7 +64,9 @@ export async function sendSats(
   }
 
   const senderIdentityPublicKey = await signer.identityPublicKey();
+  const transferId = options.transferId ?? uuidv7(random, now);
   const expected: CommittedTransferExpectation = {
+    transferId,
     type: TransferType.TRANSFER,
     senderIdentityPublicKey,
     receiverIdentityPublicKeys: receiverKeys,
@@ -73,7 +75,6 @@ export async function sendSats(
       amountSats: receiver.amountSats,
     })),
   };
-  const transferId = options.transferId ?? uuidv7(random, now);
 
   // Retry path: the id is already committed — resume on it. A present-but-mismatched transfer
   // means the id was reused with different terms and must not ride along. The probe stays outside
@@ -118,7 +119,6 @@ export async function sendSats(
       const recovered = await queryCommittedTransfer({
         spark,
         network,
-        transferId,
         ...expected,
       });
       if (recovered === undefined) {
@@ -126,6 +126,9 @@ export async function sendSats(
       }
       sent = recovered;
     }
+    // The returned transfer — fresh or recovered — must be the one we signed for: same id, type,
+    // sender and receiver set (the lightning-pay path asserts its fresh response the same way).
+    assertCommittedTransfer(sent, expected, "send");
     // The returned transfer — not the locally selected list — decides which leaves left the wallet:
     // on a retry the SO may report the first-attempt leaves. Responses echoing no leaves fall back
     // to the selection (the send path always commits the leaves it built the package over).

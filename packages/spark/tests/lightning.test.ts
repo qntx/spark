@@ -194,6 +194,8 @@ function transferProto(options: {
   status?: TransferStatus;
   leaves?: ReadonlyArray<SparkLeaf>;
   totalValue?: bigint;
+  /** Shared intermediate CPFP refund bytes stamped on every leaf. */
+  intermediateRefundTx?: Uint8Array;
 }): Transfer {
   return create(TransferSchema, {
     id: options.id,
@@ -228,9 +230,32 @@ function transferProto(options: {
         secretCipher: new Uint8Array(10),
         sig: { case: "signature" as const, value: new Uint8Array(64) },
         transferReceiverId: "",
+        ...(options.intermediateRefundTx === undefined
+          ? {}
+          : { intermediateRefundTx: options.intermediateRefundTx }),
       }),
     ),
   });
+}
+
+/**
+ * An intermediate CPFP refund whose output 0 is the HTLC script the production fresh path commits
+ * for `paymentHash` — hash-locked to the SSP, sequence-locked to `sequenceLockPublicKey`.
+ */
+function htlcRefund(
+  leaf: SparkLeaf,
+  paymentHash: Uint8Array,
+  sequenceLockPublicKey: Uint8Array,
+): Uint8Array {
+  return createRefundTxsForLightning({
+    nodeTx: leaf.nodeTx,
+    vout: leaf.vout,
+    sequence: 1000,
+    directSequence: 1000,
+    paymentHash,
+    hashLockDestinationPublicKey: SSP_IDENTITY,
+    sequenceLockDestinationPublicKey: sequenceLockPublicKey,
+  }).cpfpRefundTx.txBytes;
 }
 
 type CapturedCall = {
@@ -750,12 +775,18 @@ async function sendDeps(overrides: {
           const transferId = String(
             (input["transferRequest"] as Record<string, unknown>)["transferId"],
           );
+          const responseLeaves = overrides.transferLeaves ?? overrides.leaves;
           return {
             transfer: transferProto({
               id: transferId,
               sender: identityPublicKey,
               receiver: SSP_IDENTITY,
-              leaves: overrides.transferLeaves ?? overrides.leaves,
+              leaves: responseLeaves,
+              intermediateRefundTx: htlcRefund(
+                required(responseLeaves[0], "response leaf"),
+                PAYMENT_HASH,
+                identityPublicKey,
+              ),
             }),
           };
         });
@@ -1046,6 +1077,7 @@ describe("payLightningInvoice", () => {
       receiver: SSP_IDENTITY,
       type: TransferType.PREIMAGE_SWAP,
       leaves: [leaf],
+      intermediateRefundTx: htlcRefund(leaf, PAYMENT_HASH, identityPublicKey),
     });
     const { deps, sendRequests, deleted, calls } = await sendDeps({
       leaves: [leaf],
@@ -1099,6 +1131,7 @@ describe("payLightningInvoice", () => {
       type: TransferType.PREIMAGE_SWAP,
       leaves: [leaf],
       totalValue: 1007n, // 1000 sats amount + 7 sats committed fee
+      intermediateRefundTx: htlcRefund(leaf, PAYMENT_HASH, identityPublicKey),
     });
     const { deps, calls, sendRequests, feeEstimates, deleted } = await sendDeps({
       leaves: [leaf],
@@ -1123,6 +1156,117 @@ describe("payLightningInvoice", () => {
     expect(deleted).toStrictEqual([["leaf-1"]]);
     expect(payment.requestId).toBe("send-req-1");
     expect(payment.transferId).toBe("0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee");
+  });
+
+  test("a probed swap locked to a different payment hash is rejected", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    // The committed transfer's HTLC output locks to a different payment's hash.
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+      totalValue: 1007n,
+      intermediateRefundTx: htlcRefund(
+        leaf,
+        sha256(new Uint8Array(32).fill(0x77)),
+        identityPublicKey,
+      ),
+    });
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run when the probe hits");
+      },
+    });
+    await expect(
+      payLightningInvoice(deps, {
+        invoice,
+        maxFeeSats: 200,
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ).rejects.toThrow("locked to a different payment hash");
+    expect(sendRequests).toHaveLength(0);
+  });
+
+  test("a probed swap carrying no intermediate refunds fails closed", async () => {
+    const signer = await testSigner();
+    const identityPublicKey = await signer.identityPublicKey();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identityPublicKey,
+      receiver: SSP_IDENTITY,
+      type: TransferType.PREIMAGE_SWAP,
+      leaves: [leaf],
+      totalValue: 1007n,
+    });
+    const { deps, sendRequests } = await sendDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      initiate: () => {
+        throw new Error("initiate_preimage_swap_v3 must not run when the probe hits");
+      },
+    });
+    await expect(
+      payLightningInvoice(deps, {
+        invoice,
+        maxFeeSats: 200,
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ).rejects.toThrow("carries no intermediate refunds");
+    expect(sendRequests).toHaveLength(0);
+  });
+
+  test("an ssp send request bound to a different transfer id is rejected", async () => {
+    const signer = await testSigner();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const { deps } = await sendDeps({
+      leaves: [leaf],
+      requestLightningSend: () => ({
+        transferId: "0199aaaa-bbbb-7ccc-8ddd-ffffffffffffffff",
+      }),
+    });
+    await expect(payLightningInvoice(deps, { invoice, maxFeeSats: 200 })).rejects.toThrow(
+      /bound to transfer .*expected/,
+    );
+  });
+
+  test("an ssp send request echoing our transfer id proceeds", async () => {
+    const signer = await testSigner();
+    const leaf = await fabricateLeaf(signer, { leafId: "leaf-1" });
+    const invoice = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: PAYMENT_HASH,
+      amountMsat: 1_000_000n,
+    });
+    const { deps } = await sendDeps({
+      leaves: [leaf],
+      requestLightningSend: (req) => ({
+        transferId: required(req.userOutboundTransferExternalId, "external id"),
+      }),
+    });
+    const payment = await payLightningInvoice(deps, { invoice, maxFeeSats: 200 });
+    expect(payment.requestId).toBe("send-1");
   });
 
   test("a terminal transfer under the caller's transfer id demands a fresh id", async () => {
@@ -1172,6 +1316,7 @@ describe("payLightningInvoice", () => {
       type: TransferType.PREIMAGE_SWAP,
       leaves: [leaf],
       totalValue: 1201n, // implies a 201-sat fee, above maxFeeSats
+      intermediateRefundTx: htlcRefund(leaf, PAYMENT_HASH, identityPublicKey),
     });
     const { deps, sendRequests, feeEstimates } = await sendDeps({
       leaves: [leaf],
