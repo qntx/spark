@@ -28,6 +28,10 @@ values (public keys, signatures, ciphertexts).
 Idempotent retries: `transfers.send`/`sendMany`, `lightning.pay` and
 `withdrawals.cooperativeExit` accept a `transferId` — reuse the same id to retry a call whose
 response may have committed; the same id with different terms fails rather than paying twice.
+`tokens.transfer`/`tokens.consolidate` throw `SparkTokenBroadcastError` when the broadcast
+outcome is uncertain — retry with `inputOutputIds: error.inputOutputIds` and the same receiver
+and amount; that retry either returns the committed transaction's hash or broadcasts exactly
+those inputs once. Retrying without it would select different outputs and pay twice.
 
 Offline receive: once a transfer commits, the sender cannot cancel it and its expiry does not
 return it — `transfers.claim`/`claimPending` can pick it up at any later time.
