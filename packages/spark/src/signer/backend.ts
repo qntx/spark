@@ -110,6 +110,17 @@ export function checkOperators(operators: ReadonlyArray<SparkOperator>): void {
   }
 }
 
+/**
+ * Rejects a VSS threshold that is not a safe integer in `1..=operators.length`. The wasm ABI
+ * otherwise coerces the JS number into an i32 (fractions truncate, values past 2^32 wrap) and
+ * silently splits at a different threshold than requested.
+ */
+export function checkThreshold(threshold: number, operators: ReadonlyArray<SparkOperator>): void {
+  if (!Number.isSafeInteger(threshold) || threshold < 1 || threshold > operators.length) {
+    throw new SparkInputError(`threshold: must be an integer between 1 and ${operators.length}`);
+  }
+}
+
 /** Splits the flat `t×33 ‖ n×32` backend output into per-share proofs and share bytes. */
 export function parseSplit(
   output: Uint8Array,

@@ -1081,6 +1081,50 @@ describe("prepareClaim", () => {
   });
 });
 
+describe("threshold validation", () => {
+  test.each([2.5, 0, 4, 2 ** 32 + 3])(
+    "rejects threshold %s on VSS-splitting prepare calls",
+    async (threshold) => {
+      const signer = await signerFor(derivation.cases[0]!.seed_hex);
+      const crypto = await backend();
+      const operators = [testOperator(0, 101n), testOperator(1, 102n), testOperator(2, 103n)];
+      const leafId = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
+      const receiver = Point.BASE.toBytes(true);
+      const secretCipher = crypto.eciesEncrypt(
+        await signer.identityPublicKey(),
+        be32(0xabcd1234n),
+        new Uint8Array(32).fill(3),
+      );
+      await expect(
+        signer.prepareTransfer({
+          transferId: TRANSFER_ID,
+          leaves: [
+            {
+              leafId,
+              key: { type: "leaf", leafId },
+              receiverIdentityPublicKey: receiver,
+            },
+          ],
+          operators,
+          threshold,
+        }),
+      ).rejects.toThrow(SparkInputError);
+      await expect(
+        signer.prepareClaim({
+          transferId: TRANSFER_ID,
+          leaves: [{ leafId, secretCipher }],
+          operators,
+          threshold,
+        }),
+      ).rejects.toThrow(SparkInputError);
+      await expect(signer.prepareLightningReceive({ operators, threshold })).rejects.toThrow(
+        SparkInputError,
+      );
+      signer.dispose();
+    },
+  );
+});
+
 describe("prepareLightningReceive", () => {
   test("payment hash is sha256 of the VSS-recovered preimage", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);

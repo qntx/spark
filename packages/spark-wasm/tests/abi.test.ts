@@ -146,6 +146,21 @@ describe("vss vectors", () => {
       expect(toHex(out)).toBe([...c.proofs, ...c.shares].join(""));
     }
   });
+
+  test.each([
+    ["fractional threshold", 2.7, 3],
+    ["out-of-range threshold", 2 ** 32 + 3, 3],
+    ["fractional shares", 2, 3.5],
+    ["out-of-range shares", 2, 2 ** 32 + 3],
+    ["negative threshold", -1, 3],
+  ])("rejects %s before the wasm call", async (_label, threshold, shares) => {
+    const crypto = await loadBackend();
+    const error = syncThrow(() =>
+      crypto.splitSecretWithProofs(hex("20".repeat(32)), threshold, shares, hex("21".repeat(32))),
+    );
+    expect(error).toBeInstanceOf(SparkError);
+    expect(error).not.toBeInstanceOf(SparkCryptoError);
+  });
 });
 
 describe("ffi-errors vectors", () => {

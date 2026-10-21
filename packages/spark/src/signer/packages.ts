@@ -18,6 +18,7 @@ import type { ClaimLeafKeyTweak, SendLeafKeyTweak } from "../proto/gen/spark_pb.
 import {
   backendCall,
   checkOperators,
+  checkThreshold,
   operatorShare,
   parseSplit,
   PUBLIC_KEY_LENGTH,
@@ -65,6 +66,7 @@ function splitTweak(
   label: string,
 ): TweakSplit {
   const { crypto, random } = context;
+  checkThreshold(threshold, operators);
   const split = backendCall(() =>
     withRandom(random, 32, (seed) =>
       crypto.splitSecretWithProofs(tweak, threshold, operators.length, seed),
@@ -298,6 +300,7 @@ export function prepareLightningReceivePackage(
 ): PreparedLightningReceive {
   const { crypto, random } = context;
   checkOperators(request.operators);
+  checkThreshold(request.threshold, request.operators);
   const secrets: Uint8Array[] = [];
   const plaintexts: Uint8Array[] = [];
   try {
