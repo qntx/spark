@@ -24,6 +24,7 @@ import {
   assertLiveTransfer,
   queryCommittedTransfer,
   queryTransferById,
+  verifyTransferAcrossOperators,
 } from "../transfer/query.ts";
 import { prepareTransferPackage } from "../transfer/send.ts";
 import type { SparkLeaf } from "../tree/index.ts";
@@ -215,16 +216,38 @@ export async function payLightningInvoice(
     transfer = await deps.spendLeaves(amountSats + feeSats, async (leaves) => {
       const committed = await initiatePreimageSwap(leaves);
       assertCommittedTransfer(committed, expected, "lightning pay");
+      await verifyTransferAcrossOperators({
+        operators: deps.operatorSparks,
+        network,
+        transfer: committed,
+        compareIntermediateRefunds: true,
+      });
       assertCommittedPaymentHash(committed);
       // The leaves are committed under HTLC refunds now, so the old refund txs must not survive a
-      // failure on the SSP call below. The returned transfer — not the locally selected list —
-      // decides which leaves left the wallet: on a retry the SO may report the first-attempt
-      // leaves.
-      await deps.deleteExitChains(committed.leaves.map((leaf) => leaf.leaf.id));
+      // failure on the SSP call below. Only leaf ids this call both selected and the verified
+      // transfer names are deleted — a reported list cannot strip other leaves' exit data (N-01);
+      // the leftover ids' chains are reclaimed by the endorsed sync sweep.
+      const selected = new Set(leaves.map((leaf) => leaf.id));
+      const spent = [
+        ...new Set(
+          committed.leaves
+            .map((transferLeaf) => transferLeaf.leaf.id)
+            .filter((leafId) => selected.has(leafId)),
+        ),
+      ];
+      if (spent.length > 0) {
+        await deps.deleteExitChains(spent);
+      }
       return committed;
     });
   } else {
     assertCommittedTransfer(transfer, expected, "lightning pay");
+    await verifyTransferAcrossOperators({
+      operators: deps.operatorSparks,
+      network,
+      transfer,
+      compareIntermediateRefunds: true,
+    });
     assertCommittedPaymentHash(transfer);
     // The swap commits amount + fee as the transfer total; the committed total is the fee source.
     feeSats = transfer.totalValueSats - amountSats;
@@ -233,9 +256,8 @@ export async function payLightningInvoice(
         `lightning pay: committed transfer fee ${feeSats} exceeds maxFeeSats ${options.maxFeeSats}`,
       );
     }
-    // The transfer committed in an earlier call — deleting its old chains needs no lock: a
-    // leaves() sync only re-stores chains for leaves it just queried, and these are gone.
-    await deps.deleteExitChains(transfer.leaves.map((leaf) => leaf.leaf.id));
+    // A probe hit deletes nothing: the leaves were committed in an earlier call, and the endorsed
+    // sync sweep reclaims them — a reported leaf list never decides deletions on its own (N-01).
   }
 
   /** Wraps `leaves`' refunds in HTLCs and commits the preimage-swap transfer. */

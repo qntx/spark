@@ -14,6 +14,7 @@ import { selectSendLeaves } from "./leaves.ts";
 export function createLightning(context: ClientContext): SparkClient["lightning"] {
   const deps: LightningDeps = {
     spark: context.coordinatorConnection.spark,
+    operatorSparks: context.otherConnections.map((connection) => connection.spark),
     ssp: context.sspClient,
     sspIdentityPublicKey: context.config.ssp.identityPublicKey,
     signer: context.signer,
