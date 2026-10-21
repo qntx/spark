@@ -1,6 +1,6 @@
 # Security audit scope and code guide
 
-Commit under review: <sha> — re-pin at merge time
+Commit under review: 73e23fe88b2b4cef60c0490b85515fee602b0182
 
 ## Purpose and deliverables
 
@@ -156,8 +156,9 @@ identifiers are authoritative.
   `directRefundTx`, `directFromCpfpRefundTx` — quarantines leaves whose exit
   chain fails verification, and isolates rows `mapTreeNode` cannot map, so a
   single malformed row never takes the wallet down. A stored exit chain is
-  swept only when no operator reported that node id at all in the sync
-  (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
+  swept only when no operator reported that node id at all in the sync, or
+  when the coordinator's row is not owned and every other operator serves an
+  agreeing row (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
   `exit/unilateral.ts`).
 - **P7 — Idempotent retries never double-spend.** Sats transfers take a
   caller-supplied `transferId`; retries rebind and verify the committed
