@@ -33,7 +33,7 @@ import type { SparkSigner } from "../../src/signer/index.ts";
 import type { SparkLeaf } from "../../src/tree/index.ts";
 import { be32 } from "./frost.ts";
 
-export const OPERATOR_SECRETS = [
+export const OPERATOR_SECRETS: ReadonlyArray<Uint8Array> = [
   new Uint8Array(32).fill(9),
   new Uint8Array(32).fill(8),
   new Uint8Array(32).fill(3),
@@ -50,7 +50,7 @@ export const THRESHOLD = 2;
 
 /** Fabricated SO keyshare; a leaf's verifying key is `share + user signing key`. */
 export const SHARE_SECRET = 0x5ea5n;
-export const SHARE_PUB = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
+export const SHARE_PUB: Uint8Array = secp256k1.Point.BASE.multiply(SHARE_SECRET).toBytes(true);
 
 export function verifyingKeyFor(signingPublicKey: Uint8Array): Uint8Array {
   return secp256k1.Point.fromBytes(SHARE_PUB)
