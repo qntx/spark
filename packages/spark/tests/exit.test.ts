@@ -512,7 +512,10 @@ describe("queryExitChains", () => {
       router.service(SparkService, {
         query_nodes: () => {
           calls += 1;
-          return create(QueryNodesResponseSchema, { nodes: {}, offset: 0n });
+          return create(QueryNodesResponseSchema, {
+            nodes: { root: treeNodeProto(ROOT) },
+            offset: 0n,
+          });
         },
       });
     });
@@ -524,8 +527,8 @@ describe("queryExitChains", () => {
       signer: SIGNER,
       leaves: [ROOT],
     });
-    // The caller's leaf is the reference for its own id: an unserved root still chains to
-    // itself once no operator contradicts it.
+    // The caller's leaf is only the reference: the coordinator must still serve it back
+    // identically for the chain to verify.
     expect(calls).toBe(1);
     expect(chains.map((chain) => chain.leafId)).toStrictEqual(["root"]);
     expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["root"]);
@@ -555,7 +558,8 @@ describe("queryExitChains", () => {
         refundTx: leafRefundTx,
       }),
     );
-    // Respond with the parents only for the requested chunk, through a direct
+    const leafProtos = new Map(leaves.map((leaf) => [leaf.id, treeNodeProto(leaf)]));
+    // Respond with the requested nodes only for the requested chunk, through a direct
     // transport that skips the serialization round-trip.
     const calls: Array<ReadonlyArray<string>> = [];
     const transport = {
@@ -568,7 +572,9 @@ describe("queryExitChains", () => {
       ) => {
         const chunk = nodeIdsFrom(input as QueryNodesRequest);
         calls.push(chunk);
-        const nodes = Object.fromEntries([...parentProtos].filter(([id]) => chunk.includes(id)));
+        const nodes = Object.fromEntries(
+          [...parentProtos, ...leafProtos].filter(([id]) => chunk.includes(id)),
+        );
         return Promise.resolve({
           stream: false,
           service: SparkService,
@@ -593,7 +599,7 @@ describe("queryExitChains", () => {
     expect(chains).toHaveLength(1001);
   }, 60_000);
 
-  test("the given leaf wins over a node returned for its id", async () => {
+  test("a served row that differs from the given leaf rejects it", async () => {
     const grandparent = leafNode({ id: "gp" });
     const parent = leafNode({ id: "p", parent: "gp", parentTx: grandparent.nodeTx });
     const leaf = leafNode({ id: "leaf", parent: "p", parentTx: parent.nodeTx });
@@ -612,16 +618,18 @@ describe("queryExitChains", () => {
       });
     });
     const spark = createClient(SparkService, transport);
-    const { chains } = await queryExitChains({
+    const { chains, rejected } = await queryExitChains({
       spark,
       operators: [],
       network: "regtest",
       signer: SIGNER,
       leaves: [leaf],
     });
-    const [chain] = chains;
-    expect(chain?.nodes.map((node) => node.nodeId)).toStrictEqual(["gp", "p", "leaf"]);
-    expect(chain?.refundTx).toStrictEqual(leaf.refundTx);
+    // The caller's row is the reference, not an exemption: a differing served row rejects.
+    expect(chains).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.leafId).toBe("leaf");
+    expect(rejected[0]?.error.message).toMatch(/refundTx/);
   });
 
   test("a parent missing from the query result rejects only that leaf", async () => {
