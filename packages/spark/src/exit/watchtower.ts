@@ -4,6 +4,7 @@ import { equalBytes } from "@noble/curves/utils.js";
 
 import { u64ToSats } from "../core/assert.ts";
 import {
+  assertFeeRate,
   buildKeySpendSweep,
   finalizeKeySpend,
   p2trScriptFromPublicKey,
@@ -208,6 +209,7 @@ export async function recoverWatchtowerExit(
 ): Promise<{ readonly transaction: Uint8Array; readonly txid: string }> {
   const { spark, signer, network } = options;
   const { leafId } = request;
+  assertFeeRate(request.feeRateSatPerVbyte);
 
   // The ancestor chain carries the transaction being spent, so the wallet needs no explorer.
   const nodesResponse = await spark.query_nodes(

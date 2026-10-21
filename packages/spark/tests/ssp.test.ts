@@ -427,6 +427,7 @@ test("a hung request aborts at the request timeout", async () => {
     signer: SIGNER,
     fetch: hangingFetch,
     requestTimeoutMs: 20,
+    sleep: async () => Promise.resolve(),
   });
   await expect(client.swapFeeEstimate(100)).rejects.toThrow("ssp request timed out");
   expect(aborted).toBe(true);

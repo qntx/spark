@@ -1,6 +1,7 @@
 import { equalBytes } from "@noble/curves/utils.js";
 
 import {
+  assertFeeRate,
   buildKeySpendSweep,
   finalizeKeySpend,
   p2trScriptFromPublicKey,
@@ -93,6 +94,7 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
     recoverWatchtowerExit: async (options) =>
       recoverWatchtowerExit({ spark: coordinatorConnection.spark, signer, network }, options),
     sweepRefund: async ({ leafId, refundTx, destinationScript, feeRateSatPerVbyte }) => {
+      assertFeeRate(feeRateSatPerVbyte);
       const key = { type: "leaf" as const, leafId };
       const [publicKey] = await signer.publicKeys([key]);
       if (publicKey === undefined) {

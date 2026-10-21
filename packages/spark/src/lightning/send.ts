@@ -103,6 +103,11 @@ export async function payLightningInvoice(
   },
 ): Promise<LightningPayment> {
   const { spark, ssp, sspIdentityPublicKey, signer, network } = deps;
+  // The fee gate must hold a real number before any SSP call: NaN or a cast undefined otherwise
+  // makes every `feeSats > maxFeeSats` comparison false and lifts the cap entirely.
+  if (!Number.isSafeInteger(options.maxFeeSats) || options.maxFeeSats < 0) {
+    throw new SparkInputError("lightning pay: maxFeeSats must be a non-negative integer");
+  }
   const invoice = options.invoice.toLowerCase();
   const decoded = decodeBolt11(invoice);
   if (decoded.network !== network) {

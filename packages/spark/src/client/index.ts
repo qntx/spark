@@ -196,10 +196,20 @@ export type SparkClient = {
      * restriction, expiry) are then only hints, and the receiver is always the identity key inside
      * the address. Resolves to the `SparkTransfer` for sats invoices or the hex final token
      * transaction hash for token invoices.
+     *
+     * `transferId` (sats invoices) and `inputOutputIds` (token invoices) are the retry handles
+     * after a lost response: a retry under the same handle recovers the committed result instead of
+     * paying twice, and a committed result under different terms fails rather than riding along.
      */
     readonly pay: (
       invoice: string,
-      options?: { readonly amount?: number | bigint },
+      options?: {
+        readonly amount?: number | bigint;
+        /** Sats invoices: idempotent transfer id, like `transfers.send`'s. */
+        readonly transferId?: string;
+        /** Token invoices: ids of the spent outputs, like `tokens.transfer`'s. */
+        readonly inputOutputIds?: ReadonlyArray<string>;
+      },
     ) => Promise<SparkTransfer | string>;
     /** Coordinator `query_spark_invoices` statuses for the given invoice address strings. */
     readonly status: (
@@ -524,6 +534,7 @@ export function createSparkClientWith(
       signer: options.signer,
       fetch: options.fetch,
       now,
+      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
     }),
   });
 

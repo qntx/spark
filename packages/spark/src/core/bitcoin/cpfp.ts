@@ -40,7 +40,8 @@ export function dustLimit(script: Uint8Array): number {
   return 3 * (8 + 1 + script.length + spendVbytes);
 }
 
-function assertFeeRate(feeRateSatPerVbyte: number): void {
+/** Public entry points call this before any network or signer work, not just at tx build. */
+export function assertFeeRate(feeRateSatPerVbyte: number): void {
   if (!Number.isFinite(feeRateSatPerVbyte) || feeRateSatPerVbyte <= 0) {
     throw new SparkInputError("feeRateSatPerVbyte: must be a positive finite number");
   }
