@@ -7,6 +7,7 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { createSparkClientWith } from "../src/client/index.ts";
 import type { SparkOperatorConfig } from "../src/core/network.ts";
+import { createMemorySparkStore } from "../src/exit/store.ts";
 import {
   SparkAuthnService,
   ChallengeSchema,
@@ -69,6 +70,7 @@ function clientWith(perConnection: ReadonlyArray<() => Row[]>) {
     {
       network: "regtest",
       signer,
+      store: createMemorySparkStore(),
       fetch: async () => {
         await Promise.resolve();
         return new Response("not found", { status: 404 });
