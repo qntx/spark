@@ -499,7 +499,8 @@ async function swapContext(options?: {
       churned = undefined;
       swapsCompleted += 1;
       options?.onSwapClaimed?.(swapsCompleted);
-      return Promise.resolve();
+      await Promise.resolve();
+      return [];
     },
     syncLeaves: async () => Promise.resolve([...wallet]),
     leaves: async () => Promise.resolve([...wallet]),

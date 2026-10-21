@@ -936,6 +936,60 @@ describe("transfers.claim", () => {
     receiver.dispose();
   });
 
+  test("returns a committed claim whose new leaf's chain fails verification", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+    });
+    const foreignKey = secp256k1.getPublicKey(new Uint8Array(32).fill(77), true);
+    const store = createMemorySparkStore();
+    const client = makeClient(
+      receiver,
+      {
+        get_signing_commitments: () =>
+          create(GetSigningCommitmentsResponseSchema, {
+            signingCommitments: commitmentGroup(3),
+          }),
+        claim_transfer: async (req) => {
+          const claimed = await claimedLeaves(receiver, [
+            required(pending.leaves[0], "pending leaf"),
+          ]);
+          const claimedLeaf0 = required(claimed[0], "claimed leaf");
+          const inner = required(claimedLeaf0.leaf, "leaf");
+          // The transfer already committed — a leaf whose refund does not pay the wallet's key
+          // must not fail the claim; sync quarantines the leaf instead.
+          const poisoned = create(TransferLeafSchema, {
+            ...claimedLeaf0,
+            leaf: create(TreeNodeSchema, {
+              ...inner,
+              refundTx: createCurrentTimelockRefundTxs({
+                nodeTx: inner.nodeTx,
+                sequence: 1900,
+                receivingPublicKey: foreignKey,
+                network: "regtest",
+              }).cpfpRefund.txBytes,
+            }),
+          });
+          return create(ClaimTransferResponseSchema, {
+            transfer: create(TransferSchema, {
+              id: req.transferId,
+              status: TransferStatus.COMPLETED,
+              type: TransferType.TRANSFER,
+              network: Network.REGTEST,
+              leaves: [poisoned],
+            }),
+          });
+        },
+      },
+      store,
+    );
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed[0]?.id).toBe(LEAF_ID);
+    await expect(store.exitChains()).resolves.toHaveLength(0);
+    receiver.dispose();
+  });
+
   test("rejects a transfer whose sender signature is invalid", async () => {
     const receiver = await testSigner();
     const pending = await pendingTransfer({

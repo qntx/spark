@@ -1197,7 +1197,7 @@ describe("cooperativeExit", () => {
       sspClient: ssp,
       leafLock: createMutex(),
       tokenLock: createMutex(),
-      storeChainsFor: async () => Promise.resolve(),
+      storeChainsFor: async () => Promise.resolve([]),
       syncLeaves: async () => Promise.resolve([staleLeaf]),
       leaves: async () => Promise.resolve([staleLeaf]),
       receiverIdentityKey: () => {
