@@ -201,6 +201,16 @@ export function wasmEciesDecrypt(
   }
 }
 
+/**
+ * Mirrors the native `toUint32` guard: a JS `number` arrives as a double and the wasm ABI coerces
+ * it to i32, truncating fractions and wrapping values past 2^32 — reject them first.
+ */
+function checkUint32(value: number, name: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    throw new SparkError(`${name} must be an integer in [0, 2^32)`);
+  }
+}
+
 export function wasmSplitSecretWithProofs(
   exports: SparkWasmExports,
   secret: Uint8Array,
@@ -208,6 +218,8 @@ export function wasmSplitSecretWithProofs(
   shares: number,
   random: Uint8Array,
 ): Uint8Array {
+  checkUint32(threshold, "threshold");
+  checkUint32(shares, "shares");
   const secretPtr = copyIn(exports, secret);
   const randomPtr = copyIn(exports, random);
   try {

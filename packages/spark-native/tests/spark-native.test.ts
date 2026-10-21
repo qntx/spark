@@ -334,7 +334,7 @@ function dispatch(crypto: SparkCrypto, c: Record<string, unknown>): void {
       crypto.splitSecretWithProofs(
         field("secret"),
         c["threshold"] as number,
-        c["share_count"] as number,
+        c["shares"] as number,
         field("random"),
       );
       return;
