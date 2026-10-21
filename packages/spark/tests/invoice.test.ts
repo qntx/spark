@@ -31,6 +31,7 @@ import {
   Network,
   QueryNodesResponseSchema,
   QuerySparkInvoicesResponseSchema,
+  QueryTransfersResponseSchema,
   RequestedSigningCommitmentsSchema,
   SparkService,
   StartTransferResponseSchema,
@@ -44,6 +45,7 @@ import type {
   GetSigningCommitmentsRequest,
   QuerySparkInvoicesRequest,
   StartTransferRequest,
+  Transfer,
 } from "../src/proto/gen/spark_pb.ts";
 import {
   CommitStatus,
@@ -495,6 +497,7 @@ describe("client.invoices", () => {
     node: ReturnType<typeof leafNode>,
     capture: { value: StartTransferRequest | undefined },
   ) {
+    const served: Transfer[] = [];
     return {
       query_nodes: () =>
         create(QueryNodesResponseSchema, {
@@ -507,18 +510,19 @@ describe("client.invoices", () => {
         }),
       start_transfer_v2: (req: StartTransferRequest) => {
         capture.value = req;
-        return create(StartTransferResponseSchema, {
-          transfer: create(TransferSchema, {
-            id: req.transferId,
-            senderIdentityPublicKey: req.ownerIdentityPublicKey,
-            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-            status: TransferStatus.SENDER_INITIATED,
-            type: TransferType.TRANSFER,
-            network: Network.REGTEST,
-            totalValue: 100_000n,
-          }),
+        const transfer = create(TransferSchema, {
+          id: req.transferId,
+          senderIdentityPublicKey: req.ownerIdentityPublicKey,
+          receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+          status: TransferStatus.SENDER_INITIATED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          totalValue: 100_000n,
         });
+        served.push(transfer);
+        return create(StartTransferResponseSchema, { transfer });
       },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [...served] }),
     };
   }
 

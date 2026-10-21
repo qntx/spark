@@ -377,12 +377,19 @@ function pagedNodes(nodes: Array<ReturnType<typeof create<typeof TreeNodeSchema>
   };
 }
 
-/** `query_transfers_by_id` answering with the queued responses in order, then empty. */
+/** `query_transfers_by_id` answering with the queued responses in order, then repeating the last. */
 function byIdQueue(responses: ReadonlyArray<ReadonlyArray<Transfer>>) {
   const queue = responses.map((transfers) =>
     create(QueryTransfersResponseSchema, { transfers: [...transfers] }),
   );
-  return () => queue.shift() ?? create(QueryTransfersResponseSchema);
+  let last = create(QueryTransfersResponseSchema);
+  return () => {
+    const next = queue.shift();
+    if (next !== undefined) {
+      last = next;
+    }
+    return last;
+  };
 }
 
 describe("transfers.send", () => {
@@ -419,6 +426,7 @@ describe("transfers.send", () => {
     const receiverIdentity = secp256k1.getPublicKey(RECEIVER_SECRET, true);
     let commitmentsReq: GetSigningCommitmentsRequest | undefined;
     let startReq: StartTransferRequest | undefined;
+    const served: Transfer[] = [];
     const client = makeClient(signer, {
       query_nodes: () => nodesResponse([node]),
       get_signing_commitments: (req) => {
@@ -429,18 +437,19 @@ describe("transfers.send", () => {
       },
       start_transfer_v2: (req) => {
         startReq = req;
-        return create(StartTransferResponseSchema, {
-          transfer: create(TransferSchema, {
-            id: req.transferId,
-            senderIdentityPublicKey: req.ownerIdentityPublicKey,
-            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-            status: TransferStatus.SENDER_INITIATED,
-            type: TransferType.TRANSFER,
-            network: Network.REGTEST,
-            totalValue: 100_000n,
-          }),
+        const transfer = create(TransferSchema, {
+          id: req.transferId,
+          senderIdentityPublicKey: req.ownerIdentityPublicKey,
+          receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+          status: TransferStatus.SENDER_INITIATED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          totalValue: 100_000n,
         });
+        served.push(transfer);
+        return create(StartTransferResponseSchema, { transfer });
       },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [...served] }),
     });
 
     const transfer = await client.transfers.send({
@@ -675,6 +684,7 @@ describe("transfers.send", () => {
     const nodes = fabricated.map((entry) => entry.node);
     const receiver = secp256k1.getPublicKey(RECEIVER_SECRET, true);
     let startReq: StartTransferRequest | undefined;
+    const served: Transfer[] = [];
     const client = makeClient(signer, {
       query_nodes: pagedNodes(nodes),
       get_signing_commitments: () =>
@@ -683,18 +693,19 @@ describe("transfers.send", () => {
         }),
       start_transfer_v2: (req) => {
         startReq = req;
-        return create(StartTransferResponseSchema, {
-          transfer: create(TransferSchema, {
-            id: req.transferId,
-            senderIdentityPublicKey: req.ownerIdentityPublicKey,
-            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-            status: TransferStatus.SENDER_INITIATED,
-            type: TransferType.TRANSFER,
-            network: Network.REGTEST,
-            totalValue: BigInt(leafIds.length * 100_000),
-          }),
+        const transfer = create(TransferSchema, {
+          id: req.transferId,
+          senderIdentityPublicKey: req.ownerIdentityPublicKey,
+          receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+          status: TransferStatus.SENDER_INITIATED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          totalValue: BigInt(leafIds.length * 100_000),
         });
+        served.push(transfer);
+        return create(StartTransferResponseSchema, { transfer });
       },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [...served] }),
     });
 
     // 300 leaves × cpfp/direct/direct-from-CPFP refund jobs = 900 signatures, and
@@ -1758,6 +1769,7 @@ describe("transfer stores exit chains", () => {
 
     const store = createMemorySparkStore();
     await store.putExitChains([storedChain(LEAF_ID)]);
+    const served: Transfer[] = [];
     const client = makeClient(
       signer,
       {
@@ -1766,18 +1778,21 @@ describe("transfer stores exit chains", () => {
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
           }),
-        start_transfer_v2: (req) =>
-          create(StartTransferResponseSchema, {
-            transfer: create(TransferSchema, {
-              id: req.transferId,
-              senderIdentityPublicKey: req.ownerIdentityPublicKey,
-              receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-              status: TransferStatus.SENDER_INITIATED,
-              type: TransferType.TRANSFER,
-              network: Network.REGTEST,
-              totalValue: 100_000n,
-            }),
-          }),
+        start_transfer_v2: (req) => {
+          const transfer = create(TransferSchema, {
+            id: req.transferId,
+            senderIdentityPublicKey: req.ownerIdentityPublicKey,
+            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+            status: TransferStatus.SENDER_INITIATED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            totalValue: 100_000n,
+          });
+          served.push(transfer);
+          return create(StartTransferResponseSchema, { transfer });
+        },
+        query_transfers_by_id: () =>
+          create(QueryTransfersResponseSchema, { transfers: [...served] }),
       },
       store,
     );
@@ -2414,6 +2429,7 @@ describe("transfers.swap", () => {
 
     let swapReq: InitiateSwapPrimaryTransferRequest | undefined;
     let startReq: StartTransferRequest | undefined;
+    const served: Transfer[] = [];
     const operations: string[] = [];
     const store = createMemorySparkStore();
     await store.putExitChains([storedChain(LEAF_ID)]);
@@ -2429,7 +2445,12 @@ describe("transfers.swap", () => {
           swapReq = req;
           return swapResponse(req, leaf);
         },
-        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [inbound] }),
+        query_transfers_by_id: (req) =>
+          create(QueryTransfersResponseSchema, {
+            transfers: [inbound, ...served].filter((transfer) =>
+              (req as { transferIds: string[] }).transferIds.includes(transfer.id),
+            ),
+          }),
         claim_transfer: async (req) =>
           create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
@@ -2442,17 +2463,17 @@ describe("transfers.swap", () => {
           }),
         start_transfer_v2: (req) => {
           startReq = req;
-          return create(StartTransferResponseSchema, {
-            transfer: create(TransferSchema, {
-              id: req.transferId,
-              senderIdentityPublicKey: req.ownerIdentityPublicKey,
-              receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-              status: TransferStatus.SENDER_INITIATED,
-              type: TransferType.TRANSFER,
-              network: Network.REGTEST,
-              totalValue: 60_000n,
-            }),
+          const transfer = create(TransferSchema, {
+            id: req.transferId,
+            senderIdentityPublicKey: req.ownerIdentityPublicKey,
+            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+            status: TransferStatus.SENDER_INITIATED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            totalValue: 60_000n,
           });
+          served.push(transfer);
+          return create(StartTransferResponseSchema, { transfer });
         },
       },
       store,
@@ -2655,6 +2676,7 @@ describe("transfers.sendMany", () => {
 
     let v3Req: StartTransferV3Request | undefined;
     let v2Called = false;
+    const served: Transfer[] = [];
     const client = makeClient(signer, {
       query_nodes: () => nodesResponse([a.node, b.node]),
       get_signing_commitments: (req) =>
@@ -2667,32 +2689,33 @@ describe("transfers.sendMany", () => {
       },
       start_transfer_v3: (req) => {
         v3Req = req;
-        return create(StartTransferResponseSchema, {
-          transfer: create(TransferSchema, {
-            id: req.transferId,
-            senderIdentityPublicKey: required(req.senderPackages[0], "sender package")
-              .ownerIdentityPublicKey,
-            status: TransferStatus.SENDER_INITIATED,
-            type: TransferType.TRANSFER,
-            network: Network.REGTEST,
-            totalValue: 100_000n,
-            receivers: [
-              create(TransferReceiverSchema, {
-                id: "r-b",
-                identityPublicKey: receiverB,
-                amountSats: 60_000n,
-                status: TransferReceiverStatus.INITIATED,
-              }),
-              create(TransferReceiverSchema, {
-                id: "r-c",
-                identityPublicKey: receiverC,
-                amountSats: 40_000n,
-                status: TransferReceiverStatus.INITIATED,
-              }),
-            ],
-          }),
+        const transfer = create(TransferSchema, {
+          id: req.transferId,
+          senderIdentityPublicKey: required(req.senderPackages[0], "sender package")
+            .ownerIdentityPublicKey,
+          status: TransferStatus.SENDER_INITIATED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          totalValue: 100_000n,
+          receivers: [
+            create(TransferReceiverSchema, {
+              id: "r-b",
+              identityPublicKey: receiverB,
+              amountSats: 60_000n,
+              status: TransferReceiverStatus.INITIATED,
+            }),
+            create(TransferReceiverSchema, {
+              id: "r-c",
+              identityPublicKey: receiverC,
+              amountSats: 40_000n,
+              status: TransferReceiverStatus.INITIATED,
+            }),
+          ],
         });
+        served.push(transfer);
+        return create(StartTransferResponseSchema, { transfer });
       },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [...served] }),
     });
 
     const sent = await client.transfers.sendMany({
@@ -3156,6 +3179,7 @@ describe("concurrent sends", () => {
       [first.leaf.id, first.node],
       [second.leaf.id, second.node],
     ]);
+    const transfers = new Map<string, Transfer>();
     return {
       query_nodes: (req) => {
         const request = req as QueryNodesRequest;
@@ -3192,33 +3216,38 @@ describe("concurrent sends", () => {
         for (const id of ids) {
           sentLeafIds.add(id);
         }
-        return create(StartTransferResponseSchema, {
-          transfer: create(TransferSchema, {
-            id: req.transferId,
-            senderIdentityPublicKey: req.ownerIdentityPublicKey,
-            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-            status: TransferStatus.SENDER_INITIATED,
-            type: TransferType.TRANSFER,
-            network: Network.REGTEST,
-            totalValue: 100_000n,
-            leaves: ids.map((id) =>
-              create(TransferLeafSchema, {
-                leaf: byId.get(id),
-                transferReceiverId: "r-1",
-              }),
-            ),
-            receivers: [
-              create(TransferReceiverSchema, {
-                id: "r-1",
-                identityPublicKey: req.receiverIdentityPublicKey,
-                amountSats: 100_000n,
-                status: TransferReceiverStatus.KEY_TWEAKED,
-              }),
-            ],
-          }),
+        const transfer = create(TransferSchema, {
+          id: req.transferId,
+          senderIdentityPublicKey: req.ownerIdentityPublicKey,
+          receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+          status: TransferStatus.SENDER_INITIATED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          totalValue: 100_000n,
+          leaves: ids.map((id) =>
+            create(TransferLeafSchema, {
+              leaf: byId.get(id),
+              transferReceiverId: "r-1",
+            }),
+          ),
+          receivers: [
+            create(TransferReceiverSchema, {
+              id: "r-1",
+              identityPublicKey: req.receiverIdentityPublicKey,
+              amountSats: 100_000n,
+              status: TransferReceiverStatus.KEY_TWEAKED,
+            }),
+          ],
         });
+        transfers.set(transfer.id, transfer);
+        return create(StartTransferResponseSchema, { transfer });
       },
-      query_transfers_by_id: () => create(QueryTransfersResponseSchema),
+      query_transfers_by_id: (req) =>
+        create(QueryTransfersResponseSchema, {
+          transfers: [...transfers.values()].filter((transfer) =>
+            (req as { transferIds: string[] }).transferIds.includes(transfer.id),
+          ),
+        }),
     };
   }
 

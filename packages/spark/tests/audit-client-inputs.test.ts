@@ -128,6 +128,7 @@ describe("d4: lightning.pay validates maxFeeSats before any SSP call", () => {
     return {
       deps: {
         spark: deadSpark,
+        operatorSparks: [],
         ssp,
         sspIdentityPublicKey: SSP_IDENTITY,
         signer: createTestSigner(new Uint8Array(32).fill(7)),
