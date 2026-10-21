@@ -382,6 +382,32 @@ test("close() stops an event stream started with a caller signal", async () => {
   expect(last.done).toBe(true);
 });
 
+test("breaking out of events() aborts the stream and does not resubscribe", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const streamCalls = { calls: 0 };
+  const client = makeClient(signer, {
+    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    async *subscribe_to_events(_req: unknown, context: HandlerContext) {
+      streamCalls.calls++;
+      yield create(SubscribeToEventsResponseSchema, {
+        event: { case: "connected", value: {} },
+      });
+      await new Promise<void>((resolve) => {
+        context.signal.addEventListener("abort", () => {
+          resolve();
+        });
+      });
+    },
+  });
+  for await (const event of client.events()) {
+    expect(event.type).toBe("connected");
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(streamCalls.calls).toBe(1);
+  client.close();
+});
+
 const KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
 
 function fakeTxid(label: number): Uint8Array {
