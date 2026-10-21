@@ -1,18 +1,13 @@
-# Real publish runs on `v*.*.*` tags only (tag the release merge commit by
-# hand; GITHUB_TOKEN tags do not trigger workflows). Everything else —
-# pull_request and workflow_dispatch without `dry-run: false` — runs the full
-# pipeline with `npm publish --dry-run`.
+# Real publish runs on `v*.*.*` tag pushes only (tag the release merge commit
+# by hand; GITHUB_TOKEN tags do not trigger workflows). pull_request and manual
+# workflow_dispatch always run the full pipeline with `npm publish --dry-run` —
+# there is no manual path to a real publish.
 name: Publish
 
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
-    inputs:
-      dry-run:
-        description: "Publish with npm publish --dry-run. Only false publishes for real."
-        type: boolean
-        default: true
   pull_request:
     paths:
       - ".github/workflows/publish-npm.yml"
@@ -33,6 +28,35 @@ jobs:
     uses: ./.github/workflows/native.yml
     permissions:
       contents: read
+
+  # On tag pushes, fails unless every package version equals the tag. The called
+  # publish-npm workflow skips versions already on the registry but does not
+  # check that the tag matches package.json, so this job is the only guard
+  # against publishing 1.x under a 2.x tag. On PR/dispatch the check step is
+  # skipped and the job succeeds so dependents still run (as dry-runs).
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check tag matches package versions
+        if: github.event_name == 'push'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for pkg in spark spark-wasm spark-native; do
+            version="$(jq -r .version "packages/${pkg}/package.json")"
+            if [ "v${version}" != "${REF_NAME}" ]; then
+              echo "::error::packages/${pkg} declares version ${version} but the tag is ${REF_NAME} (expected v${version})"
+              fail=1
+            fi
+          done
+          [ "${fail}" -eq 0 ]
 
   # Packages the iOS and Android native.yml artifacts into one upload-artifact
   # laid out relative to packages/spark-native — exactly the gitignored
@@ -59,6 +83,7 @@ jobs:
           retention-days: 1
 
   spark:
+    needs: [verify, native-artifact]
     uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
@@ -67,7 +92,7 @@ jobs:
       package-manager: bun
       install-directory: .
       working-directory: packages/spark
-      dry-run: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
+      dry-run: ${{ github.event_name != 'push' }}
 
   spark-wasm:
     needs: spark
@@ -79,7 +104,7 @@ jobs:
       package-manager: bun
       install-directory: .
       working-directory: packages/spark-wasm
-      dry-run: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
+      dry-run: ${{ github.event_name != 'push' }}
 
   spark-native:
     needs: [spark, native-artifact]
@@ -92,4 +117,4 @@ jobs:
       install-directory: .
       working-directory: packages/spark-native
       artifact: spark-native-prebuilt
-      dry-run: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
+      dry-run: ${{ github.event_name != 'push' }}
