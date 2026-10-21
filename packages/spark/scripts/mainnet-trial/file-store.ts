@@ -1,7 +1,17 @@
 // SparkStore backed by a single JSON file so a mainnet trial keeps its
 // unilateral-exit chains across restarts. Single-process use: the file is the
 // store's write target, not a shared database.
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
@@ -113,9 +123,20 @@ function readChains(path: string): Map<string, SparkExitChain> {
   return chains;
 }
 
+/** Fsync an opened path (a written file or a directory) so a crash cannot lose the change. */
+function fsyncPath(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
- * `SparkStore` on disk at `path` (JSON with hex-encoded transactions). Writes are atomic — temp
- * file in the same directory, then rename — so a crash mid-write never truncates the chains. File
+ * `SparkStore` on disk at `path` (JSON with hex-encoded transactions). Writes are atomic and
+ * durable — temp file in the same directory, fsync, rename, then fsync of the directory — so a
+ * crash mid-write neither truncates the chains nor loses a completed write to the page cache. File
  * mode is 0600, directory 0700. Loading is strict: a malformed file throws instead of silently
  * dropping a chain the wallet might need to exit.
  */
@@ -132,7 +153,9 @@ export function createFileSparkStore(path: string): SparkStore {
         mode: 0o600,
       },
     );
+    fsyncPath(tmp);
     renameSync(tmp, path);
+    fsyncPath(dirname(path));
     chmodSync(path, 0o600);
   };
   return {
