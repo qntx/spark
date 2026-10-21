@@ -91,7 +91,7 @@ export function createClientContext(
   // lagging operator cannot make a just-claimed leaf look gone.
   const syncLeaves = async (): Promise<ReadonlyArray<SparkLeaf>> => {
     const ownerIdentityPublicKey = await signer.identityPublicKey();
-    const [coordinatorLeaves, ...operatorLeafLists] = await Promise.all([
+    const [coordinatorResult, ...operatorResults] = await Promise.all([
       queryLeaves({
         spark: coordinatorConnection.spark,
         ownerIdentityPublicKey,
@@ -105,6 +105,7 @@ export function createClientContext(
         }),
       ),
     ]);
+    const coordinatorLeaves = coordinatorResult.leaves;
 
     // An ancestor of another reported node is not a leaf, whatever status it carries.
     const parentIds = new Set<string>();
@@ -117,7 +118,24 @@ export function createClientContext(
       (leaf) => !parentIds.has(leaf.id) && malformedLeafTx(leaf) === undefined,
     );
 
+    // A coordinator row that failed to map never reaches `reported`, and an operator row that
+    // failed to map is absent from that operator's map — both already read as unverifiable and
+    // are quarantined below; they only matter here as still-reported ids for the chain sweep.
+    const reportedIds = new Set<string>(coordinatorResult.unmappableIds);
+    for (const leaf of coordinatorLeaves) {
+      reportedIds.add(leaf.id);
+    }
+    for (const result of operatorResults) {
+      for (const leaf of result.leaves) {
+        reportedIds.add(leaf.id);
+      }
+      for (const id of result.unmappableIds) {
+        reportedIds.add(id);
+      }
+    }
+
     const ownedIds = new Set<string>();
+    const notOwnedIds = new Set<string>();
     const keys = await batchedPublicKeys(
       signer,
       reported.map((leaf) => ({ type: "leaf", leafId: leaf.id })),
@@ -129,12 +147,14 @@ export function createClientContext(
       }
       if (ownsLeaf(leaf, leafPublicKey)) {
         ownedIds.add(leaf.id);
+      } else {
+        notOwnedIds.add(leaf.id);
       }
     }
 
     // Paging over a set an operator is concurrently mutating can return the same leaf on more
     // than one page; like Breez, keep the first occurrence.
-    const operatorMaps = operatorLeafLists.map((operatorLeaves) => {
+    const operatorMaps = operatorResults.map(({ leaves: operatorLeaves }) => {
       const byId = new Map<string, SparkLeaf>();
       for (const leaf of operatorLeaves) {
         if (!byId.has(leaf.id)) {
@@ -159,7 +179,14 @@ export function createClientContext(
     const rejectedIds = new Set(await storeChainsFor(spendable));
     const usable = spendable.filter((leaf) => !rejectedIds.has(leaf.id));
     const chains = await store.exitChains();
-    const stale = chains.map((chain) => chain.leafId).filter((leafId) => !ownedIds.has(leafId));
+    // A stored chain is the wallet's offline-exit data, so deleting one needs a stronger signal
+    // than the coordinator dropping the leaf: only an id no operator reported at all, or one the
+    // coordinator serves well-formed that the signer cannot prove it owns (transferred away).
+    // A coordinator-side omission — even while other operators still report the leaf — must not
+    // erase the chain the wallet would need to exit around a censoring coordinator.
+    const stale = chains
+      .map((chain) => chain.leafId)
+      .filter((leafId) => !reportedIds.has(leafId) || notOwnedIds.has(leafId));
     if (stale.length > 0) {
       await store.deleteExitChains(stale);
     }

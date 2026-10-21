@@ -174,9 +174,12 @@ export async function generateDepositAddress(
 }
 
 /**
- * Pages `query_unused_deposit_addresses` (batches of 100 until a short page) and returns every
- * address the SO still considers unused. The SO-supplied offset must strictly advance on every full
- * page and the walk is bounded — endless or rewinding pages throw.
+ * Pages `query_unused_deposit_addresses` (batches of 100) and returns every address the SO still
+ * considers unused. The SO reports the end explicitly: `offset` is -1 unless the page held a full
+ * limit of unused addresses (tree_query_handler.go — upstream paginates the pre-filter row set, so
+ * a page containing used addresses returns -1 early; the client faithfully walks what it serves).
+ * The offset must strictly advance on every non-final page and the walk is bounded — endless or
+ * rewinding pages throw.
  */
 export async function queryUnusedDepositAddresses(
   options: DepositCoordinator & {
@@ -213,10 +216,10 @@ export async function queryUnusedDepositAddresses(
         verifyingPublicKey: entry.verifyingPublicKey,
       });
     }
-    if (response.depositAddresses.length < UNUSED_PAGE_SIZE) {
+    const nextOffset = Number(response.offset);
+    if (nextOffset < 0) {
       return addresses;
     }
-    const nextOffset = Number(response.offset);
     if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
       throw new SparkError("deposit: coordinator returned a non-advancing offset");
     }

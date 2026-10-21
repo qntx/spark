@@ -84,6 +84,28 @@ function pageBatch(offset: number): number[] {
   return [100];
 }
 
+/**
+ * A `query_unused_deposit_addresses` handler serving `pageBatch` indices with the SO's offset
+ * semantics: a full 100-entry page advances, a short one ends the walk with -1.
+ */
+function pagedUnusedAddresses(entryAddress: string, entryKey: Uint8Array) {
+  return (req: unknown) => {
+    const offset = Number((req as { offset: bigint }).offset);
+    const batch = pageBatch(offset);
+    return create(QueryUnusedDepositAddressesResponseSchema, {
+      depositAddresses: batch.map((i) =>
+        create(DepositAddressQueryResultSchema, {
+          depositAddress: entryAddress,
+          userSigningPublicKey: new Uint8Array(33).fill(1),
+          verifyingPublicKey: entryKey,
+          leafId: `leaf-${i}`,
+        }),
+      ),
+      offset: batch.length === 100 ? BigInt(offset + batch.length) : -1n,
+    });
+  };
+}
+
 /** Deterministic byte stream for the signer and uuidv7. */
 function fixedRandom(): (length: number) => Uint8Array {
   let counter = 0;
@@ -370,22 +392,11 @@ describe("deposits.unused", () => {
     let pages = 0;
     const entryKey = secp256k1.getPublicKey(new Uint8Array(32).fill(2), true);
     const entryAddress = p2trAddressFromPublicKey(entryKey, "regtest");
+    const serve = pagedUnusedAddresses(entryAddress, entryKey);
     const client = makeClient(signer, {
       query_unused_deposit_addresses: (req) => {
         pages += 1;
-        const offset = Number((req as { offset: bigint }).offset);
-        const batch = pageBatch(offset);
-        return create(QueryUnusedDepositAddressesResponseSchema, {
-          depositAddresses: batch.map((i) =>
-            create(DepositAddressQueryResultSchema, {
-              depositAddress: entryAddress,
-              userSigningPublicKey: new Uint8Array(33).fill(1),
-              verifyingPublicKey: entryKey,
-              leafId: `leaf-${i}`,
-            }),
-          ),
-          offset: BigInt(offset + batch.length),
-        });
+        return serve(req);
       },
     });
     const unused = await client.deposits.unused();
@@ -483,7 +494,7 @@ describe("deposits.unused", () => {
               leafId: "leaf-0",
             }),
           ],
-          offset: 1n,
+          offset: -1n,
         }),
     });
     await expect(client.deposits.unused()).rejects.toThrow("does not pay to its verifying key");
@@ -618,7 +629,7 @@ describe("deposits.claim", () => {
               leafId: LEAF_ID,
             }),
           ],
-          offset: 1n,
+          offset: -1n,
         }),
       get_signing_commitments: (req) => {
         commitmentsReq = req;
@@ -703,7 +714,7 @@ describe("deposits.claim", () => {
                 leafId: LEAF_ID,
               }),
             ],
-            offset: 1n,
+            offset: -1n,
           }),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
@@ -745,7 +756,7 @@ describe("deposits.claim", () => {
               leafId: LEAF_ID,
             }),
           ],
-          offset: 1n,
+          offset: -1n,
         }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -775,7 +786,7 @@ describe("deposits.claim", () => {
               leafId: LEAF_ID,
             }),
           ],
-          offset: 1n,
+          offset: -1n,
         }),
     });
     const other = p2trAddressFromPublicKey(secp256k1.Point.BASE.toBytes(true), "regtest");
@@ -804,7 +815,7 @@ describe("deposits.claim", () => {
               leafId: `leaf-${i}`,
             }),
           ),
-          offset: 2n,
+          offset: -1n,
         }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -858,7 +869,7 @@ describe("deposits.claim", () => {
               leafId: LEAF_ID,
             }),
           ],
-          offset: 1n,
+          offset: -1n,
         }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -952,7 +963,7 @@ describe("deposits.claim", () => {
               leafId: entry.leafId,
             }),
           ),
-          offset: BigInt(addresses.length),
+          offset: -1n,
         }),
       get_signing_commitments: (req) => {
         hooks.onCommitments?.(req);
@@ -1136,7 +1147,7 @@ describe("deposits.claim", () => {
               leafId: LEAF_ID,
             }),
           ],
-          offset: 1n,
+          offset: -1n,
         }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {

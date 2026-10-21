@@ -499,7 +499,7 @@ describe("client.invoices", () => {
       query_nodes: () =>
         create(QueryNodesResponseSchema, {
           nodes: { [node.id]: node },
-          offset: 0n,
+          offset: -1n,
         }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {

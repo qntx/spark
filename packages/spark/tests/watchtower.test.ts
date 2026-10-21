@@ -151,7 +151,7 @@ function sparkServing(
       query_nodes: (req: QueryNodesRequest) => {
         hooks?.onQueryNodes?.(req);
         const byId = Object.fromEntries(nodes.map((node) => [node.id, node]));
-        return create(QueryNodesResponseSchema, { nodes: byId, offset: 0n });
+        return create(QueryNodesResponseSchema, { nodes: byId, offset: -1n });
       },
     });
   });
@@ -364,6 +364,31 @@ describe("queryWatchtowerExitedLeaves", () => {
     expect(recovered?.recovery).toBeUndefined();
     signer.dispose();
   });
+
+  test("accepts a final page holding more entries than the page size", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    // The SO merges includeParents ancestors into the response map after computing the page's
+    // next offset, so an explicit -1 offset may accompany a map larger than the 50-row page.
+    const spark = sparkServing([
+      nodeProto({
+        id: "leaf-ours",
+        treenodeStatus: TreeNodeStatus.WATCHTOWER_EXITED,
+        verifyingPublicKey: FOREIGN_KEY,
+        ownerIdentityPublicKey: identity,
+      }),
+      ...Array.from({ length: 60 }, (_, i) =>
+        nodeProto({ id: `other-${i}`, treenodeStatus: TreeNodeStatus.WATCHTOWER_EXITED }),
+      ),
+    ]);
+    const listed = await queryWatchtowerExitedLeaves({
+      spark,
+      identityPublicKey: identity,
+      network: "regtest",
+    });
+    expect(listed.map((entry) => entry.leafId)).toStrictEqual(["leaf-ours"]);
+    signer.dispose();
+  });
 });
 
 describe("recoverWatchtowerExit", () => {
@@ -475,7 +500,7 @@ describe("recoverWatchtowerExit", () => {
           overrides?.captureQuery?.(req);
           return create(QueryNodesResponseSchema, {
             nodes: Object.fromEntries(f.nodes.map((node) => [node.id, node])),
-            offset: 0n,
+            offset: -1n,
           });
         },
         recover_watchtower_exited_leaf: (req: RecoverWatchtowerExitedLeafRequest) => {

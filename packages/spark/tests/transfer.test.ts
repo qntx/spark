@@ -335,7 +335,7 @@ async function claimedLeaves(
 function nodesResponse(nodes: Array<ReturnType<typeof create<typeof TreeNodeSchema>>>) {
   return create(QueryNodesResponseSchema, {
     nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
-    offset: 0n,
+    offset: -1n,
   });
 }
 
@@ -350,7 +350,7 @@ function pagedNodes(nodes: Array<ReturnType<typeof create<typeof TreeNodeSchema>
     const offset = Number((req as QueryNodesRequest).offset);
     return create(QueryNodesResponseSchema, {
       nodes: Object.fromEntries(nodes.slice(offset, offset + PAGE).map((node) => [node.id, node])),
-      offset: BigInt(offset + Math.min(PAGE, nodes.length - offset)),
+      offset: Math.min(PAGE, nodes.length - offset) === PAGE ? BigInt(offset + PAGE) : -1n,
     });
   };
 }
@@ -1552,7 +1552,7 @@ describe("transfers.claim", () => {
         if (claimCommitted) {
           nodes[claimedNode.id] = claimedNode;
         }
-        return create(QueryNodesResponseSchema, { nodes, offset: 0n });
+        return create(QueryNodesResponseSchema, { nodes, offset: -1n });
       },
       get_signing_commitments: (req) =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -3107,7 +3107,7 @@ describe("concurrent sends", () => {
             }
           }
         }
-        return create(QueryNodesResponseSchema, { nodes, offset: 0n });
+        return create(QueryNodesResponseSchema, { nodes, offset: -1n });
       },
       get_signing_commitments: (req) =>
         create(GetSigningCommitmentsResponseSchema, {

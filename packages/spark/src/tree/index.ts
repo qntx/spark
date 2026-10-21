@@ -78,11 +78,13 @@ export function mapTreeNode(node: TreeNode): SparkLeaf {
 }
 
 /**
- * Pages through `query_nodes` for the owner's nodes in `statuses` — the same source filter and
- * short-page termination the upstream leaf-manager uses, in batches of 50. `includeParents`
- * additionally returns the matched nodes' ancestors (needed by the watchtower-exit listing, whose
- * recoverable output lives on a parent's direct tx). The SO-supplied offset must strictly advance
- * on every full page and the walk is bounded — endless or rewinding pages throw.
+ * Pages through `query_nodes` for the owner's nodes in `statuses` — the same source filter the
+ * upstream leaf-manager uses, in batches of 50. `includeParents` additionally returns the matched
+ * nodes' ancestors (needed by the watchtower-exit listing, whose recoverable output lives on a
+ * parent's direct tx). The SO reports the end explicitly: `offset` is -1 unless the matched row
+ * count reached the limit (tree_query_handler.go — the merged ancestors can push `response.nodes`
+ * past the page size, so the map size must not drive paging). The offset must strictly advance on
+ * every non-final page and the walk is bounded — endless or rewinding pages throw.
  */
 export async function queryOwnerNodes(options: {
   readonly spark: Client<typeof SparkService>;
@@ -110,12 +112,11 @@ export async function queryOwnerNodes(options: {
       },
       options.call,
     );
-    const page = Object.values(response.nodes);
-    nodes.push(...page);
-    if (page.length < LEAF_PAGE_SIZE) {
+    nodes.push(...Object.values(response.nodes));
+    const nextOffset = Number(response.offset);
+    if (nextOffset < 0) {
       return nodes;
     }
-    const nextOffset = Number(response.offset);
     if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
       throw new SparkError("query nodes: coordinator returned a non-advancing offset");
     }
@@ -124,19 +125,42 @@ export async function queryOwnerNodes(options: {
   throw new SparkError("query nodes: coordinator did not stop returning full pages");
 }
 
+/** Result of an owner-leaf walk: rows that could not be mapped are reported, not thrown over. */
+export type QueryLeavesResult = {
+  readonly leaves: SparkLeaf[];
+  /**
+   * Ids of reported nodes `mapTreeNode` rejected (oversized value, missing keyshare…). One
+   * malformed row must not take the whole sync down; callers treat these ids as reported-but-
+   * unverifiable.
+   */
+  readonly unmappableIds: ReadonlyArray<string>;
+};
+
 /** Pages through `query_nodes` for the owner's `AVAILABLE` leaves via {@link queryOwnerNodes}. */
 export async function queryLeaves(options: {
   readonly spark: Client<typeof SparkService>;
   readonly ownerIdentityPublicKey: Uint8Array;
   readonly network: SparkNetwork;
   readonly call?: CallOptions;
-}): Promise<SparkLeaf[]> {
+}): Promise<QueryLeavesResult> {
   const nodes = await queryOwnerNodes({
     ...options,
     statuses: [TreeNodeStatus.AVAILABLE],
     includeParents: false,
   });
-  return nodes.filter((node) => node.status === "AVAILABLE").map((node) => mapTreeNode(node));
+  const leaves: SparkLeaf[] = [];
+  const unmappableIds: string[] = [];
+  for (const node of nodes) {
+    if (node.status !== "AVAILABLE") {
+      continue;
+    }
+    try {
+      leaves.push(mapTreeNode(node));
+    } catch {
+      unmappableIds.push(node.id);
+    }
+  }
+  return { leaves, unmappableIds };
 }
 
 export function leavesBalance(leaves: ReadonlyArray<SparkLeaf>): number {
