@@ -1534,12 +1534,20 @@ describe("deposits.claimStatic via the client", () => {
   async function claimedLeaf(signer: SparkSigner, leaf: TransferLeaf): Promise<TransferLeaf> {
     const inner = required(leaf.leaf, "leaf");
     const [newKey] = await signer.publicKeys([{ type: "leaf", leafId: inner.id }]);
+    const leafKey = required(newKey, "leaf key");
     return create(TransferLeafSchema, {
       ...leaf,
       leaf: create(TreeNodeSchema, {
         ...inner,
-        verifyingPublicKey: verifyingKeyFor(required(newKey, "leaf key")),
-        ownerSigningPublicKey: required(newKey, "leaf key"),
+        // The finalized leaf's refund is the one the receiver signed — it pays the new LEAF key.
+        refundTx: createCurrentTimelockRefundTxs({
+          nodeTx: inner.nodeTx,
+          sequence: 1900,
+          receivingPublicKey: leafKey,
+          network: "regtest",
+        }).cpfpRefund.txBytes,
+        verifyingPublicKey: verifyingKeyFor(leafKey),
+        ownerSigningPublicKey: leafKey,
         signingKeyshare: create(SigningKeyshareSchema, {
           ownerIdentifiers: OPERATORS.map((op) => op.identifier),
           threshold: THRESHOLD,

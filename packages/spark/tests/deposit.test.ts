@@ -545,7 +545,7 @@ describe("deposits.claim", () => {
       /** Index of the root input whose signature is invalid. */
       badSigInput?: number;
     },
-    id = "claimed-1",
+    id = LEAF_ID,
   ) {
     const utxos = [required(req.onChainUtxo, "onChainUtxo"), ...req.additionalOnChainUtxos];
     const rootTxBytes = createMultiInputRootTx(utxos.map((u) => ({ tx: u.rawTx, vout: u.vout })));
@@ -639,7 +639,7 @@ describe("deposits.claim", () => {
     });
 
     const leaf = await client.deposits.claim({ transaction });
-    expect(leaf.id).toBe("claimed-1");
+    expect(leaf.id).toBe(LEAF_ID);
 
     const commitments = required(commitmentsReq, "get_signing_commitments request");
     expect(commitments.count).toBe(3);
@@ -722,9 +722,9 @@ describe("deposits.claim", () => {
     );
 
     const leaf = await client.deposits.claim({ transaction });
-    expect(leaf.id).toBe("claimed-1");
+    expect(leaf.id).toBe(LEAF_ID);
     const chains = await store.exitChains();
-    expect(chains.map((chain) => chain.leafId)).toStrictEqual(["claimed-1"]);
+    expect(chains.map((chain) => chain.leafId)).toStrictEqual([LEAF_ID]);
     signer.dispose();
   });
 
@@ -828,7 +828,7 @@ describe("deposits.claim", () => {
           rootNode: finalizedRootNode(
             req,
             { secret: OTHER_SECRET, verifyingKey: OTHER_KEY },
-            "claimed-vout",
+            "leaf-1",
           ),
         });
       },
@@ -999,7 +999,7 @@ describe("deposits.claim", () => {
     const leaf = await client.deposits.claimMany({
       outputs: [{ transaction: txA }, { transaction: txB }],
     });
-    expect(leaf.id).toBe("claimed-1");
+    expect(leaf.id).toBe(LEAF_ID);
 
     // N root inputs + 2 refund jobs = 4 commitments, in the SO's order.
     expect(required(commitmentsReq, "commitments request").count).toBe(4);

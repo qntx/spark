@@ -306,6 +306,13 @@ async function claimedLeaf(signer: SparkSigner, leaf: TransferLeaf): Promise<Tra
     ...leaf,
     leaf: create(TreeNodeSchema, {
       ...inner,
+      // The finalized leaf's refund is the one the receiver signed — it pays the new LEAF key.
+      refundTx: createCurrentTimelockRefundTxs({
+        nodeTx: inner.nodeTx,
+        sequence: 1900,
+        receivingPublicKey: newKey,
+        network: "regtest",
+      }).cpfpRefund.txBytes,
       verifyingPublicKey: verifyingKeyFor(newKey),
       ownerSigningPublicKey: newKey,
       signingKeyshare: create(SigningKeyshareSchema, {

@@ -65,6 +65,7 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
         const { transactions, chains } = await unilateralExitTransactions({
           spark: coordinatorConnection.spark,
           network,
+          signer,
           leafIds,
         });
         await store.putExitChains(chains);
