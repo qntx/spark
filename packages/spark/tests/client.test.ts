@@ -551,6 +551,48 @@ test("leaves() drops a leaf carrying a malformed transaction", async () => {
   expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
 });
 
+test("leaves() quarantines a leaf whose exit chain fails verification", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const poisoned = ownedLeaf("leaf-2", 200n, secrets[1]!);
+  // Both operators agree on the poisoning, so it passes cross-operator comparison and fails
+  // only inside exit-chain verification: a well-formed direct refund paying a foreign key.
+  poisoned.directTx = txSpending(hexToBytes(txId(poisoned.nodeTx)), 0x300);
+  poisoned.directRefundTx = txSpending(
+    hexToBytes(txId(poisoned.directTx)),
+    0x300,
+    secp256k1.getPublicKey(new Uint8Array(32).fill(13), true),
+  );
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({
+        nodes: { "leaf-1": ownedLeaf("leaf-1", 100n, secrets[0]!), "leaf-2": poisoned },
+        offset: 2n,
+      }),
+    },
+    store,
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  await expect(client.balance()).resolves.toBe(100);
+  // The poisoned leaf is still owned — its previously verified stored chain survives the sweep.
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
+  // Explicitly requested, the same leaf still fails closed with its precise chain error.
+  await expect(client.withdrawals.unilateralExit(["leaf-2"])).rejects.toThrow(
+    "direct refund tx of leaf leaf-2",
+  );
+});
+
 test("leaves() throws when an operator query fails", async () => {
   const signer = createTestSigner(
     new Uint8Array(32).fill(7),

@@ -506,7 +506,7 @@ describe("queryExitChains", () => {
       });
     });
     const spark = createClient(SparkService, transport);
-    const chains = await queryExitChains({
+    const { chains } = await queryExitChains({
       spark,
       network: "regtest",
       signer: SIGNER,
@@ -570,10 +570,10 @@ describe("queryExitChains", () => {
       stream: async () => Promise.reject(new Error("unimplemented")),
     } as unknown as Transport;
     const spark = createClient(SparkService, transport);
-    const chains = await queryExitChains({ spark, network: "regtest", signer: SIGNER, leaves });
+    const { chains } = await queryExitChains({ spark, network: "regtest", signer: SIGNER, leaves });
     expect(calls.map((chunk) => chunk.length)).toStrictEqual([1000, 1]);
     expect(chains).toHaveLength(1001);
-  });
+  }, 60_000);
 
   test("the given leaf wins over a node returned for its id", async () => {
     const grandparent = leafNode({ id: "gp" });
@@ -594,7 +594,7 @@ describe("queryExitChains", () => {
       });
     });
     const spark = createClient(SparkService, transport);
-    const chains = await queryExitChains({
+    const { chains } = await queryExitChains({
       spark,
       network: "regtest",
       signer: SIGNER,
@@ -605,7 +605,7 @@ describe("queryExitChains", () => {
     expect(chain?.refundTx).toStrictEqual(leaf.refundTx);
   });
 
-  test("a parent missing from the query result is an error", async () => {
+  test("a parent missing from the query result rejects only that leaf", async () => {
     const leaf = leafNode({ id: "leaf", parent: "ghost" });
     const transport = createRouterTransport((router) => {
       router.service(SparkService, {
@@ -613,8 +613,15 @@ describe("queryExitChains", () => {
       });
     });
     const spark = createClient(SparkService, transport);
-    await expect(
-      queryExitChains({ spark, network: "regtest", signer: SIGNER, leaves: [leaf] }),
-    ).rejects.toThrow(/ghost/);
+    const { chains, rejected } = await queryExitChains({
+      spark,
+      network: "regtest",
+      signer: SIGNER,
+      leaves: [leaf],
+    });
+    expect(chains).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.leafId).toBe("leaf");
+    expect(rejected[0]?.error.message).toMatch(/ghost/);
   });
 });

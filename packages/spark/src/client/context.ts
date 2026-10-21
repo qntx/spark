@@ -39,8 +39,12 @@ export type ClientContext = {
   readonly leafLock: Mutex;
   /** Serializes token output selection against broadcast, the same way leafLock does for sats. */
   readonly tokenLock: Mutex;
-  /** Refreshes and stores the exit chains of `leaves`. Caller holds `leafLock`. */
-  readonly storeChainsFor: (leaves: ReadonlyArray<SparkLeaf>) => Promise<void>;
+  /**
+   * Refreshes and stores the exit chains of `leaves`; returns the ids of leaves whose served chain
+   * failed verification — they are quarantined like operator-disagreeing leaves rather than thrown
+   * over, so a commit that already happened still succeeds. Caller holds `leafLock`.
+   */
+  readonly storeChainsFor: (leaves: ReadonlyArray<SparkLeaf>) => Promise<ReadonlyArray<string>>;
   /** The unlocked leaf sync — caller holds `leafLock`. */
   readonly syncLeaves: () => Promise<ReadonlyArray<SparkLeaf>>;
   /** `syncLeaves` under `leafLock` — the public read path. */
@@ -65,15 +69,18 @@ export function createClientContext(
   const leafLock = createMutex();
   const tokenLock = createMutex();
 
-  const storeChainsFor = async (forLeaves: ReadonlyArray<SparkLeaf>): Promise<void> =>
-    store.putExitChains(
-      await queryExitChains({
-        spark: coordinatorConnection.spark,
-        network,
-        signer,
-        leaves: forLeaves,
-      }),
-    );
+  const storeChainsFor = async (
+    forLeaves: ReadonlyArray<SparkLeaf>,
+  ): Promise<ReadonlyArray<string>> => {
+    const { chains, rejected } = await queryExitChains({
+      spark: coordinatorConnection.spark,
+      network,
+      signer,
+      leaves: forLeaves,
+    });
+    await store.putExitChains(chains);
+    return rejected.map((entry) => entry.leafId);
+  };
 
   // Syncing leaves is the reconciliation point: refresh every spendable leaf's exit chain and
   // drop chains for leaves the coordinator no longer reports as ours. The coordinator can lie,
@@ -145,13 +152,18 @@ export function createClientContext(
         }),
     );
 
-    await storeChainsFor(spendable);
+    // A leaf whose served exit chain fails verification is quarantined like a disagreeing
+    // leaf — withheld from the spendable result but still counted as owned, so its previously
+    // stored (already verified) chain survives the stale sweep and unilateralExit on it still
+    // reports the precise error.
+    const rejectedIds = new Set(await storeChainsFor(spendable));
+    const usable = spendable.filter((leaf) => !rejectedIds.has(leaf.id));
     const chains = await store.exitChains();
     const stale = chains.map((chain) => chain.leafId).filter((leafId) => !ownedIds.has(leafId));
     if (stale.length > 0) {
       await store.deleteExitChains(stale);
     }
-    return spendable;
+    return usable;
   };
 
   /** Resolves a spark address string or raw identity public key to the receiver's identity key. */

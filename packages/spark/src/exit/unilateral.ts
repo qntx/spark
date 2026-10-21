@@ -196,120 +196,126 @@ export function buildExitChains(
   nodes: ReadonlyMap<string, SparkLeaf>,
   refundScripts: ReadonlyMap<string, Uint8Array>,
 ): SparkExitChain[] {
-  const chains: SparkExitChain[] = [];
+  const cache = newLinkageCache();
+  return leafIds.map((leafId) => buildLeafExitChain(leafId, nodes, refundScripts, cache));
+}
+
+function newLinkageCache(): LinkageCache {
   // Leaves share ancestors; each node→parent link is verified once and each
   // transaction is parsed and hashed once per call.
-  const cache: LinkageCache = {
+  return {
     txids: new Map(),
     input0: new Map(),
     output0: new Map(),
     verifiedLinks: new Set(),
   };
-  for (const leafId of leafIds) {
-    const requested = nodes.get(leafId);
-    if (requested === undefined) {
-      throw new SparkInputError(`unilateral exit: leaf ${leafId} not found`);
+}
+
+/**
+ * One leaf's verified exit chain, sharing `cache` across siblings so shared ancestors link once.
+ * Throws the same `SparkInputError`/`SparkError` `buildExitChains` raises for that leaf.
+ */
+function buildLeafExitChain(
+  leafId: string,
+  nodes: ReadonlyMap<string, SparkLeaf>,
+  refundScripts: ReadonlyMap<string, Uint8Array>,
+  cache: LinkageCache,
+): SparkExitChain {
+  const requested = nodes.get(leafId);
+  if (requested === undefined) {
+    throw new SparkInputError(`unilateral exit: leaf ${leafId} not found`);
+  }
+  if (requested.refundTx.length === 0) {
+    throw new SparkInputError(`unilateral exit: node ${leafId} is not a leaf (no refund tx)`);
+  }
+  const directRefundTx = optionalBytes(requested.directRefundTx);
+  const directFromCpfpRefundTx = optionalBytes(requested.directFromCpfpRefundTx);
+  // Verify the chain really chains: each node's input 0 spends the parent node's tx at the
+  // output `node.vout` names (Breez tree/mod.rs: "the vout to spend the previous
+  // transaction"), and the leaf's refunds spend the leaf transactions themselves.
+  const chain = exitChain(leafId, nodes);
+  for (const [i, node] of chain.entries()) {
+    const parent = chain[i - 1];
+    if (parent === undefined || cache.verifiedLinks.has(node.id)) {
+      continue;
     }
-    if (requested.refundTx.length === 0) {
-      throw new SparkInputError(`unilateral exit: node ${leafId} is not a leaf (no refund tx)`);
-    }
-    const directRefundTx = optionalBytes(requested.directRefundTx);
-    const directFromCpfpRefundTx = optionalBytes(requested.directFromCpfpRefundTx);
-    // Verify the chain really chains: each node's input 0 spends the parent node's tx at the
-    // output `node.vout` names (Breez tree/mod.rs: "the vout to spend the previous
-    // transaction"), and the leaf's refunds spend the leaf transactions themselves.
-    const chain = exitChain(leafId, nodes);
-    for (const [i, node] of chain.entries()) {
-      const parent = chain[i - 1];
-      if (parent === undefined || cache.verifiedLinks.has(node.id)) {
-        continue;
-      }
-      requireSpends(
-        node.nodeTx,
-        { txid: cachedTxId(parent.nodeTx, cache), vout: node.vout },
-        `node tx of ${node.id} (parent ${parent.id}, vout ${node.vout})`,
-        cache,
-      );
-      cache.verifiedLinks.add(node.id);
-    }
-    const leafNodeTxid = cachedTxId(requested.nodeTx, cache);
     requireSpends(
-      requested.refundTx,
+      node.nodeTx,
+      { txid: cachedTxId(parent.nodeTx, cache), vout: node.vout },
+      `node tx of ${node.id} (parent ${parent.id}, vout ${node.vout})`,
+      cache,
+    );
+    cache.verifiedLinks.add(node.id);
+  }
+  const leafNodeTxid = cachedTxId(requested.nodeTx, cache);
+  requireSpends(
+    requested.refundTx,
+    { txid: leafNodeTxid, vout: 0 },
+    `refund tx of leaf ${leafId}`,
+    cache,
+  );
+  if (directFromCpfpRefundTx !== undefined) {
+    requireSpends(
+      directFromCpfpRefundTx,
       { txid: leafNodeTxid, vout: 0 },
-      `refund tx of leaf ${leafId}`,
+      `direct-from-CPFP refund tx of leaf ${leafId}`,
       cache,
     );
-    if (directFromCpfpRefundTx !== undefined) {
-      requireSpends(
-        directFromCpfpRefundTx,
-        { txid: leafNodeTxid, vout: 0 },
-        `direct-from-CPFP refund tx of leaf ${leafId}`,
-        cache,
-      );
+  }
+  if (directRefundTx !== undefined) {
+    const directTx = optionalBytes(requested.directTx);
+    if (directTx === undefined) {
+      throw new SparkError(`unilateral exit: leaf ${leafId} has a direct refund but no direct tx`);
     }
-    if (directRefundTx !== undefined) {
-      const directTx = optionalBytes(requested.directTx);
-      if (directTx === undefined) {
-        throw new SparkError(
-          `unilateral exit: leaf ${leafId} has a direct refund but no direct tx`,
-        );
-      }
-      requireSpends(
-        directRefundTx,
-        { txid: cachedTxId(directTx, cache), vout: 0 },
-        `direct refund tx of leaf ${leafId}`,
-        cache,
-      );
-    }
-    // Structure alone is not enough — every refund must pay this leaf's own key-path script.
-    const expectedRefundScript = refundScripts.get(leafId);
-    if (expectedRefundScript === undefined) {
-      throw new SparkError(`unilateral exit: no expected refund script for leaf ${leafId}`);
-    }
+    requireSpends(
+      directRefundTx,
+      { txid: cachedTxId(directTx, cache), vout: 0 },
+      `direct refund tx of leaf ${leafId}`,
+      cache,
+    );
+  }
+  // Structure alone is not enough — every refund must pay this leaf's own key-path script.
+  const expectedRefundScript = refundScripts.get(leafId);
+  if (expectedRefundScript === undefined) {
+    throw new SparkError(`unilateral exit: no expected refund script for leaf ${leafId}`);
+  }
+  requirePaysScript(requested.refundTx, expectedRefundScript, `refund tx of leaf ${leafId}`, cache);
+  if (directFromCpfpRefundTx !== undefined) {
     requirePaysScript(
-      requested.refundTx,
+      directFromCpfpRefundTx,
       expectedRefundScript,
-      `refund tx of leaf ${leafId}`,
+      `direct-from-CPFP refund tx of leaf ${leafId}`,
       cache,
     );
-    if (directFromCpfpRefundTx !== undefined) {
-      requirePaysScript(
-        directFromCpfpRefundTx,
-        expectedRefundScript,
-        `direct-from-CPFP refund tx of leaf ${leafId}`,
-        cache,
-      );
-    }
-    if (directRefundTx !== undefined) {
-      requirePaysScript(
-        directRefundTx,
-        expectedRefundScript,
-        `direct refund tx of leaf ${leafId}`,
-        cache,
-      );
-    }
-    const chainNodes: Array<{
-      nodeId: string;
-      nodeTx: Uint8Array;
-      directTx?: Uint8Array;
-    }> = [];
-    for (const node of chain) {
-      const directTx = optionalBytes(node.directTx);
-      chainNodes.push({
-        nodeId: node.id,
-        nodeTx: node.nodeTx,
-        ...(directTx === undefined ? {} : { directTx }),
-      });
-    }
-    chains.push({
-      leafId,
-      nodes: chainNodes,
-      refundTx: requested.refundTx,
-      ...(directRefundTx === undefined ? {} : { directRefundTx }),
-      ...(directFromCpfpRefundTx === undefined ? {} : { directFromCpfpRefundTx }),
+  }
+  if (directRefundTx !== undefined) {
+    requirePaysScript(
+      directRefundTx,
+      expectedRefundScript,
+      `direct refund tx of leaf ${leafId}`,
+      cache,
+    );
+  }
+  const chainNodes: Array<{
+    nodeId: string;
+    nodeTx: Uint8Array;
+    directTx?: Uint8Array;
+  }> = [];
+  for (const node of chain) {
+    const directTx = optionalBytes(node.directTx);
+    chainNodes.push({
+      nodeId: node.id,
+      nodeTx: node.nodeTx,
+      ...(directTx === undefined ? {} : { directTx }),
     });
   }
-  return chains;
+  return {
+    leafId,
+    nodes: chainNodes,
+    refundTx: requested.refundTx,
+    ...(directRefundTx === undefined ? {} : { directRefundTx }),
+    ...(directFromCpfpRefundTx === undefined ? {} : { directFromCpfpRefundTx }),
+  };
 }
 
 function exitTransaction(
@@ -393,7 +399,11 @@ export async function queryExitChains(options: {
   readonly signer: SparkSigner;
   readonly leaves: ReadonlyArray<SparkLeaf>;
   readonly call?: CallOptions;
-}): Promise<SparkExitChain[]> {
+}): Promise<{
+  readonly chains: SparkExitChain[];
+  /** Leaves whose chain failed verification — the caller quarantines them, it does not throw. */
+  readonly rejected: ReadonlyArray<{ readonly leafId: string; readonly error: SparkError }>;
+}> {
   const { spark, network, signer, leaves } = options;
   const refundScripts = await leafRefundScripts(
     signer,
@@ -408,7 +418,7 @@ export async function queryExitChains(options: {
     }
   }
   if (wanted.size === 0) {
-    return buildExitChains(
+    return collectExitChains(
       leaves.map((leaf) => leaf.id),
       known,
       refundScripts,
@@ -438,11 +448,45 @@ export async function queryExitChains(options: {
       }
     }
   }
-  return buildExitChains(
+  return collectExitChains(
     leaves.map((leaf) => leaf.id),
     known,
     refundScripts,
   );
+}
+
+/**
+ * `buildExitChains` for every leaf, collecting per-leaf failures rather than throwing on the first:
+ * one leaf with a chain that fails verification must not block the valid chains — the sync
+ * quarantines it like an operator-disagreeing leaf.
+ */
+function collectExitChains(
+  leafIds: ReadonlyArray<string>,
+  nodes: ReadonlyMap<string, SparkLeaf>,
+  refundScripts: ReadonlyMap<string, Uint8Array>,
+): {
+  chains: SparkExitChain[];
+  rejected: Array<{ leafId: string; error: SparkError }>;
+} {
+  const cache = newLinkageCache();
+  const chains: SparkExitChain[] = [];
+  const rejected: Array<{ leafId: string; error: SparkError }> = [];
+  for (const leafId of leafIds) {
+    try {
+      chains.push(buildLeafExitChain(leafId, nodes, refundScripts, cache));
+    } catch (error) {
+      rejected.push({
+        leafId,
+        error:
+          error instanceof SparkError
+            ? error
+            : new SparkError(`unilateral exit: leaf ${leafId} chain build failed`, {
+                cause: error,
+              }),
+      });
+    }
+  }
+  return { chains, rejected };
 }
 
 /**
