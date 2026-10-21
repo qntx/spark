@@ -8,7 +8,7 @@ import {
 } from "../core/bitcoin/index.ts";
 import { SparkInputError } from "../errors/index.ts";
 import { cooperativeExit, cooperativeExitStatus, quoteCooperativeExit } from "../exit/coop.ts";
-import { unilateralExitTransactions } from "../exit/unilateral.ts";
+import { exitTransactions, unilateralExitTransactions } from "../exit/unilateral.ts";
 import { queryWatchtowerExitedLeaves, recoverWatchtowerExit } from "../exit/watchtower.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
@@ -71,6 +71,19 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
         await store.putExitChains(chains);
         return transactions;
       }),
+    offlineExitTransactions: async (leafIds) => {
+      const stored = await store.exitChains();
+      const byLeaf = new Map(stored.map((chain) => [chain.leafId, chain]));
+      return exitTransactions(
+        leafIds.map((leafId) => {
+          const chain = byLeaf.get(leafId);
+          if (chain === undefined) {
+            throw new SparkInputError(`offline exit: no stored exit chain for leaf ${leafId}`);
+          }
+          return chain;
+        }),
+      );
+    },
     watchtowerExitedLeaves: async () =>
       queryWatchtowerExitedLeaves({
         spark: coordinatorConnection.spark,

@@ -322,15 +322,28 @@ export type SparkClient = {
   };
   readonly withdrawals: {
     /**
-     * Pre-signed exit transactions for the given leaves, root first (see ExitTransaction). Each
-     * carries a hard deadline: once a transaction's parent confirms and its relative timelock
-     * passes, it must confirm within DIRECT_TIMELOCK_OFFSET blocks; otherwise the operators'
-     * watchtower may publish a self-fee variant instead. For intermediate nodes this strands
-     * descendants as WATCHTOWER_EXITED (recover with recoverWatchtowerExit while the SO is online);
-     * for refunds the watchtower publishes direct_from_cpfp_refund_tx, which pays the leaf key
-     * (sweep with sweepRefund). Keep each exit package confirming promptly.
+     * Pre-signed exit transactions for the given leaves, root first (see ExitTransaction), from a
+     * live `query_nodes` call against the coordinator — use `offlineExitTransactions` when the
+     * operators are unreachable or withholding data. Each transaction carries a hard deadline: once
+     * its parent confirms and its relative timelock passes, it must confirm within
+     * DIRECT_TIMELOCK_OFFSET blocks; otherwise the operators' watchtower may publish a self-fee
+     * variant instead. For intermediate nodes this strands descendants as WATCHTOWER_EXITED
+     * (recover with recoverWatchtowerExit while the SO is online); for refunds the watchtower
+     * publishes direct_from_cpfp_refund_tx, which pays the leaf key (sweep with sweepRefund). Keep
+     * each exit package confirming promptly.
      */
     readonly unilateralExit: (
+      leafIds: ReadonlyArray<string>,
+    ) => Promise<ReadonlyArray<ExitTransaction>>;
+    /**
+     * The same broadcast list `unilateralExit` returns, built purely from the exit chains the
+     * SparkStore persists — this method performs no network calls. Stored chains are refreshed by
+     * every leaves sync, so this is the recovery path when the operators are unreachable or
+     * withholding data. Throws a SparkInputError naming any leaf that has no stored chain. The same
+     * broadcast deadlines apply: each transaction must confirm within DIRECT_TIMELOCK_OFFSET blocks
+     * once its parent's relative timelock matures.
+     */
+    readonly offlineExitTransactions: (
       leafIds: ReadonlyArray<string>,
     ) => Promise<ReadonlyArray<ExitTransaction>>;
     /**
