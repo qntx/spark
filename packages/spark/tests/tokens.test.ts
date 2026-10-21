@@ -164,6 +164,26 @@ describe("selectTokenOutputs", () => {
     expect(() => selectTokenOutputs(outputs, 11n)).toThrow(SparkInputError);
     expect(() => selectTokenOutputs(outputs, 1n << 128n)).toThrow(SparkInputError);
   });
+
+  test("swaps in larger outputs when the smallest cap-prefix falls short", () => {
+    const small = Array.from({ length: MAX_TOKEN_OUTPUTS_TX }, (_, i) => makeOutput(`s${i}`, 1n));
+    const outputs = [...small, makeOutput("big", 1000n)];
+    const selected = selectTokenOutputs(outputs, BigInt(MAX_TOKEN_OUTPUTS_TX) + 1n);
+    expect(selected).toHaveLength(MAX_TOKEN_OUTPUTS_TX);
+    expect(selected.map((o) => o.id)).toContain("big");
+    expect(selected.reduce((sum, o) => sum + o.amount, 0n)).toBeGreaterThanOrEqual(
+      BigInt(MAX_TOKEN_OUTPUTS_TX) + 1n,
+    );
+  });
+
+  test("rejects when even the cap-limited swap cannot cover the amount", () => {
+    const outputs = Array.from({ length: MAX_TOKEN_OUTPUTS_TX + 1 }, (_, i) =>
+      makeOutput(`s${i}`, 1n),
+    );
+    expect(() => selectTokenOutputs(outputs, BigInt(MAX_TOKEN_OUTPUTS_TX) + 1n)).toThrow(
+      "insufficient token amount within the output cap",
+    );
+  });
 });
 
 function makeTransferPartial(options?: {

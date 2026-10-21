@@ -32,7 +32,7 @@ import {
   isZeroTimelock,
   roundDownToTimelockInterval,
 } from "../src/core/bitcoin/sequence.ts";
-import { taprootKeySpendSighash } from "../src/core/bitcoin/sighash.ts";
+import { taprootKeySpendSighash, taprootScriptSpendSighash } from "../src/core/bitcoin/sighash.ts";
 import {
   constructNodeTxPair,
   constructRefundTxTrio,
@@ -674,4 +674,53 @@ test("p2wpkh address and vbytes estimate", () => {
 test("txId returns the display-order txid", () => {
   const tx = Transaction.fromRaw(parent(), { allowUnknownOutputs: true });
   expect(txId(parent())).toBe(tx.id);
+});
+
+// -- sighash input validation -------------------------------------------------------
+
+test("key-spend sighash rejects an inputIndex outside the transaction's inputs", () => {
+  const target = {
+    transaction: parent(),
+    inputIndex: 1,
+    prevouts: [{ script: scriptOf(parent(), PARENT_VOUT), amount: 100_000 }],
+  };
+  expect(() => taprootKeySpendSighash(target)).toThrow(SparkInputError);
+  expect(() => taprootKeySpendSighash({ ...target, inputIndex: -1 })).toThrow(SparkInputError);
+});
+
+test("key-spend sighash rejects a prevouts length that does not match the inputs", () => {
+  const target = {
+    transaction: parent(),
+    inputIndex: 0,
+    prevouts: [
+      { script: scriptOf(parent(), PARENT_VOUT), amount: 100_000 },
+      { script: scriptOf(parent(), PARENT_VOUT), amount: 100_000 },
+    ],
+  };
+  expect(() => taprootKeySpendSighash(target)).toThrow(
+    "prevouts: must contain one entry per transaction input",
+  );
+});
+
+test("key-spend sighash rejects an empty prevout script", () => {
+  expect(() =>
+    taprootKeySpendSighash({
+      transaction: parent(),
+      inputIndex: 0,
+      prevouts: [{ script: new Uint8Array(), amount: 100_000 }],
+    }),
+  ).toThrow("prevouts.script: must not be empty");
+});
+
+test("script-spend sighash rejects a negative inputIndex", () => {
+  expect(() =>
+    taprootScriptSpendSighash(
+      {
+        transaction: parent(),
+        inputIndex: -1,
+        prevouts: [{ script: scriptOf(parent(), PARENT_VOUT), amount: 100_000 }],
+      },
+      new Uint8Array(34).fill(0x51),
+    ),
+  ).toThrow("inputIndex: must be a non-negative integer");
 });
