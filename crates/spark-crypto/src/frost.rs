@@ -251,12 +251,18 @@ impl fmt::Debug for SignJob<'_> {
 /// # Errors
 /// [`Error::InvalidScalar`] for bad scalars (secret key, nonces, identifier),
 /// [`Error::InvalidPoint`] for bad points (verifying key, commitments,
-/// adaptor), [`Error::Frost`] for duplicate identifiers or a rejected share,
+/// adaptor), [`Error::Frost`] for duplicate identifiers — including an
+/// operator identifier equal to the user identifier — or a rejected share,
 /// [`Error::Internal`] for unrecoverable invariant failures.
 pub fn sign(job: &SignJob<'_>) -> Result<[u8; 32], Error> {
     let user_identifier = user_identifier()?;
 
     let (mut commitments, operator_participants) = operator_commitments(job.operators)?;
+    // An operator slot named `user` would be silently overwritten by the
+    // user's own commitment below — reject it like any duplicate identifier.
+    if operator_participants.contains(&user_identifier) {
+        return Err(Error::Frost);
+    }
     commitments.insert(
         user_identifier,
         commitments_from_bytes(job.user_commitment)?,
@@ -402,6 +408,11 @@ pub fn aggregate(job: &AggregateJob<'_>) -> Result<[u8; 64], Error> {
         );
     }
 
+    // Same rule as `sign`: an operator slot named `user` would otherwise be
+    // silently overwritten by the user's own entries below.
+    if operator_participants.contains(&user_identifier) {
+        return Err(Error::Frost);
+    }
     commitments.insert(
         user_identifier,
         commitments_from_bytes(job.user_commitment)?,
@@ -719,6 +730,57 @@ mod tests {
             verifying_key: &bytes33(keys.combined_vk.serialize().unwrap()),
             nonce: nonce.nonces(),
             user_commitment: &user_commitment,
+            operators: &operators,
+            adaptor_public_key: None,
+        })
+        .unwrap_err();
+        assert_eq!(err, Error::Frost);
+    }
+
+    #[test]
+    fn operator_identifier_colliding_with_user_fails() {
+        let keys = generate_keys(3, 2);
+        let user_id = Identifier::derive(b"user").unwrap();
+        let real = commit(&[1u8; 32], &[2u8; 32]).unwrap();
+        let operators = [OperatorCommitment {
+            identifier: bytes32(user_id.serialize()),
+            commitment: *real.commitments(),
+        }];
+        let secret_key = bytes32(keys.user_key.serialize());
+        let nonce = commit(&secret_key, &[8u8; 32]).unwrap();
+        let user_commitment = *nonce.commitments();
+        let err = sign(&SignJob {
+            message: b"m",
+            secret_key: &secret_key,
+            verifying_key: &bytes33(keys.combined_vk.serialize().unwrap()),
+            nonce: nonce.nonces(),
+            user_commitment: &user_commitment,
+            operators: &operators,
+            adaptor_public_key: None,
+        })
+        .unwrap_err();
+        assert_eq!(err, Error::Frost);
+    }
+
+    #[test]
+    fn aggregate_operator_identifier_colliding_with_user_fails() {
+        let keys = generate_keys(3, 2);
+        let user_id = Identifier::derive(b"user").unwrap();
+        let real = commit(&[1u8; 32], &[2u8; 32]).unwrap();
+        let operators = [OperatorShare {
+            identifier: bytes32(user_id.serialize()),
+            commitment: *real.commitments(),
+            signature_share: [7u8; 32],
+            public_key: bytes33(keys.user_vk.serialize().unwrap()),
+        }];
+        let nonce = commit(&bytes32(keys.user_key.serialize()), &[8u8; 32]).unwrap();
+        let user_commitment = *nonce.commitments();
+        let err = aggregate(&AggregateJob {
+            message: b"m",
+            verifying_key: &bytes33(keys.combined_vk.serialize().unwrap()),
+            user_commitment: &user_commitment,
+            user_public_key: &bytes33(keys.user_vk.serialize().unwrap()),
+            user_signature_share: &[9u8; 32],
             operators: &operators,
             adaptor_public_key: None,
         })
