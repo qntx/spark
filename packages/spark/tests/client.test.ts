@@ -306,6 +306,7 @@ test("pending and all transfers map to plain SparkTransfer", async () => {
             senders: [],
           },
         ],
+        offset: -1n,
       }),
     query_all_transfers: (req: { limit: bigint }) => {
       listLimit = req.limit;
@@ -389,6 +390,49 @@ test("transfers.pending() pages until a short page", async () => {
   expect(requests).toStrictEqual([
     { limit: 100n, offset: 0n },
     { limit: 100n, offset: 100n },
+  ]);
+});
+
+test("transfers.pending() keeps paging when a short page carries a positive offset", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const pubkey = await signer.identityPublicKey();
+  const requests: Array<{ limit: bigint; offset: bigint }> = [];
+  const transfer = (id: string) => ({
+    id,
+    senderIdentityPublicKey: new Uint8Array(33).fill(3),
+    receiverIdentityPublicKey: pubkey,
+    status: TransferStatus.SENDER_KEY_TWEAKED,
+    totalValue: 1n,
+    expiryTime: timestampFromMs(1_700_000_600_000),
+    createdTime: timestampFromMs(1_700_000_000_000),
+    updatedTime: timestampFromMs(1_700_000_000_000),
+    type: TransferType.TRANSFER,
+    network: Network.MAINNET,
+    leaves: [],
+    receivers: [],
+    senders: [],
+  });
+  const pages = [
+    {
+      transfers: Array.from({ length: 50 }, (_, i) => transfer(`t-${i}`)),
+      offset: 50n,
+    },
+    { transfers: [transfer("t-last")], offset: -1n },
+  ];
+  const client = makeClient(signer, {
+    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_pending_transfers: (req: { limit: bigint; offset: bigint }) => {
+      requests.push({ limit: req.limit, offset: req.offset });
+      const page = pages[requests.length - 1]!;
+      return create(QueryTransfersResponseSchema, page);
+    },
+  });
+  const pending = await client.transfers.pending();
+  expect(pending).toHaveLength(51);
+  expect(pending[50]?.id).toBe("t-last");
+  expect(requests).toStrictEqual([
+    { limit: 100n, offset: 0n },
+    { limit: 100n, offset: 50n },
   ]);
 });
 

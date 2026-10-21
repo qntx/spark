@@ -50,10 +50,13 @@ export async function queryPendingTransfers(options: {
     );
     const page = response.transfers;
     transfers.push(...page.map(mapTransfer));
-    if (page.length < PENDING_PAGE_SIZE) {
+    // The SO reports the end explicitly: offset is -1 unless the page was full, so a short page
+    // is not the stop condition — if the SO's cap ever dropped below PENDING_PAGE_SIZE a length
+    // test would silently drop pending transfers.
+    const nextOffset = Number(response.offset);
+    if (nextOffset < 0) {
       return transfers;
     }
-    const nextOffset = Number(response.offset);
     if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
       throw new SparkError("query pending transfers: coordinator returned a non-advancing offset");
     }
