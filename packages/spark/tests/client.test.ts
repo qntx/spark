@@ -673,6 +673,45 @@ test("leaves() drops a leaf the wallet does not own and deletes its chain", asyn
   expect(chains.map((chain) => chain.leafId)).toStrictEqual(["leaf-1"]);
 });
 
+test("leaves() keeps the chain when only the coordinator serves a not-owned row", async () => {
+  const secrets = [leafSecret(0), leafSecret(1)];
+  const signer = createTestSigner(
+    new Uint8Array(32).fill(7),
+    leafKeyMap([
+      ["leaf-1", secrets[0]!],
+      ["leaf-2", secrets[1]!],
+    ]),
+  );
+  const store = createMemorySparkStore();
+  await store.putExitChains([storedChain("leaf-1"), storedChain("leaf-2")]);
+  const leaf1 = ownedLeaf("leaf-1", 100n, secrets[0]!);
+  const leaf2 = ownedLeaf("leaf-2", 200n, secrets[1]!);
+  // A malicious coordinator could tamper a well-formed row so ownsLeaf fails — the leaf must
+  // leave the spendable set, but the chain survives while another operator still attests the
+  // owned original.
+  const tampered = ownedLeaf("leaf-2", 200n, secrets[1]!);
+  tampered.verifyingPublicKey = secp256k1.Point.BASE.toBytes(true);
+  const client = makeClient(
+    signer,
+    {
+      query_nodes: () => ({
+        nodes: { "leaf-1": leaf1, "leaf-2": tampered },
+        offset: -1n,
+      }),
+    },
+    store,
+    {
+      [OPERATOR1_ID]: {
+        query_nodes: () => ({ nodes: { "leaf-1": leaf1, "leaf-2": leaf2 }, offset: -1n }),
+      },
+    },
+  );
+  const leaves = await client.leaves();
+  expect(leaves.map((leaf) => leaf.id)).toStrictEqual(["leaf-1"]);
+  const chains = await store.exitChains();
+  expect(chains.map((chain) => chain.leafId).toSorted()).toStrictEqual(["leaf-1", "leaf-2"]);
+});
+
 test("leaves() drops a leaf carrying a malformed transaction", async () => {
   const signer = createTestSigner(
     new Uint8Array(32).fill(7),
