@@ -580,6 +580,7 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 | `aggregateFrost`          | 64-byte aggregated FROST sigs                                | full job content              | resolved private key inside signer  |
 | `signIdentity`            | protocol statement (DER ECDSA / BIP-340 for `spark-invoice`) | statement content             | statement shape                     |
 | `signKeySpend`            | BIP-341 key-path sig over target sighash                     | target sighash                | `SparkKey` + `SigningTarget`        |
+| `signHtlcTimeout`         | BIP-342 script-path sig over the HTLC sequence-lock leaf     | prevout + leaf sighash        | single-input shape, CSV sequence    |
 | `prepareTransfer`         | sender transfer package (fresh keys, VSS tweaks, ECIES)      | —                             | leaf ids, operators, threshold      |
 | `prepareClaim`            | receiver claim package (VSS `received − LEAF{id}` tweaks)    | —                             | leaf ids, operators                 |
 | `prepareLightningReceive` | preimage + VSS `SecretShare` per operator                    | —                             | operators, threshold                |

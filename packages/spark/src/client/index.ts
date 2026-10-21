@@ -267,6 +267,23 @@ export type SparkClient = {
     readonly receiveStatus: (
       request: LightningReceiveStatusRequest,
     ) => Promise<LightningReceiveStatus>;
+    /**
+     * Signs the sender timeout spend of a Lightning HTLC output — output `vout` of `htlcTx`, a
+     * committed refund transaction of an in-flight `pay` whose SSP never settled. Once `htlcTx` is
+     * `LIGHTNING_HTLC_SEQUENCE` (2160) blocks deep the output can be spent through the
+     * sequence-lock leaf back to `destinationAddress`. Returns the signed transaction UNBROADCAST —
+     * broadcast it yourself after the CSV wait; bitcoind rejects it earlier as non-BIP68-final.
+     * `paymentHash` and the SSP identity bind the output, which is verified before signing. Stored
+     * exit chains do not cover in-flight Lightning sends, so keep `htlcTx` until the sweep
+     * confirms.
+     */
+    readonly sweepHtlcTimeout: (options: {
+      readonly htlcTx: Uint8Array;
+      readonly vout: number;
+      readonly paymentHash: Uint8Array;
+      readonly destinationAddress: string;
+      readonly feeRateSatPerVbyte: number;
+    }) => Promise<Uint8Array>;
   };
   readonly deposits: {
     /** Fresh single-use deposit address with a verified proof-of-possession. */

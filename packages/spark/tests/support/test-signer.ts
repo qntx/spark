@@ -88,6 +88,10 @@ export function createTestSigner(
       await ready;
       throw new Error(NOT_IMPLEMENTED);
     },
+    signHtlcTimeout: async () => {
+      await ready;
+      throw new Error(NOT_IMPLEMENTED);
+    },
     prepareTransfer: async () => {
       await ready;
       throw new Error(NOT_IMPLEMENTED);
