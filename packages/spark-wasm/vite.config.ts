@@ -76,7 +76,6 @@ const config: UserConfig = defineConfig({
     deps: {
       neverBundle: ["@qntx/spark", "@qntx/spark/crypto"],
     },
-    sourcemap: true,
     exports: {
       customExports: applyPackExports,
     },

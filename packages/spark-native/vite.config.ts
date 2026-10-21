@@ -29,7 +29,6 @@ const config: UserConfig = defineConfig({
     deps: {
       neverBundle: ["@qntx/spark", "react-native", "react-native-nitro-modules"],
     },
-    sourcemap: true,
   },
 });
 
