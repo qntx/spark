@@ -127,8 +127,8 @@ function intOption(name: string, value: string | undefined, fallback: number): n
     return fallback;
   }
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    fail(`--${name} must be a positive integer`);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    fail(`--${name} must be a non-negative integer`);
   }
   return parsed;
 }

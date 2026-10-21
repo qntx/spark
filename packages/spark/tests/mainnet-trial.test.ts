@@ -311,6 +311,14 @@ describe("commands", () => {
     });
   });
 
+  test("a same-id retry that moves nothing records an idempotent replay", async () => {
+    const ledgerPath = join(tmp(), "ledger.jsonl");
+    const { deps } = fakeDeps({ balanceValues: [4000, 4000] }, ledgerPath);
+    await cmdSend(deps, { to: "spark1dest", amountSats: 1000, transferId: "tid-1" });
+    const [logged] = createLedger(ledgerPath).entries();
+    expect(logged).toMatchObject({ expectedDelta: 0, actualDelta: 0, status: "ok" });
+  });
+
   test("a balance mismatch appends the entry and throws LedgerMismatchError", async () => {
     const ledgerPath = join(tmp(), "ledger.jsonl");
     const { deps } = fakeDeps({ balanceValues: [5000, 4500] }, ledgerPath);
