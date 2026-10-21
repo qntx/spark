@@ -569,7 +569,7 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
    and its `LIGHTNING_HTLC_SEQUENCE` CSV has elapsed — the sender takes the
    funds back on chain.
 2. `client/lightning.ts:sweepHtlcTimeout({ htlcTx, vout, paymentHash,
-destinationAddress, feeRateSatPerVbyte })` builds the sweep with
+   destinationAddress, feeRateSatPerVbyte })` builds the sweep with
    `constructHtlcSenderSpend` (SSP identity as hash-lock key) and
    `signer.signHtlcTimeout` signs the BIP-342 script-path sighash of the
    sequence-lock leaf after the signer rebuilds the output script,
