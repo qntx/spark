@@ -475,15 +475,16 @@ async function queryNodeMaps(
 }
 
 /**
- * Walks `leaf`'s ancestor chain to the root and checks every node on it against every operator: the
- * reference row for an id is the caller's leaf for caller-provided ids (they win over served rows —
- * a claim response can be fresher than the tree index), else the first served row (coordinator,
- * then each other operator in order). For ids only the queries serve — ancestors — every operator,
- * coordinator included, must return the node with identical chain-relevant fields; a differing row
- * (a swapped ancestor transaction, a retargeted `parentNodeId`) or a node some operator does not
- * serve throws `SparkError` naming the leaf, the node and the detail. Caller-provided rows win
- * without a cross-check: the caller already validated them for the purpose it serves them. Returns
- * the verified reference rows keyed by id.
+ * Walks `leaf`'s ancestor chain to the root and checks every node on it, requested leaves included,
+ * against every operator. The reference row for an id is the caller's row for caller-provided ids,
+ * else the first served row (coordinator, then each other operator in order); the walk follows the
+ * reference `parentNodeId`. Then every operator, coordinator included, must serve every chain node
+ * with identical chain-relevant fields — a caller row is the reference, not an exemption: a claim
+ * response whose coordinator row blanks or retargets `parentNodeId` mismatches the served rows and
+ * rejects the leaf exactly like a tampered ancestor. A node some operator does not serve — a
+ * just-claimed leaf still missing from one operator's index — rejects the leaf for now; the next
+ * sync stores its chain once every operator reports it. Throws `SparkError` naming the leaf, the
+ * node and the detail. Returns the verified reference rows keyed by id.
  */
 function verifiedChainNodes(
   leaf: SparkLeaf,
@@ -523,9 +524,6 @@ function verifiedChainNodes(
     current = parent;
   }
   for (const [id, ref] of chainNodes) {
-    if (caller.has(id)) {
-      continue;
-    }
     for (const map of maps) {
       const row = map.get(id);
       if (row === undefined) {
@@ -551,7 +549,9 @@ function verifiedChainNodes(
  * are queried with `includeParents` from the coordinator AND every other operator (in `nodeIds`
  * chunks of 1000), each chain is walked to the root via `parentNodeId`, and any node an operator
  * serves differently or not at all rejects the leaf — the caller quarantines it and keeps its
- * previously stored chain. Each refund must additionally pay the signer's own `LEAF{id}` key-path
+ * previously stored chain. Caller's own rows are no exception: the leaf must be served identically
+ * too, so a just-claimed leaf one operator has not indexed yet is rejected for now and the next
+ * sync stores its chain. Each refund must additionally pay the signer's own `LEAF{id}` key-path
  * script — a foreign leaf fails rather than storing a stranger's chain.
  */
 export async function queryExitChains(options: {

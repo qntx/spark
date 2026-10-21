@@ -39,11 +39,11 @@ import {
   TreeNodeSchema,
   TreeNodeStatus,
 } from "../src/proto/gen/spark_pb.ts";
-import type { QueryNodesRequest, TreeNode } from "../src/proto/gen/spark_pb.ts";
+import type { QueryNodesRequest, TransferLeaf, TreeNode } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
-import { swapLeaves } from "../src/transfer/index.ts";
+import { mapTransfer, swapLeaves } from "../src/transfer/index.ts";
 import { malformedLeafTx, mapTreeNode } from "../src/tree/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
@@ -401,12 +401,15 @@ const SWAP_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000bb";
 const SSP_SECRET = new Uint8Array(32).fill(55);
 const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
 
-/** One inbound swap leaf sealed to `identity` and sender-signed by the SSP key. */
+/** One inbound leaf sealed to `identity` and sender-signed by the SSP key. */
 async function sspInboundLeaf(options: {
   leafId: string;
   label: bigint;
   pays: bigint;
   identity: Uint8Array;
+  transferId?: string;
+  nodeTx?: Uint8Array;
+  parent?: string;
 }) {
   const receivedSecret = sha256(new TextEncoder().encode(options.leafId));
   const receivedPublicKey = secp256k1.getPublicKey(receivedSecret, true);
@@ -419,14 +422,18 @@ async function sspInboundLeaf(options: {
   const verifyingKey = secp256k1.Point.fromBytes(receivedPublicKey)
     .add(secp256k1.Point.fromBytes(SHARE_PUB))
     .toBytes(true);
-  const nodeTx = txSpending(fakeTxid(0x50), 0, verifyingKey, options.pays);
+  const nodeTx = options.nodeTx ?? txSpending(fakeTxid(0x50), 0, verifyingKey, options.pays);
   const intermediateRefundTx = createCurrentTimelockRefundTxs({
     nodeTx,
     sequence: 1900,
     receivingPublicKey: receivedPublicKey,
     network: "regtest",
   }).cpfpRefund.txBytes;
-  const digest = sendLeafSigningDigest(options.leafId, INBOUND_ID, secretCipher);
+  const digest = sendLeafSigningDigest(
+    options.leafId,
+    options.transferId ?? INBOUND_ID,
+    secretCipher,
+  );
   const signature = secp256k1.sign(digest, SSP_SECRET, { prehash: false, lowS: true });
   return create(TransferLeafSchema, {
     leaf: create(TreeNodeSchema, {
@@ -448,6 +455,7 @@ async function sspInboundLeaf(options: {
       status: "AVAILABLE",
       network: Network.REGTEST,
       treenodeStatus: TreeNodeStatus.AVAILABLE,
+      ...(options.parent === undefined ? {} : { parentNodeId: options.parent }),
     }),
     secretCipher,
     sig: { case: "signature" as const, value: signature },
@@ -668,6 +676,222 @@ describe("H-02: swap claims from coordinator-only data", () => {
       }),
     ).rejects.toThrow(/claimed 0 sats but expected 100000/);
     expect(sspRequests).toHaveLength(1);
+    signer.dispose();
+  }, 60_000);
+});
+
+const CLAIM_TRANSFER_ID = "01989abc-def0-7000-8000-00000000000c";
+
+/**
+ * The leaf a real `claim_transfer` response carries for this fixture: same node id and nodeTx as
+ * the pending row, but finalized under the receiver's `LEAF{leafId}` key and parented at "mid".
+ */
+function claimedLeafProto(newKey: Uint8Array, identity: Uint8Array, orphan = false): TreeNode {
+  return create(TreeNodeSchema, {
+    id: LEAF_ID,
+    treeId: `tree-${LEAF_ID}`,
+    value: 1000n,
+    nodeTx: LEAF_NODE_TX,
+    refundTx: createCurrentTimelockRefundTxs({
+      nodeTx: LEAF_NODE_TX,
+      sequence: 1900,
+      receivingPublicKey: newKey,
+      network: "regtest",
+    }).cpfpRefund.txBytes,
+    vout: 0,
+    verifyingPublicKey: secp256k1.Point.fromBytes(newKey)
+      .add(secp256k1.Point.fromBytes(SHARE_PUB))
+      .toBytes(true),
+    ownerIdentityPublicKey: identity,
+    ownerSigningPublicKey: newKey,
+    signingKeyshare: create(SigningKeyshareSchema, {
+      ownerIdentifiers: OPERATORS.map((op) => op.identifier),
+      threshold: THRESHOLD,
+      publicKey: SHARE_PUB,
+      publicShares: {},
+    }),
+    status: "AVAILABLE",
+    network: Network.REGTEST,
+    treenodeStatus: TreeNodeStatus.AVAILABLE,
+    ...(orphan ? {} : { parentNodeId: "mid" }),
+  });
+}
+
+/**
+ * A client whose per-operator `query_nodes` serves `mid`/`root` plus whatever `leafFor` hands back
+ * for LEAF_ID — `includeParents` is honored so a nodeIds query sees each node's ancestors — and
+ * whose coordinator additionally answers the claim ceremony (`get_signing_commitments` +
+ * `claim_transfer` returning `claimed`).
+ */
+function makeClaimClient(
+  store: ReturnType<typeof createMemorySparkStore>,
+  signer: SparkSigner,
+  leafFor: (identifier: string) => TreeNode | undefined,
+  claimed: TransferLeaf,
+) {
+  const allFor = (identifier: string): Array<[string, TreeNode]> => {
+    const leaf = leafFor(identifier);
+    const out: Array<[string, TreeNode]> = [
+      ["mid", MID],
+      ["root", ROOT],
+    ];
+    if (leaf !== undefined) {
+      out.push([LEAF_ID, leaf]);
+    }
+    return out;
+  };
+  const sparkImplFor = (identifier: string) => ({
+    query_nodes: (req: QueryNodesRequest) => {
+      const all = new Map(allFor(identifier));
+      if (req.source.case !== "nodeIds") {
+        return create(QueryNodesResponseSchema, {
+          nodes: Object.fromEntries(all),
+          offset: -1n,
+        });
+      }
+      const served = new Map<string, TreeNode>();
+      const add = (id: string): void => {
+        const node = all.get(id);
+        if (node === undefined || served.has(id)) {
+          return;
+        }
+        served.set(id, node);
+        if (req.includeParents && node.parentNodeId !== undefined && node.parentNodeId !== "") {
+          add(node.parentNodeId);
+        }
+      };
+      for (const id of req.source.value.nodeIds) {
+        add(id);
+      }
+      return create(QueryNodesResponseSchema, {
+        nodes: Object.fromEntries(served),
+        offset: 0n,
+      });
+    },
+    get_signing_commitments: () =>
+      create(GetSigningCommitmentsResponseSchema, {
+        signingCommitments: commitmentGroup(3),
+      }),
+    claim_transfer: (req: { transferId: string }) =>
+      create(ClaimTransferResponseSchema, {
+        transfer: create(TransferSchema, {
+          id: req.transferId,
+          status: TransferStatus.COMPLETED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          leaves: [claimed],
+        }),
+      }),
+  });
+  return createSparkClientWith(
+    {
+      network: "regtest",
+      signer,
+      fetch: async () => Promise.reject(new Error("unexpected fetch")),
+      random: (length) => new Uint8Array(length).fill(1),
+      sleep: async () => Promise.resolve(),
+      store,
+    },
+    {
+      transportFactory: (interceptors, operator) =>
+        createRouterTransport(
+          (router) => {
+            authn(router);
+            router.service(SparkService, sparkImplFor(operator.identifier));
+          },
+          { transport: { interceptors: [...interceptors] } },
+        ),
+    },
+  );
+}
+
+describe("H-01: caller rows on the claim path get no exemption", () => {
+  async function claimFixture(state: { coordinatorOrphans?: boolean; dropOn?: string }) {
+    const crypto = await loadWasmBackend();
+    const signer = createSparkSigner({
+      crypto,
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: (length) => randomBytes(length),
+    });
+    const identity = await signer.identityPublicKey();
+    const [newKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const inbound = await sspInboundLeaf({
+      leafId: LEAF_ID,
+      label: 1000n,
+      pays: 1000n,
+      identity,
+      transferId: CLAIM_TRANSFER_ID,
+      nodeTx: LEAF_NODE_TX,
+      parent: "mid",
+    });
+    const claimedLeaf = claimedLeafProto(required(newKey, "leaf key"), identity);
+    const claimed = create(TransferLeafSchema, { ...inbound, leaf: claimedLeaf });
+    const pending = create(TransferSchema, {
+      id: CLAIM_TRANSFER_ID,
+      senderIdentityPublicKey: SSP_IDENTITY,
+      receiverIdentityPublicKey: identity,
+      status: TransferStatus.SENDER_KEY_TWEAKED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      totalValue: 1000n,
+      leaves: [inbound],
+    });
+    const store = createMemorySparkStore();
+    const client = makeClaimClient(
+      store,
+      signer,
+      (identifier) => {
+        if (identifier === state.dropOn) {
+          return undefined;
+        }
+        if (identifier === COORDINATOR && state.coordinatorOrphans === true) {
+          return claimedLeafProto(required(newKey, "leaf key"), identity, true);
+        }
+        return claimedLeaf;
+      },
+      claimed,
+    );
+    return { client, store, signer, pending, newKey: required(newKey, "leaf key"), identity };
+  }
+
+  test("a claimed leaf whose coordinator row blanks parentNodeId stores no chain; next sync does", async () => {
+    const state = { coordinatorOrphans: true };
+    const { client, store, signer, pending } = await claimFixture(state);
+
+    // The claim itself succeeds — the rejection only withholds the unverified chain.
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+    await expect(store.exitChains()).resolves.toStrictEqual([]);
+
+    // Once the coordinator's row agrees with the other operators the next sync stores the chain.
+    state.coordinatorOrphans = false;
+    const leaves = await client.leaves();
+    expect(leaves.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+    const stored = await store.exitChains();
+    expect(
+      stored.find((chain) => chain.leafId === LEAF_ID)?.nodes.map((n) => n.nodeId),
+    ).toStrictEqual(["root", "mid", LEAF_ID]);
+    signer.dispose();
+  }, 60_000);
+
+  test("a claimed leaf one operator does not index yet is rejected; the claim still returns it", async () => {
+    const lagging = OPERATORS[2]!.identifier;
+    const state: { dropOn?: string } = { dropOn: lagging };
+    const { client, store, signer, pending } = await claimFixture(state);
+
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+    await expect(store.exitChains()).resolves.toStrictEqual([]);
+
+    // The operator catches up; the following sync stores the chain.
+    delete state.dropOn;
+    const leaves = await client.leaves();
+    expect(leaves.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+    const stored = await store.exitChains();
+    expect(
+      stored.find((chain) => chain.leafId === LEAF_ID)?.nodes.map((n) => n.nodeId),
+    ).toStrictEqual(["root", "mid", LEAF_ID]);
     signer.dispose();
   }, 60_000);
 });
