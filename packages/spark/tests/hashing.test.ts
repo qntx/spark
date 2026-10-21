@@ -18,6 +18,7 @@ import {
   authnChallengeDigest,
   claimPackageDigest,
   hashFinalTokenTransaction,
+  hashOperatorSpecificTokenTransactionSignablePayload,
   hashPartialTokenTransaction,
   hashProto,
   hashSparkInvoice,
@@ -531,4 +532,41 @@ const partialTxCases = loadJsonFile(
 test.each(partialTxCases.testCases)("upstream partial_token_transaction_hash $name", (c) => {
   const msg = fromJson(PartialTokenTransactionSchema, c.partialTokenTransaction);
   expect(bytesToHex(hashPartialTokenTransaction(msg))).toBe(c.expectedHash);
+});
+
+test("hashOperatorSpecificTokenTransactionSignablePayload composes per spec", () => {
+  const finalHash = new Uint8Array(32).fill(0x11);
+  const operatorKey = new Uint8Array(33).fill(0x02);
+  expect(
+    bytesToHex(
+      hashOperatorSpecificTokenTransactionSignablePayload({
+        finalTokenTransactionHash: finalHash,
+        operatorIdentityPublicKey: operatorKey,
+      }),
+    ),
+  ).toBe(bytesToHex(sha256(concatBytes(sha256(finalHash), sha256(operatorKey)))));
+  expect(
+    bytesToHex(
+      hashOperatorSpecificTokenTransactionSignablePayload({
+        operatorIdentityPublicKey: operatorKey,
+      }),
+    ),
+  ).toBe(bytesToHex(sha256(sha256(operatorKey))));
+});
+
+test("hashOperatorSpecificTokenTransactionSignablePayload validates its fields", () => {
+  const operatorKey = new Uint8Array(33).fill(0x02);
+  expect(() =>
+    hashOperatorSpecificTokenTransactionSignablePayload({
+      finalTokenTransactionHash: new Uint8Array(16),
+      operatorIdentityPublicKey: operatorKey,
+    }),
+  ).toThrow(SparkInputError);
+  expect(() =>
+    hashOperatorSpecificTokenTransactionSignablePayload({
+      finalTokenTransactionHash: new Uint8Array(32),
+      operatorIdentityPublicKey: new Uint8Array(),
+    }),
+  ).toThrow(SparkInputError);
+  expect(() => hashOperatorSpecificTokenTransactionSignablePayload({})).toThrow(SparkInputError);
 });

@@ -1,6 +1,6 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient, createRouterTransport } from "@connectrpc/connect";
-import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { base64 } from "@scure/base";
@@ -767,6 +767,7 @@ describe("transfers.claim", () => {
     leafOwnerKey?: Uint8Array;
     corruptSig?: boolean;
     typedSig?: boolean;
+    schnorrSig?: boolean;
     legacySignature?: "der" | "malformed";
     transferReceiverId?: string;
     transferId?: string;
@@ -814,7 +815,18 @@ describe("transfers.claim", () => {
               signature: secp256k1.Signature.fromBytes(signature, "compact").toBytes("der"),
             }),
           }
-        : { case: "signature" as const, value: legacyValue };
+        : options.schnorrSig === true
+          ? {
+              case: "typedSignature" as const,
+              value: create(SignatureSchema, {
+                scheme: SignatureScheme.SCHNORR,
+                signature: schnorr.sign(
+                  options.corruptSig === true ? sha256(digest) : digest,
+                  SENDER_SECRET,
+                ),
+              }),
+            }
+          : { case: "signature" as const, value: legacyValue };
     return create(TransferLeafSchema, {
       leaf: create(TreeNodeSchema, {
         id: leafId,
@@ -852,6 +864,7 @@ describe("transfers.claim", () => {
     leafOwnerKey?: Uint8Array;
     corruptSig?: boolean;
     typedSig?: boolean;
+    schnorrSig?: boolean;
     legacySignature?: "der" | "malformed";
     status?: TransferStatus;
     receiverIdentityPublicKey?: Uint8Array;
@@ -870,6 +883,7 @@ describe("transfers.claim", () => {
       ...(options.leafOwnerKey === undefined ? {} : { leafOwnerKey: options.leafOwnerKey }),
       ...(options.corruptSig === undefined ? {} : { corruptSig: options.corruptSig }),
       ...(options.typedSig === undefined ? {} : { typedSig: options.typedSig }),
+      ...(options.schnorrSig === undefined ? {} : { schnorrSig: options.schnorrSig }),
       ...(options.legacySignature === undefined
         ? {}
         : { legacySignature: options.legacySignature }),
@@ -1089,6 +1103,133 @@ describe("transfers.claim", () => {
     });
     const claimed = await client.transfers.claim(mapTransfer(pending));
     expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("accepts a scheme-tagged SCHNORR sender signature", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      schnorrSig: true,
+    });
+    const served: TreeNode[] = [];
+    const client = makeClient(receiver, {
+      query_nodes: nodesQuery(() => served),
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      claim_transfer: async (req) => {
+        const leaves = await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]);
+        served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+        return create(ClaimTransferResponseSchema, {
+          transfer: create(TransferSchema, {
+            id: req.transferId,
+            status: TransferStatus.COMPLETED,
+            type: TransferType.TRANSFER,
+            network: Network.REGTEST,
+            leaves,
+          }),
+        });
+      },
+    });
+    const claimed = await client.transfers.claim(mapTransfer(pending));
+    expect(claimed[0]?.id).toBe(LEAF_ID);
+    receiver.dispose();
+  });
+
+  test("rejects a corrupt SCHNORR sender signature", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      schnorrSig: true,
+      corruptSig: true,
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+      "sender signature verification failed",
+    );
+    receiver.dispose();
+  });
+
+  test("throws when claim_transfer returns no transfer", async () => {
+    const receiver = await testSigner();
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+    });
+    const client = makeClient(receiver, {
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      claim_transfer: () => create(ClaimTransferResponseSchema, {}),
+    });
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+      "coordinator returned no transfer",
+    );
+    receiver.dispose();
+  });
+
+  test("rejects a multi-receiver transfer the caller is not a receiver of", async () => {
+    const receiver = await testSigner();
+    const otherIdentity = secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true);
+    const thirdIdentity = secp256k1.getPublicKey(new Uint8Array(32).fill(77), true);
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      receiverIdentityPublicKey: otherIdentity,
+      transferReceiverId: "r-other",
+      receivers: [
+        { id: "r-other", identityPublicKey: otherIdentity },
+        { id: "r-third", identityPublicKey: thirdIdentity },
+      ],
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+      "not a receiver of this multi-receiver transfer",
+    );
+    receiver.dispose();
+  });
+
+  test("rejects a multi-receiver transfer whose leaves are not assigned to our edge", async () => {
+    const receiver = await testSigner();
+    const self = await receiver.identityPublicKey();
+    const otherIdentity = secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true);
+    const pending = await pendingTransfer({
+      receiverSigner: receiver,
+      receivedSecret: new Uint8Array(32).fill(88),
+      transferReceiverId: "r-other",
+      receivers: [
+        { id: "r-self", identityPublicKey: self },
+        { id: "r-other", identityPublicKey: otherIdentity },
+      ],
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+      "no leaves assigned to this receiver edge",
+    );
+    receiver.dispose();
+  });
+
+  test("rejects a transfer with no leaves", async () => {
+    const receiver = await testSigner();
+    const self = await receiver.identityPublicKey();
+    const empty = create(TransferSchema, {
+      id: TRANSFER_ID,
+      senderIdentityPublicKey: secp256k1.getPublicKey(SENDER_SECRET, true),
+      receiverIdentityPublicKey: self,
+      status: TransferStatus.SENDER_KEY_TWEAKED,
+      type: TransferType.TRANSFER,
+      network: Network.REGTEST,
+      leaves: [],
+    });
+    const client = makeClient(receiver, {});
+    await expect(client.transfers.claim(mapTransfer(empty))).rejects.toThrow(
+      "transfer has no leaves",
+    );
     receiver.dispose();
   });
 
@@ -1813,6 +1954,79 @@ const SWAP_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000bb";
 const CHANGE_LEAF_ID = "01989abc-def0-7abc-89ab-0000000000cc";
 
 describe("transfers.swap", () => {
+  test("rejects empty leaves, empty targets and targets exceeding the inputs", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const { ssp } = fakeSsp();
+    const spark = swapSpark({});
+    const deps = {
+      spark,
+      signer,
+      network: "regtest" as const,
+      operators: OPERATORS,
+      threshold: THRESHOLD,
+      ssp,
+      sspIdentityPublicKey: SSP_IDENTITY,
+      transferId: TRANSFER_ID,
+      random: fixedRandom(),
+    };
+    await expect(swapLeaves({ ...deps, leaves: [], targetAmountsSats: [1] })).rejects.toThrow(
+      "leaves must not be empty",
+    );
+    await expect(swapLeaves({ ...deps, leaves: [leaf], targetAmountsSats: [] })).rejects.toThrow(
+      "targetAmountsSats must not be empty",
+    );
+    await expect(
+      swapLeaves({ ...deps, leaves: [leaf], targetAmountsSats: [0, -5] }),
+    ).rejects.toThrow("targetAmountsSats must be positive safe integers");
+    await expect(
+      swapLeaves({ ...deps, leaves: [leaf], targetAmountsSats: [100_001] }),
+    ).rejects.toThrow("exceed leaves value");
+    signer.dispose();
+  });
+
+  test("throws when the swap response carries no transfer", async () => {
+    const signer = await testSigner();
+    const identity = await signer.identityPublicKey();
+    const [leafKey] = await signer.publicKeys([{ type: "leaf", leafId: LEAF_ID }]);
+    const { leaf } = fabricateLeaf({
+      leafId: LEAF_ID,
+      signingPublicKey: required(leafKey, "leaf public key"),
+      ownerIdentityPublicKey: identity,
+    });
+    const spark = swapSpark({
+      get_signing_commitments: () =>
+        create(GetSigningCommitmentsResponseSchema, {
+          signingCommitments: commitmentGroup(3),
+        }),
+      initiate_swap_primary_transfer: () =>
+        create(InitiateSwapPrimaryTransferResponseSchema, { signingResults: [] }),
+    });
+    const { ssp } = fakeSsp();
+    await expect(
+      swapLeaves({
+        spark,
+        signer,
+        network: "regtest",
+        operators: OPERATORS,
+        threshold: THRESHOLD,
+        ssp,
+        sspIdentityPublicKey: SSP_IDENTITY,
+        transferId: TRANSFER_ID,
+        leaves: [leaf],
+        targetAmountsSats: [100_000],
+        random: fixedRandom(),
+      }),
+    ).rejects.toThrow("coordinator returned no transfer");
+    signer.dispose();
+  });
+
   /** One inbound swap leaf: sealed to `receiverIdentity`, sender-signed by the SSP key. */
   async function sspInboundLeaf(leafId: string, valueSats: bigint, receiverIdentity: Uint8Array) {
     const receivedSecret = sha256(new TextEncoder().encode(leafId));
