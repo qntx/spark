@@ -179,14 +179,30 @@ export function createClientContext(
     const rejectedIds = new Set(await storeChainsFor(spendable));
     const usable = spendable.filter((leaf) => !rejectedIds.has(leaf.id));
     const chains = await store.exitChains();
-    // A stored chain is the wallet's offline-exit data, so deleting one needs a stronger signal
-    // than the coordinator dropping the leaf: only an id no operator reported at all, or one the
-    // coordinator serves well-formed that the signer cannot prove it owns (transferred away).
-    // A coordinator-side omission — even while other operators still report the leaf — must not
-    // erase the chain the wallet would need to exit around a censoring coordinator.
+    // A stored chain is the wallet's offline-exit data, so deleting one takes more than the
+    // coordinator's word. Drop a chain only when no operator reported the id at all in this
+    // sync — mapped or unmappable — or when the coordinator's row is not owned AND every other
+    // operator serves a row agreeing with it: the operators then collectively attest the leaf
+    // is no longer ours, as when a transferred-away leaf still shows up under our identity. A
+    // coordinator-side omission, or a coordinator-tampered row another operator contradicts,
+    // must not erase the chain the wallet would need to exit around a hostile coordinator.
+    const reportedById = new Map(reported.map((leaf) => [leaf.id, leaf]));
+    const attestedNotOwnedIds = new Set<string>();
+    for (const leafId of notOwnedIds) {
+      const coordinatorLeaf = reportedById.get(leafId);
+      if (
+        coordinatorLeaf !== undefined &&
+        operatorMaps.every((byId) => {
+          const operatorLeaf = byId.get(leafId);
+          return operatorLeaf !== undefined && !operatorsDisagree(coordinatorLeaf, operatorLeaf);
+        })
+      ) {
+        attestedNotOwnedIds.add(leafId);
+      }
+    }
     const stale = chains
       .map((chain) => chain.leafId)
-      .filter((leafId) => !reportedIds.has(leafId) || notOwnedIds.has(leafId));
+      .filter((leafId) => !reportedIds.has(leafId) || attestedNotOwnedIds.has(leafId));
     if (stale.length > 0) {
       await store.deleteExitChains(stale);
     }
