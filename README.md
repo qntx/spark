@@ -7,9 +7,10 @@ Bitcoin L2 protocol: [`@qntx/spark`](https://www.npmjs.com/package/@qntx/spark) 
 `packages/spark`) with cryptographic primitives in Rust (`crates/spark-crypto`) behind a
 versioned C ABI (`crates/spark-ffi`).
 
-Status: **pre-release**; the protocol client is under development. At this stage the
-package exports the error types, the `SparkCrypto` backend interface (`./crypto`), and the
-`SparkNetwork` type (`./signer`).
+Status: **pre-release**. `@qntx/spark` exports the full platform-neutral client
+(`createSparkClient`), invoices, deposits, transfers, Lightning, tokens, exits and the LNURL
+server library, plus the `SparkCrypto` backend interface (`./crypto`) and signer (`./signer`).
+See the [package README](packages/spark/README.md) for the security model.
 
 Changes are tracked in [CHANGELOG.md](CHANGELOG.md); contributor invariants and the local
 gate live in [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).

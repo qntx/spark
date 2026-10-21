@@ -91,6 +91,10 @@ export type SparkClient = {
      * Once the transfer commits (sender key tweaked) it stays claimable indefinitely: the sender
      * cannot cancel it and its expiry does not return it — the pre-claim refund already pays the
      * receiver's identity key.
+     *
+     * Leaf selection through the commit runs under the wallet's leaf lock, across leaf renewal and
+     * the signing-operator calls — the lock's hold time grows with the number of stale leaves
+     * renewed and each remote round trip (bounded by the RPC timeouts).
      */
     readonly send: (sendOptions: {
       readonly receiver: string | Uint8Array;
@@ -231,6 +235,8 @@ export type SparkClient = {
      * On a `transferId` retry the reported `feeSats` is derived as the committed transfer total
      * minus the amount passed in this call — pass the same invoice and `amountSats` as the first
      * attempt. The SSP send request's echoed invoice is still verified before continuing.
+     *
+     * The leaf lock is held across the SSP call — see `transfers.send` for what that covers.
      */
     readonly pay: (options: {
       readonly invoice: string;
@@ -335,6 +341,9 @@ export type SparkClient = {
      * `transferId` to retry a call whose response was lost — a committed exit resumes with the
      * committed leaves. Note the SSP request expires ~2 minutes after creation unless the transfer
      * commits: an uncommitted id is burned, retry with a fresh `transferId`.
+     *
+     * The leaf lock is held across the fee quote and the SSP request — see `transfers.send` for
+     * what that covers.
      */
     readonly cooperativeExit: (options: {
       readonly address: string;
