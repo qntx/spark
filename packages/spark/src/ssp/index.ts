@@ -4,6 +4,7 @@ import { base64 } from "@scure/base";
 import type { SparkNetwork } from "../core/network.ts";
 import { SESSION_EXPIRY_BUFFER_MS } from "../core/session.ts";
 import { serverErrorText } from "../core/text.ts";
+import { defaultSleep } from "../core/time.ts";
 import { SparkInputError, SparkRequestError } from "../errors/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 
@@ -1163,6 +1164,9 @@ function parseCoopExitResult(request: JsonObject, field: string): SspCoopExitRes
  */
 /** Whole-round-trip bound for every GraphQL POST to the SSP. */
 const SSP_REQUEST_TIMEOUT_MS = 60_000;
+/** Read-only queries retry transport/timeout failures this many times total; mutations never retry. */
+const SSP_READ_MAX_ATTEMPTS = 3;
+const SSP_READ_RETRY_BASE_MS = 1000;
 
 export function createSspClient(options: {
   readonly baseUrl: string;
@@ -1172,6 +1176,8 @@ export function createSspClient(options: {
   readonly now?: () => number;
   /** Whole-round-trip bound per GraphQL POST; defaults to {@link SSP_REQUEST_TIMEOUT_MS}. */
   readonly requestTimeoutMs?: number;
+  /** Backoff source for read-query retries; defaults to a setTimeout sleep. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }): SspClient {
   const now = options.now ?? (() => Date.now());
   const endpoint = `${options.baseUrl.replace(/\/+$/, "")}/${options.graphqlPath.replace(/^\/+/, "")}`;
@@ -1213,7 +1219,10 @@ export function createSspClient(options: {
             cause: error,
           });
         }
-        throw new SparkRequestError("ssp request failed", { cause: error });
+        throw new SparkRequestError("ssp request failed", {
+          code: "unavailable",
+          cause: error,
+        });
       }
       if (response.status === 401) {
         throw new SparkRequestError("ssp request unauthorized", {
@@ -1336,12 +1345,40 @@ export function createSspClient(options: {
     }
   }
 
+  const sleep = options.sleep ?? defaultSleep;
+  /**
+   * `authedPost` for read-only queries only. A dropped connection or a timed-out read is safe to
+   * repeat — a mutation is not, so mutations keep calling `authedPost` directly and surface the
+   * first transport failure to the caller's own recovery path (transfer id, inputOutputIds).
+   */
+  async function readPost(
+    operationName: string,
+    query: string,
+    variables: JsonObject,
+  ): Promise<JsonObject> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- retries are sequential by definition
+        return await authedPost(operationName, query, variables);
+      } catch (error) {
+        const retryable =
+          error instanceof SparkRequestError &&
+          (error.code === "unavailable" || error.code === "deadline_exceeded");
+        if (!retryable || attempt >= SSP_READ_MAX_ATTEMPTS) {
+          throw error;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- retries are sequential by definition
+        await sleep(SSP_READ_RETRY_BASE_MS * 2 ** (attempt - 1));
+      }
+    }
+  }
+
   return {
     async swapFeeEstimate(amountSats: number): Promise<number> {
       if (!Number.isSafeInteger(amountSats) || amountSats <= 0) {
         throw new SparkInputError("amount sats must be a positive integer");
       }
-      const data = await authedPost("LeavesSwapFeeEstimate", LEAVES_SWAP_FEE_ESTIMATE, {
+      const data = await readPost("LeavesSwapFeeEstimate", LEAVES_SWAP_FEE_ESTIMATE, {
         total_amount_sats: amountSats,
       });
       const output = asObject(data["leaves_swap_fee_estimate"], "leaves_swap_fee_estimate");
@@ -1437,7 +1474,7 @@ export function createSspClient(options: {
     },
 
     async lightningSendFeeEstimate(encodedInvoice: string, amountSats?: number): Promise<number> {
-      const data = await authedPost("LightningSendFeeEstimate", LIGHTNING_SEND_FEE_ESTIMATE, {
+      const data = await readPost("LightningSendFeeEstimate", LIGHTNING_SEND_FEE_ESTIMATE, {
         encoded_invoice: encodedInvoice,
         amount_sats: amountSats,
       });
@@ -1449,7 +1486,7 @@ export function createSspClient(options: {
     },
 
     async lightningSendRequest(id: string): Promise<SspLightningSendResult> {
-      const data = await authedPost("UserRequest", USER_REQUEST, { request_id: id });
+      const data = await readPost("UserRequest", USER_REQUEST, { request_id: id });
       const userRequest = data["user_request"];
       if (userRequest === undefined || userRequest === null) {
         throw unexpectedResponse("user_request", "is missing");
@@ -1462,7 +1499,7 @@ export function createSspClient(options: {
     },
 
     async lightningReceiveRequest(id: string): Promise<SspLightningReceiveResult> {
-      const data = await authedPost("UserRequest", USER_REQUEST, { request_id: id });
+      const data = await readPost("UserRequest", USER_REQUEST, { request_id: id });
       const userRequest = data["user_request"];
       if (userRequest === undefined || userRequest === null) {
         throw unexpectedResponse("user_request", "is missing");
@@ -1478,7 +1515,7 @@ export function createSspClient(options: {
       leafIds: ReadonlyArray<string>,
       address: string,
     ): Promise<SspCoopExitFeeQuote> {
-      const data = await authedPost("CoopExitFeeQuote", COOP_EXIT_FEE_QUOTE, {
+      const data = await readPost("CoopExitFeeQuote", COOP_EXIT_FEE_QUOTE, {
         leaf_external_ids: [...leafIds],
         withdrawal_address: address,
       });
@@ -1527,7 +1564,7 @@ export function createSspClient(options: {
     },
 
     async coopExitRequest(id: string): Promise<SspCoopExitStatus> {
-      const data = await authedPost("UserRequest", USER_REQUEST, { request_id: id });
+      const data = await readPost("UserRequest", USER_REQUEST, { request_id: id });
       const userRequest = data["user_request"];
       if (userRequest === undefined || userRequest === null) {
         throw unexpectedResponse("user_request", "is missing");
@@ -1544,7 +1581,7 @@ export function createSspClient(options: {
       outputIndex: number;
       network: SparkNetwork;
     }): Promise<SspStaticDepositQuote> {
-      const data = await authedPost("StaticDepositQuote", STATIC_DEPOSIT_QUOTE, {
+      const data = await readPost("StaticDepositQuote", STATIC_DEPOSIT_QUOTE, {
         transaction_id: request.transactionId,
         output_index: request.outputIndex,
         network: request.network === "mainnet" ? "MAINNET" : "REGTEST",

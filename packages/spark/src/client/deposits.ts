@@ -59,7 +59,11 @@ export async function claimInboundTransfer(
     let transfer: SparkTransfer | undefined;
     if (transferId === undefined) {
       // oxlint-disable-next-line no-await-in-loop -- bounded sequential polling
-      const pending = await queryPendingTransfers({ spark, identityPublicKey, network });
+      const { transfers: pending } = await queryPendingTransfers({
+        spark,
+        identityPublicKey,
+        network,
+      });
       // Without a reported id only the claim's credit amount binds the transfer: other SSP
       // transfers in flight must not be mistaken for this deposit's credit.
       const [oldest] = pending

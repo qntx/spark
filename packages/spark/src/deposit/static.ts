@@ -6,6 +6,7 @@ import { Address as BitcoinAddress, OutScript, Transaction } from "@scure/btc-si
 
 import { assertU32, u64ToSats } from "../core/assert.ts";
 import {
+  assertFeeRate,
   btcNetwork,
   dustLimit,
   estimateVbytes,
@@ -388,9 +389,7 @@ export async function refundStaticDeposit(
 ): Promise<StaticDepositRefund> {
   const { spark, signer, network } = options;
   checkUtxoRef(request.txid, request.vout);
-  if (!Number.isFinite(request.feeRateSatPerVbyte) || request.feeRateSatPerVbyte <= 0) {
-    throw new SparkInputError("refundStatic: feeRateSatPerVbyte must be a positive number");
-  }
+  assertFeeRate(request.feeRateSatPerVbyte);
   let destinationScript: Uint8Array;
   try {
     destinationScript = OutScript.encode(

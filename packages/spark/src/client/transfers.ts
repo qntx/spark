@@ -145,12 +145,14 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
   const { coordinatorConnection, signer, network } = context;
   const { spark } = coordinatorConnection;
   return {
-    pending: async () =>
-      queryPendingTransfers({
+    pending: async () => {
+      const pending = await queryPendingTransfers({
         spark,
         identityPublicKey: await signer.identityPublicKey(),
         network,
-      }),
+      });
+      return pending.transfers;
+    },
     list: async (listOptions) =>
       queryAllTransfers({
         spark,
@@ -190,8 +192,9 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
         network,
       });
       const leaves: SparkLeaf[] = [];
-      const failures: Array<{ transferId: string; error: unknown }> = [];
-      for (const transfer of pending) {
+      // Rows the coordinator returned but mapping rejected are reported, not fatal.
+      const failures: Array<{ transferId: string; error: unknown }> = [...pending.unmappable];
+      for (const transfer of pending.transfers) {
         if (!CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
           continue;
         }

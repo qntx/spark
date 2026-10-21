@@ -22,17 +22,30 @@ const PENDING_PAGE_SIZE = 100;
 const PENDING_MAX_PAGES = 1000;
 
 /**
+ * The result of {@link queryPendingTransfers}: the rows that mapped cleanly plus, isolated per row,
+ * the ones the coordinator returned but {@link mapTransfer} rejected. A malformed row must never
+ * throw over the whole page — that would let one poisoned transfer starve every valid transfer
+ * behind it.
+ */
+export type PendingTransfersQuery = {
+  readonly transfers: SparkTransfer[];
+  /** One entry per unmappable row, keyed by the row's raw transfer id. */
+  readonly unmappable: ReadonlyArray<{ readonly transferId: string; readonly error: unknown }>;
+};
+
+/**
  * `query_pending_transfers` — transfers awaiting this identity as receiver. Pages the whole set:
  * the SO caps a page at 100 and reports `-1` on the last page, so a full page must carry a strictly
- * advancing offset; the walk is bounded like `queryOwnerNodes`.
+ * advancing offset; the walk is bounded like `queryOwnerNodes`. Each row maps on its own.
  */
 export async function queryPendingTransfers(options: {
   readonly spark: Client<typeof SparkService>;
   readonly identityPublicKey: Uint8Array;
   readonly network: SparkNetwork;
   readonly call?: CallOptions;
-}): Promise<SparkTransfer[]> {
+}): Promise<PendingTransfersQuery> {
   const transfers: SparkTransfer[] = [];
+  const unmappable: Array<{ transferId: string; error: unknown }> = [];
   let offset = 0;
   for (let pageIndex = 0; pageIndex < PENDING_MAX_PAGES; pageIndex++) {
     // oxlint-disable-next-line no-await-in-loop -- pages are sequential by definition
@@ -48,14 +61,19 @@ export async function queryPendingTransfers(options: {
       },
       options.call,
     );
-    const page = response.transfers;
-    transfers.push(...page.map(mapTransfer));
+    for (const row of response.transfers) {
+      try {
+        transfers.push(mapTransfer(row));
+      } catch (error) {
+        unmappable.push({ transferId: row.id, error });
+      }
+    }
     // The SO reports the end explicitly: offset is -1 unless the page was full, so a short page
     // is not the stop condition — if the SO's cap ever dropped below PENDING_PAGE_SIZE a length
     // test would silently drop pending transfers.
     const nextOffset = Number(response.offset);
     if (nextOffset < 0) {
-      return transfers;
+      return { transfers, unmappable };
     }
     if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
       throw new SparkError("query pending transfers: coordinator returned a non-advancing offset");

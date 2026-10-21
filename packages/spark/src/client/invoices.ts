@@ -118,6 +118,7 @@ export function createInvoices(context: ClientContext): SparkClient["invoices"] 
             },
           ],
           sparkInvoice: invoice,
+          ...(payOptions?.transferId === undefined ? {} : { transferId: payOptions.transferId }),
         });
       }
       if (payment?.type === "tokens") {
@@ -129,6 +130,9 @@ export function createInvoices(context: ClientContext): SparkClient["invoices"] 
           amount: tokenAmount(payment.amount, payOptions?.amount),
           receiver: parsed.receiverIdentityPublicKey,
           invoiceAttachments: [invoice],
+          ...(payOptions?.inputOutputIds === undefined
+            ? {}
+            : { inputOutputIds: payOptions.inputOutputIds }),
         });
         return transactionHash;
       }
