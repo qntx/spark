@@ -32,10 +32,12 @@ response may have committed; the same id with different terms fails rather than 
 Offline receive: once a transfer commits, the sender cannot cancel it and its expiry does not
 return it — `transfers.claim`/`claimPending` can pick it up at any later time.
 
-Unilateral exit: each pre-signed transaction must confirm within 50 blocks of becoming
-broadcastable — keep every exit package confirming promptly so the SO watchtower cannot cut the
-path off with a direct transaction; `withdrawals.watchtowerExitedLeaves`/`recoverWatchtowerExit`
-recover leaves the watchtower already cut off, and `sweepRefund` sweeps a published refund.
+Unilateral exit: each pre-signed transaction carries a hard deadline — once its parent confirms
+and its relative timelock passes, it must confirm within 50 blocks; otherwise the operators'
+watchtower may publish a self-fee variant instead. For intermediate nodes this strands
+descendants as WATCHTOWER_EXITED (recover with `recoverWatchtowerExit` while the SO is online);
+for refunds the watchtower publishes `direct_from_cpfp_refund_tx`, which pays the leaf key
+(sweep with `sweepRefund`). Keep each exit package confirming promptly.
 
 LNURL server (`apps/lnurl-server`): put per-IP rate limiting in front of the endpoints —
 invoice creation is unauthenticated. Zap receipt relays are payer-controlled URLs that can
