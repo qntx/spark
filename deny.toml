@@ -20,7 +20,7 @@ yanked  = "deny"
 ignore  = []
 
 [licenses]
-allow                = ["MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "BSL-1.0", "ISC", "Unicode-3.0", "Unicode-DFS-2016", "Zlib", "CC0-1.0"]
+allow                = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.93
 exceptions           = []
 
@@ -37,4 +37,4 @@ skip-tree         = []
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
-allow-git        = ["https://github.com/lightsparkdev/frost", "https://github.com/buildonspark/spark"]
+allow-git        = ["https://github.com/lightsparkdev/frost"]
