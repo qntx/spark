@@ -21,6 +21,8 @@ export type LnurlServerConfig = {
   readonly maxPendingInvoicesPerUser: number;
   /** Pending-invoice quota across the whole server. */
   readonly maxPendingInvoices: number;
+  /** Registered-name quota across the whole server — a storage bound, not abuse protection. */
+  readonly maxUsers: number;
   /** Invoices status-checked per settle round, least-recently-checked first. */
   readonly settleBatch: number;
   /** Expired invoices and stale zap receipts are pruned every N settle rounds. */
@@ -95,6 +97,7 @@ export function loadConfig(env: Record<string, string | undefined>): LnurlServer
     invoiceExpirySecs: intOption(env, "LNURL_INVOICE_EXPIRY_SECS", 3600, 1),
     maxPendingInvoicesPerUser: intOption(env, "LNURL_MAX_PENDING_INVOICES_PER_USER", 100, 1),
     maxPendingInvoices: intOption(env, "LNURL_MAX_PENDING_INVOICES", 10_000, 1),
+    maxUsers: intOption(env, "LNURL_MAX_USERS", 100_000, 1),
     settleBatch: intOption(env, "LNURL_SETTLE_BATCH", 200, 1),
     pruneEveryRounds: intOption(env, "LNURL_PRUNE_EVERY_ROUNDS", 720, 1),
     settledRetentionMs: intOption(env, "LNURL_SETTLED_RETENTION_MS", 2_592_000_000, 0),

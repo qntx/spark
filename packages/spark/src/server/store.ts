@@ -38,6 +38,8 @@ export type LightningAddressInvoice = {
 export type LightningAddressStore = {
   readonly userByName: (name: string) => Promise<LightningAddressUser | undefined>;
   readonly userByPublicKey: (pubkeyHex: string) => Promise<LightningAddressUser | undefined>;
+  /** Registered name count — one row per name, and each pubkey holds at most one. */
+  readonly countUsers: () => Promise<number>;
   /**
    * Registers `user.name` for `user.pubkeyHex`. Returns `false` when another pubkey already holds
    * the name; otherwise removes the pubkey's previous name and stores the record.
@@ -94,6 +96,10 @@ export function createMemoryLightningAddressStore(
     userByPublicKey: async (pubkeyHex) => {
       await Promise.resolve();
       return byPubkey.get(pubkeyHex);
+    },
+    countUsers: async () => {
+      await Promise.resolve();
+      return byName.size;
     },
     putUser: async (user) => {
       await Promise.resolve();

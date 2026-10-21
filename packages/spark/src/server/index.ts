@@ -41,7 +41,11 @@ export type LightningAddressResult = {
 export type LightningAddressZapConfig = {
   /** The receipt signer's 32-byte x-only public key, lowercase hex — the `nostrPubkey` payers see. */
   readonly receiptPublicKey: string;
-  /** Validates a raw zap-request event JSON for `amountMsat`; throwing rejects the invoice. */
+  /**
+   * Validates a raw zap-request event JSON for `amountMsat`; throwing rejects the invoice. The
+   * registered user record holds no nostr key, so the request's `p` tag (the nostr pubkey the
+   * receipt attributes the zap to) cannot be bound to the payee — same behavior as Breez.
+   */
   readonly validateRequest: (json: string, amountMsat: number) => void;
 };
 
@@ -85,6 +89,7 @@ const SETTLE_CONCURRENCY = 8;
 const DEFAULT_INVOICE_EXPIRY_SECS = 3600;
 const DEFAULT_MAX_PENDING_PER_USER = 100;
 const DEFAULT_MAX_PENDING = 10_000;
+const DEFAULT_MAX_USERS = 100_000;
 const DEFAULT_SETTLE_BATCH = 200;
 
 function positiveInt(value: number | undefined, fallback: number, name: string): number {
@@ -168,6 +173,13 @@ export function createLightningAddressServer(options: {
   /** Pending invoices the whole server holds; default 10_000. */
   readonly maxPendingInvoices?: number;
   /**
+   * Registered names the whole server holds; default 100_000. A pubkey re-registering a new name is
+   * never blocked by the cap. This is a storage bound, not abuse protection: registration needs a
+   * valid signature but pubkeys are free to generate — put per-IP rate limiting on the register
+   * route at the reverse proxy.
+   */
+  readonly maxUsers?: number;
+  /**
    * Invoices status-checked per `settlePending` round, least-recently-checked first so a backlog
    * rotates fairly instead of starving the tail. Default {@link DEFAULT_SETTLE_BATCH}.
    */
@@ -210,6 +222,7 @@ export function createLightningAddressServer(options: {
     DEFAULT_MAX_PENDING,
     "maxPendingInvoices",
   );
+  const maxUsers = positiveInt(options.maxUsers, DEFAULT_MAX_USERS, "maxUsers");
   const settleBatch = positiveInt(options.settleBatch, DEFAULT_SETTLE_BATCH, "settleBatch");
   const now = options.now ?? (() => Date.now());
   const nowSecs = (): number => Math.floor(now() / 1000);
@@ -240,8 +253,17 @@ export function createLightningAddressServer(options: {
     if (!claimed) {
       return result(409, "signature has already been used");
     }
-    if (user !== undefined && !(await store.putUser(user))) {
-      return result(409, "name already taken");
+    if (user !== undefined) {
+      // Soft quota: a re-registering pubkey replaces its name and never grows the table.
+      if (
+        (await store.userByPublicKey(user.pubkeyHex)) === undefined &&
+        (await store.countUsers()) >= maxUsers
+      ) {
+        return result(409, "registered user limit reached");
+      }
+      if (!(await store.putUser(user))) {
+        return result(409, "name already taken");
+      }
     }
     return undefined;
   }

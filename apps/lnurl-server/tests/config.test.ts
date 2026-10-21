@@ -15,6 +15,7 @@ describe("loadConfig", () => {
     expect(config.invoiceExpirySecs).toBe(3600);
     expect(config.maxPendingInvoicesPerUser).toBe(100);
     expect(config.maxPendingInvoices).toBe(10_000);
+    expect(config.maxUsers).toBe(100_000);
     expect(config.settleBatch).toBe(200);
     expect(config.pruneEveryRounds).toBe(720);
     expect(config.settledRetentionMs).toBe(2_592_000_000);
@@ -27,6 +28,7 @@ describe("loadConfig", () => {
       LNURL_INVOICE_EXPIRY_SECS: "600",
       LNURL_MAX_PENDING_INVOICES_PER_USER: "5",
       LNURL_MAX_PENDING_INVOICES: "500",
+      LNURL_MAX_USERS: "42",
       LNURL_SETTLE_BATCH: "25",
       LNURL_PRUNE_EVERY_ROUNDS: "12",
       LNURL_SETTLED_RETENTION_MS: "1000",
@@ -35,6 +37,7 @@ describe("loadConfig", () => {
     expect(config.invoiceExpirySecs).toBe(600);
     expect(config.maxPendingInvoicesPerUser).toBe(5);
     expect(config.maxPendingInvoices).toBe(500);
+    expect(config.maxUsers).toBe(42);
     expect(config.settleBatch).toBe(25);
     expect(config.pruneEveryRounds).toBe(12);
     expect(config.settledRetentionMs).toBe(1000);
