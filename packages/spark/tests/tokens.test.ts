@@ -1079,6 +1079,21 @@ describe("transferWithInputIds", () => {
       }),
     ).rejects.toThrow(/different token identifier/);
   });
+
+  test("rejects an invalid amount like the selection path does", async () => {
+    const { client } = retryClient({
+      rows: creators,
+      broadcast: () => {
+        throw new Error("unreachable");
+      },
+    });
+    await expect(
+      transferWithInputIds({ token: client, ...retryOptions, amount: 0n }),
+    ).rejects.toThrow(/greater than 0/);
+    await expect(
+      transferWithInputIds({ token: client, ...retryOptions, amount: 1n << 128n }),
+    ).rejects.toThrow(/exceeds uint128/);
+  });
 });
 
 describe("client.tokens", () => {

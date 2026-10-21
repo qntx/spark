@@ -800,6 +800,7 @@ export async function transferWithInputIds(options: {
     available += input.amount;
   }
   const amount = options.amount ?? available;
+  assertTokenAmount(amount);
   const partial = buildTransferPartial({
     selectedOutputs: resolved,
     receiverPublicKey: options.receiverPublicKey,
