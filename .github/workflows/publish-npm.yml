@@ -24,10 +24,19 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Release builds (tag pushes) disable the shared rust cache — it is
+  # populated by untrusted PR jobs and could smuggle code into published
+  # binaries — and get a build-provenance attestation per artifact. Dry-run
+  # calls keep the cache.
   native:
     uses: ./.github/workflows/native.yml
+    with:
+      release: ${{ github.event_name == 'push' }}
     permissions:
       contents: read
+      # Needed by the release-only attestation steps in native.yml.
+      id-token: write
+      attestations: write
 
   # On tag pushes, fails unless every package version equals the tag and the
   # tagged commit is an ancestor of origin/main. The called publish-npm
