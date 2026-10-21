@@ -54,6 +54,7 @@ import {
   GetUtxosForAddressResponseSchema,
   InitiateStaticDepositUtxoRefundResponseSchema,
   Network,
+  QueryNodesResponseSchema,
   QueryTransfersResponseSchema,
   RequestedSigningCommitmentsSchema,
   SigningKeyshareSchema,
@@ -71,8 +72,10 @@ import type {
   ClaimTransferRequest,
   GenerateStaticDepositAddressRequest,
   InitiateStaticDepositUtxoRefundRequest,
+  QueryNodesRequest,
   Transfer,
   TransferLeaf,
+  TreeNode,
 } from "../src/proto/gen/spark_pb.ts";
 import { ProtectedChallengeSchema as SspProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
@@ -259,6 +262,7 @@ type SparkImpl = Partial<{
   get_signing_commitments: (req: unknown) => unknown;
   query_transfers_by_id: (req: unknown) => unknown;
   query_pending_transfers: (req: unknown) => unknown;
+  query_nodes: (req: unknown) => unknown;
   claim_transfer: (req: ClaimTransferRequest) => unknown;
 }>;
 
@@ -267,6 +271,21 @@ function fakeSpark(impl: SparkImpl) {
     router.service(SparkService, impl as never);
   });
   return createClient(SparkService, transport);
+}
+
+/** `query_nodes` fake over `served()`: nodeIds lookups match by id, anything else returns all. */
+function nodesQuery(served: () => ReadonlyArray<TreeNode>) {
+  return (req: unknown) => {
+    const request = req as QueryNodesRequest;
+    const all = served();
+    const ids =
+      request.source.case === "nodeIds" ? new Set(request.source.value.nodeIds) : undefined;
+    const shown = ids === undefined ? [...all] : all.filter((node) => ids.has(node.id));
+    return create(QueryNodesResponseSchema, {
+      nodes: Object.fromEntries(shown.map((node) => [node.id, node])),
+      offset: -1n,
+    });
+  };
 }
 
 function coordinator(signer: SparkSigner, impl: SparkImpl): DepositCoordinator {
@@ -1629,17 +1648,19 @@ describe("deposits.claimStatic via the client", () => {
     const depositTx = txPaying(script, UTXO_SATS);
     const txid = txId(depositTx);
     const sspRequests: Array<{ operationName: string; variables: Record<string, unknown> }> = [];
+    const claimed = await claimedLeaf(signer, required(pending.leaves[0], "leaf"));
     let claimReq: ClaimTransferRequest | undefined;
     const { client, store } = makeClient(
       signer,
       {
         generate_static_deposit_address: staticAddressHandler(fabricated),
         query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+        query_nodes: nodesQuery(() => [required(claimed.leaf, "leaf")]),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
           }),
-        claim_transfer: async (req) => {
+        claim_transfer: (req) => {
           claimReq = req;
           return create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
@@ -1649,7 +1670,7 @@ describe("deposits.claimStatic via the client", () => {
               status: TransferStatus.COMPLETED,
               type: TransferType.TRANSFER,
               network: Network.REGTEST,
-              leaves: [await claimedLeaf(signer, required(pending.leaves[0], "leaf"))],
+              leaves: [claimed],
             }),
           });
         },
@@ -1697,6 +1718,7 @@ describe("deposits.claimStatic via the client", () => {
     const sleeps: number[] = [];
     let pendingQueries = 0;
     let claimCalls = 0;
+    const claimed = await claimedLeaf(signer, required(pending.leaves[0], "leaf"));
     const { client } = makeClient(
       signer,
       {
@@ -1705,11 +1727,12 @@ describe("deposits.claimStatic via the client", () => {
           pendingQueries += 1;
           return create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n });
         },
+        query_nodes: nodesQuery(() => [required(claimed.leaf, "leaf")]),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
           }),
-        claim_transfer: async (req) => {
+        claim_transfer: (req) => {
           claimCalls += 1;
           return create(ClaimTransferResponseSchema, {
             transfer: create(TransferSchema, {
@@ -1719,7 +1742,7 @@ describe("deposits.claimStatic via the client", () => {
               status: TransferStatus.COMPLETED,
               type: TransferType.TRANSFER,
               network: Network.REGTEST,
-              leaves: [await claimedLeaf(signer, required(pending.leaves[0], "leaf"))],
+              leaves: [claimed],
             }),
           });
         },

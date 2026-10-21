@@ -385,16 +385,180 @@ async function leafRefundScripts(
   return scripts;
 }
 
+/** Equal when two optional transaction fields are both absent or byte-identical. */
+function sameOptionalTx(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
+  const left = optionalBytes(a);
+  const right = optionalBytes(b);
+  return left === right || (left !== undefined && right !== undefined && equalBytes(left, right));
+}
+
 /**
- * Builds exit chains for leaves already in hand. Fetches only the ancestors the caller lacks
- * (parentNodeIds not among the given leaves) with `includeParents`, in `nodeIds` chunks of 1000 —
- * those ancestors existed before the claim/deposit, so looking them up by id does not depend on the
- * just-written leaf being indexed. Given leaf objects win over returned nodes for their own id.
- * Each refund must pay the signer's own `LEAF{id}` key-path script — a foreign leaf fails rather
- * than storing a stranger's chain.
+ * Names the chain-relevant field two served rows for the same node id disagree on — undefined when
+ * they match. Only the fields an exit chain commits to count: the transactions themselves, the link
+ * to the parent and the position in the tree. Spend-facing fields (value, status, key material) are
+ * compared by `operatorsDisagree` where leaves are selected; an ancestor's label cannot strand or
+ * inflate a stored chain, but a tampered `parentNodeId` or transaction can.
+ */
+function chainRowMismatch(reference: SparkLeaf, candidate: SparkLeaf): string | undefined {
+  if (!equalBytes(candidate.nodeTx, reference.nodeTx)) {
+    return "nodeTx";
+  }
+  if (!equalBytes(candidate.refundTx, reference.refundTx)) {
+    return "refundTx";
+  }
+  if (!sameOptionalTx(candidate.directTx, reference.directTx)) {
+    return "directTx";
+  }
+  if (!sameOptionalTx(candidate.directRefundTx, reference.directRefundTx)) {
+    return "directRefundTx";
+  }
+  if (!sameOptionalTx(candidate.directFromCpfpRefundTx, reference.directFromCpfpRefundTx)) {
+    return "directFromCpfpRefundTx";
+  }
+  if (candidate.parentNodeId !== reference.parentNodeId) {
+    return "parentNodeId";
+  }
+  if (candidate.treeId !== reference.treeId) {
+    return "treeId";
+  }
+  if (candidate.vout !== reference.vout) {
+    return "vout";
+  }
+  return undefined;
+}
+
+/**
+ * Queries `ids` (chunked at the SO's `nodeIds` cap) with `includeParents` on every given client —
+ * coordinator first, then each other operator — and returns one node map per client, in order. Rows
+ * `mapTreeNode` cannot interpret count as unserved: a row the client cannot read cannot vouch for
+ * the chain either.
+ */
+async function queryNodeMaps(
+  sources: ReadonlyArray<Client<typeof SparkService>>,
+  ids: ReadonlyArray<string>,
+  network: SparkNetwork,
+  call?: CallOptions,
+): Promise<ReadonlyArray<ReadonlyMap<string, SparkLeaf>>> {
+  return Promise.all(
+    sources.map(async (spark) => {
+      const nodes = new Map<string, SparkLeaf>();
+      for (let i = 0; i < ids.length; i += MAX_QUERY_NODE_IDS) {
+        // oxlint-disable-next-line no-await-in-loop -- chunks are sequential by design
+        const response = await spark.query_nodes(
+          {
+            source: {
+              case: "nodeIds",
+              value: { nodeIds: ids.slice(i, i + MAX_QUERY_NODE_IDS) },
+            },
+            includeParents: true,
+            limit: 0n,
+            offset: 0n,
+            network: sparkNetworkProto(network),
+            statuses: [],
+          },
+          call,
+        );
+        for (const node of Object.values(response.nodes)) {
+          try {
+            const mapped = mapTreeNode(node);
+            if (!nodes.has(mapped.id)) {
+              nodes.set(mapped.id, mapped);
+            }
+          } catch {
+            // Unmappable rows count as unserved.
+          }
+        }
+      }
+      return nodes;
+    }),
+  );
+}
+
+/**
+ * Walks `leaf`'s ancestor chain to the root and checks every node on it against every operator: the
+ * reference row for an id is the caller's leaf for caller-provided ids (they win over served rows —
+ * a claim response can be fresher than the tree index), else the first served row (coordinator,
+ * then each other operator in order). For ids only the queries serve — ancestors — every operator,
+ * coordinator included, must return the node with identical chain-relevant fields; a differing row
+ * (a swapped ancestor transaction, a retargeted `parentNodeId`) or a node some operator does not
+ * serve throws `SparkError` naming the leaf, the node and the detail. Caller-provided rows win
+ * without a cross-check: the caller already validated them for the purpose it serves them. Returns
+ * the verified reference rows keyed by id.
+ */
+function verifiedChainNodes(
+  leaf: SparkLeaf,
+  caller: ReadonlyMap<string, SparkLeaf>,
+  maps: ReadonlyArray<ReadonlyMap<string, SparkLeaf>>,
+): ReadonlyMap<string, SparkLeaf> {
+  const reference = (id: string): SparkLeaf | undefined => {
+    const own = caller.get(id);
+    if (own !== undefined) {
+      return own;
+    }
+    for (const map of maps) {
+      const row = map.get(id);
+      if (row !== undefined) {
+        return row;
+      }
+    }
+    return undefined;
+  };
+  const chainNodes = new Map<string, SparkLeaf>();
+  let current: SparkLeaf | undefined = leaf;
+  for (;;) {
+    if (chainNodes.has(current.id)) {
+      throw new SparkError(`unilateral exit: leaf ${leaf.id} has a parent cycle at ${current.id}`);
+    }
+    chainNodes.set(current.id, current);
+    const parentId = current.parentNodeId;
+    if (parentId === undefined) {
+      break;
+    }
+    const parent = reference(parentId);
+    if (parent === undefined) {
+      throw new SparkError(
+        `unilateral exit: leaf ${leaf.id} parent node ${parentId} of ${current.id} not served`,
+      );
+    }
+    current = parent;
+  }
+  for (const [id, ref] of chainNodes) {
+    if (caller.has(id)) {
+      continue;
+    }
+    for (const map of maps) {
+      const row = map.get(id);
+      if (row === undefined) {
+        throw new SparkError(
+          `unilateral exit: leaf ${leaf.id} node ${id} is not served by every operator`,
+        );
+      }
+      const field = chainRowMismatch(ref, row);
+      if (field !== undefined) {
+        throw new SparkError(
+          `unilateral exit: leaf ${leaf.id} node ${id} ${field} differs across operators`,
+        );
+      }
+    }
+  }
+  return chainNodes;
+}
+
+/**
+ * Builds exit chains for leaves already in hand — coordinator data the caller must not trust alone
+ * (claim responses, swap results, the coordinator's sync rows). Every chain is built only from
+ * nodes all operators serve identically: the requested leaf ids plus the caller-known ancestor ids
+ * are queried with `includeParents` from the coordinator AND every other operator (in `nodeIds`
+ * chunks of 1000), each chain is walked to the root via `parentNodeId`, and any node an operator
+ * serves differently or not at all rejects the leaf — the caller quarantines it and keeps its
+ * previously stored chain. Each refund must additionally pay the signer's own `LEAF{id}` key-path
+ * script — a foreign leaf fails rather than storing a stranger's chain.
  */
 export async function queryExitChains(options: {
+  /** Coordinator connection — its served rows are the reference for ancestors. */
   readonly spark: Client<typeof SparkService>;
+  /** One client per non-coordinator operator, for cross-operator agreement. */
+  readonly operators: ReadonlyArray<Client<typeof SparkService>>;
   readonly network: SparkNetwork;
   readonly signer: SparkSigner;
   readonly leaves: ReadonlyArray<SparkLeaf>;
@@ -404,83 +568,37 @@ export async function queryExitChains(options: {
   /** Leaves whose chain failed verification — the caller quarantines them, it does not throw. */
   readonly rejected: ReadonlyArray<{ readonly leafId: string; readonly error: SparkError }>;
 }> {
-  const { spark, network, signer, leaves } = options;
+  const { spark, operators, network, signer, leaves } = options;
   const refundScripts = await leafRefundScripts(
     signer,
     leaves.map((leaf) => leaf.id),
     network,
   );
-  const known = new Map<string, SparkLeaf>(leaves.map((leaf) => [leaf.id, leaf]));
-  const wanted = new Set<string>();
+  const caller = new Map<string, SparkLeaf>(leaves.map((leaf) => [leaf.id, leaf]));
+  // Fetch the requested leaves plus the ancestors only the caller knows so far — those existed
+  // before the claim/deposit, so looking them up by id does not depend on a just-written leaf
+  // being indexed.
+  const wanted = new Set<string>(caller.keys());
   for (const leaf of leaves) {
-    if (leaf.parentNodeId !== undefined && !known.has(leaf.parentNodeId)) {
+    if (leaf.parentNodeId !== undefined && !wanted.has(leaf.parentNodeId)) {
       wanted.add(leaf.parentNodeId);
     }
   }
-  if (wanted.size === 0) {
-    return collectExitChains(
-      leaves.map((leaf) => leaf.id),
-      known,
-      refundScripts,
-    );
-  }
-  const ids = [...wanted];
-  for (let i = 0; i < ids.length; i += MAX_QUERY_NODE_IDS) {
-    // oxlint-disable-next-line no-await-in-loop -- ancestor chunks are sequential by design
-    const response = await spark.query_nodes(
-      {
-        source: {
-          case: "nodeIds",
-          value: { nodeIds: ids.slice(i, i + MAX_QUERY_NODE_IDS) },
-        },
-        includeParents: true,
-        limit: 0n,
-        offset: 0n,
-        network: sparkNetworkProto(network),
-        statuses: [],
-      },
-      options.call,
-    );
-    for (const node of Object.values(response.nodes)) {
-      const mapped = mapTreeNode(node);
-      if (!known.has(mapped.id)) {
-        known.set(mapped.id, mapped);
-      }
-    }
-  }
-  return collectExitChains(
-    leaves.map((leaf) => leaf.id),
-    known,
-    refundScripts,
-  );
-}
-
-/**
- * `buildExitChains` for every leaf, collecting per-leaf failures rather than throwing on the first:
- * one leaf with a chain that fails verification must not block the valid chains — the sync
- * quarantines it like an operator-disagreeing leaf.
- */
-function collectExitChains(
-  leafIds: ReadonlyArray<string>,
-  nodes: ReadonlyMap<string, SparkLeaf>,
-  refundScripts: ReadonlyMap<string, Uint8Array>,
-): {
-  chains: SparkExitChain[];
-  rejected: Array<{ leafId: string; error: SparkError }>;
-} {
+  const maps = await queryNodeMaps([spark, ...operators], [...wanted], network, options.call);
   const cache = newLinkageCache();
   const chains: SparkExitChain[] = [];
   const rejected: Array<{ leafId: string; error: SparkError }> = [];
-  for (const leafId of leafIds) {
+  for (const leaf of leaves) {
     try {
-      chains.push(buildLeafExitChain(leafId, nodes, refundScripts, cache));
+      const nodes = verifiedChainNodes(leaf, caller, maps);
+      chains.push(buildLeafExitChain(leaf.id, nodes, refundScripts, cache));
     } catch (error) {
       rejected.push({
-        leafId,
+        leafId: leaf.id,
         error:
           error instanceof SparkError
             ? error
-            : new SparkError(`unilateral exit: leaf ${leafId} chain build failed`, {
+            : new SparkError(`unilateral exit: leaf ${leaf.id} chain build failed`, {
                 cause: error,
               }),
       });
@@ -490,15 +608,21 @@ function collectExitChains(
 }
 
 /**
- * One `query_nodes` (with parents) for the requested leaves' ids, then the exit chains and their
- * broadcast-flattened transactions. A requested id that the query does not return or that carries
- * no refund is a `SparkInputError`. Each refund must pay the signer's own `LEAF{id}` key-path
- * script, so a foreign leaf id fails rather than returning a stranger's chain. The returned
- * transactions are owner-broadcastable; the direct variants stored alongside them in the chains are
+ * One `query_nodes` (with parents) for the requested leaves' ids on the coordinator AND every other
+ * operator, then the exit chains and their broadcast-flattened transactions — built only from nodes
+ * all operators serve identically, so a live answer cannot serve a truncated or substituted chain
+ * for storage. A requested id no operator serves, or that carries no refund, is a
+ * `SparkInputError`; a node missing on any operator or differing across them is a `SparkError`
+ * naming the leaf and the field. Each refund must pay the signer's own `LEAF{id}` key-path script,
+ * so a foreign leaf id fails rather than returning a stranger's chain. The returned transactions
+ * are owner-broadcastable; the direct variants stored alongside them in the chains are
  * witness-stripped templates and are not.
  */
 export async function unilateralExitTransactions(options: {
+  /** Coordinator connection — its served rows are the reference for ancestors. */
   readonly spark: Client<typeof SparkService>;
+  /** One client per non-coordinator operator, for cross-operator agreement. */
+  readonly operators: ReadonlyArray<Client<typeof SparkService>>;
   readonly network: SparkNetwork;
   readonly signer: SparkSigner;
   readonly leafIds: ReadonlyArray<string>;
@@ -507,28 +631,31 @@ export async function unilateralExitTransactions(options: {
   readonly transactions: ReadonlyArray<ExitTransaction>;
   readonly chains: ReadonlyArray<SparkExitChain>;
 }> {
-  const { spark, network, signer, leafIds } = options;
+  const { spark, operators, network, signer, leafIds } = options;
   if (leafIds.length === 0) {
     return { transactions: [], chains: [] };
   }
   const refundScripts = await leafRefundScripts(signer, leafIds, network);
-  const response = await spark.query_nodes(
-    {
-      source: { case: "nodeIds", value: { nodeIds: [...leafIds] } },
-      includeParents: true,
-      limit: 0n,
-      offset: 0n,
-      network: sparkNetworkProto(network),
-      statuses: [],
-    },
-    options.call,
-  );
-  const nodes = new Map<string, SparkLeaf>(
-    Object.values(response.nodes).map((node) => {
-      const leaf = mapTreeNode(node);
-      return [leaf.id, leaf];
-    }),
-  );
+  const maps = await queryNodeMaps([spark, ...operators], leafIds, network, options.call);
+  const caller = new Map<string, SparkLeaf>();
+  const nodes = new Map<string, SparkLeaf>();
+  for (const leafId of leafIds) {
+    let start: SparkLeaf | undefined;
+    for (const map of maps) {
+      start = map.get(leafId);
+      if (start !== undefined) {
+        break;
+      }
+    }
+    if (start === undefined) {
+      throw new SparkInputError(`unilateral exit: leaf ${leafId} not found`);
+    }
+    for (const [id, row] of verifiedChainNodes(start, caller, maps)) {
+      if (!nodes.has(id)) {
+        nodes.set(id, row);
+      }
+    }
+  }
   const chains = buildExitChains(leafIds, nodes, refundScripts);
   return { transactions: exitTransactions(chains), chains };
 }

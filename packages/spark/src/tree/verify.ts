@@ -10,8 +10,15 @@ import type { SparkLeaf } from "./index.ts";
 // wallet derives, and reported identically by every operator.
 
 /**
- * Names the first of the leaf's transactions that is unusable — unparseable, input-less or
- * output-less — or undefined when every present transaction is well-formed.
+ * Names the first of the leaf's defects — an unparseable, input-less or output-less transaction, or
+ * a value label the node tx does not back — or undefined when the leaf is well-formed.
+ *
+ * A leaf's `valueSats` must equal what its node tx output 0 pays: that is the output the leaf's
+ * refunds spend and the amount the upstream SO takes as the leaf's value (`renew_leaf_handler.go`
+ * uses `TxOut[0].Value`). Internal tree nodes have one output per child, so this is a leaf-only
+ * invariant — callers apply it only to leaves. A label the transaction does not back lets a
+ * coordinator make the wallet pay a larger real output for a smaller declared amount, so an unbound
+ * value is disqualifying wherever the leaf came from.
  */
 export function malformedLeafTx(leaf: SparkLeaf): string | undefined {
   const candidates: ReadonlyArray<readonly [string, Uint8Array | undefined]> = [
@@ -21,6 +28,7 @@ export function malformedLeafTx(leaf: SparkLeaf): string | undefined {
     ["direct refund tx", leaf.directRefundTx],
     ["direct from cpfp refund tx", leaf.directFromCpfpRefundTx],
   ];
+  let nodeTx;
   for (const [name, bytes] of candidates) {
     if (bytes === undefined) {
       continue;
@@ -40,6 +48,15 @@ export function malformedLeafTx(leaf: SparkLeaf): string | undefined {
     if (tx.outputsLength === 0) {
       return `${name} has no outputs`;
     }
+    if (name === "node tx") {
+      nodeTx = tx;
+    }
+  }
+  if (nodeTx !== undefined) {
+    const { amount } = nodeTx.getOutput(0);
+    if (amount === undefined || amount !== BigInt(leaf.valueSats)) {
+      return "node tx output 0 does not pay the leaf's value";
+    }
   }
   return undefined;
 }
@@ -49,13 +66,17 @@ export function malformedLeafTx(leaf: SparkLeaf): string | undefined {
  * Compares every field a spend commits to: `valueSats` is the amount the wallet pays or exits the
  * leaf for, `verifyingPublicKey` is the key signing must reach, and `vout` locates the leaf in
  * `nodeTx` — a coordinator reporting any of them differently is as disqualifying as a different
- * transaction.
+ * transaction. `parentNodeId` and `treeId` decide which exit chain the leaf belongs to — a
+ * coordinator that blanks or retargets them would truncate or swap the stored unilateral-exit
+ * chain, so a differing link is a disagreement like any other.
  */
 export function operatorsDisagree(coordinator: SparkLeaf, operator: SparkLeaf): boolean {
   return (
     operator.status !== coordinator.status ||
     operator.valueSats !== coordinator.valueSats ||
     operator.vout !== coordinator.vout ||
+    operator.treeId !== coordinator.treeId ||
+    operator.parentNodeId !== coordinator.parentNodeId ||
     !equalBytes(operator.verifyingPublicKey, coordinator.verifyingPublicKey) ||
     !equalBytes(operator.signingKeyshare.publicKey, coordinator.signingKeyshare.publicKey) ||
     !equalBytes(operator.nodeTx, coordinator.nodeTx) ||

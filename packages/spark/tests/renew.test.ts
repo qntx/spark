@@ -325,12 +325,14 @@ function renewZeroResponse(req: RenewLeafRequest, base: ReturnType<typeof leafNo
 }
 
 function renewedNodeResponse(renewKind: "zero" | "node" | "refund") {
+  const scriptKey = secp256k1.Point.BASE.toBytes(true);
+  const nodeTx = txWithSequence(0, scriptKey, 100_000n);
   const node = create(TreeNodeSchema, {
     id: LEAF_ID,
     treeId: `tree-${LEAF_ID}`,
     value: 100_000n,
-    nodeTx: new Uint8Array([9, 9]),
-    refundTx: new Uint8Array([8, 8]),
+    nodeTx,
+    refundTx: txWithSequence(0x200, scriptKey, 99_000n, txidBytes(nodeTx)),
     vout: 0,
     verifyingPublicKey: new Uint8Array(33).fill(5),
     ownerIdentityPublicKey: new Uint8Array(33).fill(6),

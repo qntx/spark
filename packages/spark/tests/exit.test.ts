@@ -404,6 +404,7 @@ describe("unilateralExitTransactions", () => {
     await expect(
       unilateralExitTransactions({
         spark,
+        operators: [],
         network: "regtest",
         signer: SIGNER,
         leafIds: ["leaf-a"],
@@ -425,6 +426,7 @@ describe("unilateralExitTransactions", () => {
     await expect(
       unilateralExitTransactions({
         spark,
+        operators: [],
         network: "regtest",
         signer: SIGNER,
         leafIds: ["stranger"],
@@ -438,6 +440,7 @@ describe("unilateralExitTransactions", () => {
     await expect(
       unilateralExitTransactions({
         spark,
+        operators: [],
         network: "regtest",
         signer: SIGNER,
         leafIds: ["node-only"],
@@ -450,6 +453,7 @@ describe("unilateralExitTransactions", () => {
     await expect(
       unilateralExitTransactions({
         spark,
+        operators: [],
         network: "regtest",
         signer: SIGNER,
         leafIds: ["leaf-a"],
@@ -469,6 +473,7 @@ describe("unilateralExitTransactions", () => {
     await expect(
       unilateralExitTransactions({
         spark,
+        operators: [],
         network: "regtest",
         signer: SIGNER,
         leafIds: ["foreign"],
@@ -488,14 +493,20 @@ describe("unilateralExitTransactions", () => {
     });
     const spark = createClient(SparkService, transport);
     await expect(
-      unilateralExitTransactions({ spark, network: "regtest", signer: SIGNER, leafIds: [] }),
+      unilateralExitTransactions({
+        spark,
+        operators: [],
+        network: "regtest",
+        signer: SIGNER,
+        leafIds: [],
+      }),
     ).resolves.toStrictEqual({ transactions: [], chains: [] });
     expect(calls).toBe(0);
   });
 });
 
 describe("queryExitChains", () => {
-  test("root leaves need no RPC", async () => {
+  test("the coordinator is queried for leaf ids even when no ancestor is missing", async () => {
     let calls = 0;
     const transport = createRouterTransport((router) => {
       router.service(SparkService, {
@@ -508,11 +519,14 @@ describe("queryExitChains", () => {
     const spark = createClient(SparkService, transport);
     const { chains } = await queryExitChains({
       spark,
+      operators: [],
       network: "regtest",
       signer: SIGNER,
       leaves: [ROOT],
     });
-    expect(calls).toBe(0);
+    // The caller's leaf is the reference for its own id: an unserved root still chains to
+    // itself once no operator contradicts it.
+    expect(calls).toBe(1);
     expect(chains.map((chain) => chain.leafId)).toStrictEqual(["root"]);
     expect(chains[0]?.nodes.map((node) => node.nodeId)).toStrictEqual(["root"]);
   });
@@ -554,10 +568,7 @@ describe("queryExitChains", () => {
       ) => {
         const chunk = nodeIdsFrom(input as QueryNodesRequest);
         calls.push(chunk);
-        const nodes: Record<string, ReturnType<typeof treeNodeProto>> = {};
-        for (const id of chunk) {
-          nodes[id] = required(parentProtos.get(id));
-        }
+        const nodes = Object.fromEntries([...parentProtos].filter(([id]) => chunk.includes(id)));
         return Promise.resolve({
           stream: false,
           service: SparkService,
@@ -570,8 +581,15 @@ describe("queryExitChains", () => {
       stream: async () => Promise.reject(new Error("unimplemented")),
     } as unknown as Transport;
     const spark = createClient(SparkService, transport);
-    const { chains } = await queryExitChains({ spark, network: "regtest", signer: SIGNER, leaves });
-    expect(calls.map((chunk) => chunk.length)).toStrictEqual([1000, 1]);
+    const { chains } = await queryExitChains({
+      spark,
+      operators: [],
+      network: "regtest",
+      signer: SIGNER,
+      leaves,
+    });
+    // The requested leaf ids plus their ancestors page at the same 1000-id bound.
+    expect(calls.map((chunk) => chunk.length)).toStrictEqual([1000, 1000, 2]);
     expect(chains).toHaveLength(1001);
   }, 60_000);
 
@@ -596,6 +614,7 @@ describe("queryExitChains", () => {
     const spark = createClient(SparkService, transport);
     const { chains } = await queryExitChains({
       spark,
+      operators: [],
       network: "regtest",
       signer: SIGNER,
       leaves: [leaf],
@@ -615,6 +634,7 @@ describe("queryExitChains", () => {
     const spark = createClient(SparkService, transport);
     const { chains, rejected } = await queryExitChains({
       spark,
+      operators: [],
       network: "regtest",
       signer: SIGNER,
       leaves: [leaf],

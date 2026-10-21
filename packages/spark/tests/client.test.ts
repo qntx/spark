@@ -76,7 +76,7 @@ function ownedLeaf(
   status = "AVAILABLE",
 ): TreeNode {
   const node = makeLeaf(id, valueSats, status);
-  node.nodeTx = txSpending(fakeTxid((id.codePointAt(0) ?? 0) + id.length), 0);
+  node.nodeTx = txSpending(fakeTxid((id.codePointAt(0) ?? 0) + id.length), 0, KEY, valueSats);
   node.refundTx = txSpending(
     hexToBytes(txId(node.nodeTx)),
     0x200,
@@ -121,6 +121,16 @@ function makeLeaf(id: string, valueSats: bigint, status = "AVAILABLE"): TreeNode
  */
 function pagedLeaves(leaves: ReadonlyArray<TreeNode>, pageSize: number) {
   return (req: QueryNodesRequest) => {
+    if (req.source.case === "nodeIds") {
+      const wanted = new Set(req.source.value.nodeIds);
+      const nodes: Record<string, TreeNode> = {};
+      for (const leaf of leaves) {
+        if (wanted.has(leaf.id)) {
+          nodes[leaf.id] = leaf;
+        }
+      }
+      return { nodes, offset: -1n };
+    }
     const offset = Number(req.offset);
     const page = leaves.slice(offset, offset + pageSize);
     const nodes: Record<string, TreeNode> = {};
@@ -245,10 +255,11 @@ test("leaves and balance page through query_nodes until a short page", async () 
   });
   const result = await client.leaves();
   expect(result).toHaveLength(51);
-  // Both the coordinator and the other operator page through the same result set.
-  expect(pageRequests).toHaveLength(4);
+  // Both the coordinator and the other operator page through the same result set, then each
+  // serves the exit-chain nodeIds lookup.
+  expect(pageRequests).toHaveLength(6);
   expect(pageRequests.map((req) => Number(req.offset)).toSorted((a, b) => a - b)).toStrictEqual([
-    0, 0, 50, 50,
+    0, 0, 0, 0, 50, 50,
   ]);
   expect(result[0]?.valueSats).toBe(100);
   await expect(client.balance()).resolves.toBe(
@@ -544,10 +555,15 @@ function fakeTxid(label: number): Uint8Array {
   return out;
 }
 
-function txSpending(prevTxid: Uint8Array, sequence: number, payKey: Uint8Array = KEY): Uint8Array {
+function txSpending(
+  prevTxid: Uint8Array,
+  sequence: number,
+  payKey: Uint8Array = KEY,
+  amountSats = 1000n,
+): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });
   tx.addInput({ txid: prevTxid, index: 0, sequence });
-  tx.addOutput({ script: p2trScriptFromPublicKey(payKey, "mainnet"), amount: 1000n });
+  tx.addOutput({ script: p2trScriptFromPublicKey(payKey, "mainnet"), amount: amountSats });
   return tx.toBytes(true);
 }
 
@@ -829,7 +845,8 @@ test("leaves keep paging when a short page carries a positive offset", async () 
   });
   const leaves = await client.leaves();
   expect(leaves).toHaveLength(35);
-  expect(requests.toSorted((a, b) => a - b)).toStrictEqual([0, 0, 30, 30]);
+  // Two paging walks (coordinator + operator) plus one exit-chain nodeIds lookup each.
+  expect(requests.toSorted((a, b) => a - b)).toStrictEqual([0, 0, 0, 0, 30, 30]);
 });
 
 test("leaves() keeps the chain of a leaf the coordinator omits but an operator reports", async () => {

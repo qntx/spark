@@ -10,7 +10,7 @@ import { SparkError, SparkInputError, SparkRequestError } from "../errors/index.
 import { SignatureScheme } from "../proto/gen/common_pb.ts";
 import { ClaimPackageSchema, HashVariant } from "../proto/gen/spark_pb.ts";
 import type { ClaimTransferResponse, SparkService, TransferLeaf } from "../proto/gen/spark_pb.ts";
-import { mapTreeNode, ownsLeaf } from "../tree/index.ts";
+import { malformedLeafTx, mapTreeNode, ownsLeaf } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { batchedPublicKeys, batchedReceivedPublicKeys } from "../tree/signing.ts";
 import { CLAIMABLE_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
@@ -236,13 +236,21 @@ export async function claimTransfer(
    * check in the leaf pool.
    */
   const verifyClaimedLeaves = (leaves: SparkLeaf[]): SparkLeaf[] => {
+    const verified: SparkLeaf[] = [];
     for (const leaf of leaves) {
       const leafPublicKey = newLeafKeyById.get(leaf.id);
       if (leafPublicKey === undefined || !ownsLeaf(leaf, leafPublicKey)) {
         throw new SparkError(`claimTransfer: coordinator returned an unowned leaf ${leaf.id}`);
       }
+      // The claim already committed on the SO, so a leaf whose value label is not bound to its
+      // node tx (or is otherwise malformed) is excluded rather than thrown over: it never enters
+      // selection, and the next sync quarantines it like any other unverifiable leaf.
+      if (malformedLeafTx(leaf) !== undefined) {
+        continue;
+      }
+      verified.push(leaf);
     }
-    return leaves;
+    return verified;
   };
 
   const groups = refundJobGroups(

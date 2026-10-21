@@ -64,6 +64,7 @@ export function createWithdrawals(context: ClientContext): SparkClient["withdraw
       context.leafLock.run(async () => {
         const { transactions, chains } = await unilateralExitTransactions({
           spark: coordinatorConnection.spark,
+          operators: context.otherConnections.map((connection) => connection.spark),
           network,
           signer,
           leafIds,

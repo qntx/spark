@@ -182,6 +182,7 @@ function verifyLeaf(overrides: Partial<SparkLeaf> = {}): SparkLeaf {
   const refundTx = txSpending(hexToBytes(txId(nodeTx)));
   const leaf = mapTreeNode(
     makeNode({
+      value: 1000n,
       nodeTx,
       refundTx,
       verifyingPublicKey: VERIFY_KEY,
