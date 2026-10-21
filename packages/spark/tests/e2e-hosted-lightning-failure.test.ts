@@ -11,6 +11,7 @@ const INVOICE_SATS = 1000;
 const MAX_FEE_SATS = 50;
 const POLL_MS = 15_000;
 const RETURN_DEADLINE_MS = 12 * 60_000;
+const SETTLE_MARGIN_MS = 5 * 60_000;
 const FUNDED_ADDRESS = "sparkrt1pgssy2j63j3kmdzg54wavqs2z7yljfmk7j5adt5p4046lk5dzp7qjn3mz0ecyh";
 
 type SeenStatus = { ms: number; status: string; outcome: string };
@@ -21,20 +22,66 @@ const TERMINAL_TRANSFER_STATUSES = new Set(["COMPLETED", "EXPIRED", "RETURNED"])
  * Waits until no transfer on the account is still in flight. An SSP swap abandoned by a crashed run
  * (a PRIMARY_SWAP_V3 the counter-swap never answered) returns on its own minutes later and would
  * inflate a balance measured while it is in flight.
+ *
+ * A transfer whose expiry sits beyond the whole remaining test (RETURN_DEADLINE_MS plus margin for
+ * this settle loop and the pay call) is ignored instead of blocking — waiting 16 days for a stale
+ * preimage swap is not an option. Its expiry does NOT bound when the funds come back: the SO flips
+ * a stale swap to a terminal state on its own schedule and the locked leaves unlock as soon as the
+ * client observes it, which can be mid-test. The ignored ids are returned so the caller can add
+ * their sats to the expected balance if they do return. A missing expiryTimeMs keeps waiting (fail
+ * closed).
  */
-async function settleTransfers(client: HostedWallet["client"]): Promise<void> {
+async function settleTransfers(client: HostedWallet["client"]): Promise<Map<string, number>> {
+  let ignored = new Map<string, number>();
   for (let i = 0; i < 10; i++) {
+    const horizon = Date.now() + RETURN_DEADLINE_MS + SETTLE_MARGIN_MS;
     // oxlint-disable-next-line no-await-in-loop -- sequential polls by design
     const list = await client.transfers.list({ limit: 30 });
     const inFlight = list.filter((transfer) => !TERMINAL_TRANSFER_STATUSES.has(transfer.status));
-    if (inFlight.length === 0) {
-      return;
+    ignored = new Map();
+    const blocking: typeof inFlight = [];
+    for (const transfer of inFlight) {
+      if (transfer.expiryTimeMs !== undefined && transfer.expiryTimeMs > horizon) {
+        ignored.set(transfer.id, transfer.totalValueSats);
+        console.log(
+          `ignoring far-expiry in-flight: ${transfer.id} ${transfer.status} ` +
+            `${transfer.totalValueSats} sats, expires ${new Date(transfer.expiryTimeMs).toISOString()}`,
+        );
+      } else {
+        blocking.push(transfer);
+      }
     }
-    console.log("in-flight:", inFlight.map((t) => `${t.id} ${t.status}`).join(", "));
+    if (blocking.length === 0) {
+      return ignored;
+    }
+    console.log("in-flight:", blocking.map((t) => `${t.id} ${t.status}`).join(", "));
     // oxlint-disable-next-line no-await-in-loop -- sequential polls by design
     await sleep(POLL_MS);
   }
   throw new Error("transfers still in flight after 150s");
+}
+
+/**
+ * Sats that came back since settleTransfers ran: the ignored far-expiry transfers can still reach
+ * RETURNED/EXPIRED mid-test (the SO ends a stale swap on its own schedule) and their leaves unlock
+ * as soon as the client observes the terminal state.
+ */
+async function satsReturnedSinceSettle(
+  client: HostedWallet["client"],
+  mayReturn: ReadonlyMap<string, number>,
+): Promise<number> {
+  const list = await client.transfers.list({ limit: 30 });
+  const returned = list.filter(
+    (transfer) =>
+      mayReturn.has(transfer.id) &&
+      (transfer.status === "RETURNED" || transfer.status === "EXPIRED"),
+  );
+  for (const transfer of returned) {
+    console.log(
+      `returned mid-test: ${transfer.id} ${transfer.status} +${transfer.totalValueSats} sats`,
+    );
+  }
+  return returned.reduce((sum, t) => sum + t.totalValueSats, 0);
 }
 
 /** Polls sendStatus until the outcome is "succeeded" or "returned"; returns every transition. */
@@ -72,7 +119,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     const { client: clientA } = walletA;
 
     await clientA.transfers.claimPending();
-    await settleTransfers(clientA);
+    const mayReturn = await settleTransfers(clientA);
     const balanceA0 = await clientA.balance();
     console.log("A balance:", balanceA0);
     ctx.skip(
@@ -121,10 +168,13 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     expect(last?.outcome).toBe("returned");
 
     // The swap return restores the committed leaves in place: the balance is whole again,
-    // including the fee, and no reverse transfer needs claiming.
+    // including the fee, and no reverse transfer needs claiming. A far-expiry transfer ignored
+    // by settleTransfers can still return mid-test — the SO ends a stale swap on its own
+    // schedule and the leaves unlock when observed — so its sats count toward the expectation.
     const balanceA1 = await clientA.balance();
+    const returnedSats = await satsReturnedSinceSettle(clientA, mayReturn);
     console.log("A balance:", balanceA0, "->", balanceA1);
-    expect(balanceA1).toBe(balanceA0);
+    expect(balanceA1).toBe(balanceA0 + returnedSats);
 
     clientA.close();
     walletA.signer.dispose();
