@@ -59,8 +59,16 @@ export function bindSparkNative(native: SparkNative): SparkCrypto {
   }
   return {
     abiVersion,
-    frostCommit: (hedge, random) =>
-      new Uint8Array(call(() => native.frostCommit(asArrayBuffer(hedge), asArrayBuffer(random)))),
+    frostCommit: (hedge, random) => {
+      const hedgeBuffer = asArrayBuffer(hedge);
+      const randomBuffer = asArrayBuffer(random);
+      try {
+        return new Uint8Array(call(() => native.frostCommit(hedgeBuffer, randomBuffer)));
+      } finally {
+        wipeIfCopy(hedge, hedgeBuffer);
+        wipeIfCopy(random, randomBuffer);
+      }
+    },
     frostSign: (request) => {
       const requestBuffer = asArrayBuffer(request);
       try {
@@ -71,16 +79,18 @@ export function bindSparkNative(native: SparkNative): SparkCrypto {
     },
     frostAggregate: (request) =>
       new Uint8Array(call(() => native.frostAggregate(asArrayBuffer(request)))),
-    eciesEncrypt: (publicKey, plaintext, random) =>
-      new Uint8Array(
-        call(() =>
-          native.eciesEncrypt(
-            asArrayBuffer(publicKey),
-            asArrayBuffer(plaintext),
-            asArrayBuffer(random),
-          ),
-        ),
-      ),
+    eciesEncrypt: (publicKey, plaintext, random) => {
+      const plaintextBuffer = asArrayBuffer(plaintext);
+      const randomBuffer = asArrayBuffer(random);
+      try {
+        return new Uint8Array(
+          call(() => native.eciesEncrypt(asArrayBuffer(publicKey), plaintextBuffer, randomBuffer)),
+        );
+      } finally {
+        wipeIfCopy(plaintext, plaintextBuffer);
+        wipeIfCopy(random, randomBuffer);
+      }
+    },
     eciesDecrypt: (privateKey, ciphertext) => {
       const privateKeyBuffer = asArrayBuffer(privateKey);
       try {
@@ -93,14 +103,14 @@ export function bindSparkNative(native: SparkNative): SparkCrypto {
     },
     splitSecretWithProofs: (secret, threshold, shares, random) => {
       const secretBuffer = asArrayBuffer(secret);
+      const randomBuffer = asArrayBuffer(random);
       try {
         return new Uint8Array(
-          call(() =>
-            native.splitSecretWithProofs(secretBuffer, threshold, shares, asArrayBuffer(random)),
-          ),
+          call(() => native.splitSecretWithProofs(secretBuffer, threshold, shares, randomBuffer)),
         );
       } finally {
         wipeIfCopy(secret, secretBuffer);
+        wipeIfCopy(random, randomBuffer);
       }
     },
   };

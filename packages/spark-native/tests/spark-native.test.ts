@@ -208,14 +208,22 @@ describe("nitro-prefixed ABI errors", () => {
   });
 });
 
+/** ArrayBuffer `index` recorded for `name` — throws if the hybrid never saw that argument. */
+function receivedAt(
+  received: Map<string, ArrayBuffer[]>,
+  name: string,
+  index: number,
+): ArrayBuffer {
+  const buffer = (received.get(name) ?? [])[index];
+  if (buffer === undefined) {
+    throw new Error(`no ${name} buffer ${index} recorded`);
+  }
+  return buffer;
+}
+
 /** First ArrayBuffer recorded for `name` — throws if the hybrid never saw a call. */
 function firstReceived(received: Map<string, ArrayBuffer[]>, name: string): ArrayBuffer {
-  const buffers = received.get(name) ?? [];
-  const [first] = buffers;
-  if (first === undefined) {
-    throw new Error(`no ${name} call recorded`);
-  }
-  return first;
+  return receivedAt(received, name, 0);
 }
 
 describe("private input copies", () => {
@@ -248,6 +256,59 @@ describe("private input copies", () => {
     const handed = firstReceived(received, "eciesDecrypt");
     expect(handed).toBe(privateKey.buffer);
     expect(toHex(privateKey)).toBe(ECIES_CASE.secret_key);
+  });
+
+  test("frostCommit view inputs are copied and wiped after the call", async () => {
+    const { crypto, received } = await loadBackend();
+    const hedgeBacking = new Uint8Array(96);
+    hedgeBacking.set(hex("11".repeat(32)), 32);
+    const randomBacking = new Uint8Array(96);
+    randomBacking.set(hex("22".repeat(32)), 64);
+    const out = crypto.frostCommit(hedgeBacking.subarray(32, 64), randomBacking.subarray(64, 96));
+    expect(out).toHaveLength(130);
+    expect(new Uint8Array(receivedAt(received, "frostCommit", 0))).toStrictEqual(
+      new Uint8Array(32),
+    );
+    expect(new Uint8Array(receivedAt(received, "frostCommit", 1))).toStrictEqual(
+      new Uint8Array(32),
+    );
+  });
+
+  test("eciesEncrypt view plaintext and random are copied and wiped", async () => {
+    const { crypto, received } = await loadBackend();
+    const generator = hex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const plaintextBacking = new Uint8Array(64);
+    plaintextBacking.set(hex("aa".repeat(32)), 16);
+    const randomBacking = new Uint8Array(64);
+    randomBacking.set(hex("33".repeat(32)), 8);
+    const out = crypto.eciesEncrypt(
+      generator,
+      plaintextBacking.subarray(16, 48),
+      randomBacking.subarray(8, 40),
+    );
+    expect(out.length).toBeGreaterThan(0);
+    expect(new Uint8Array(receivedAt(received, "eciesEncrypt", 1))).toStrictEqual(
+      new Uint8Array(32),
+    );
+    expect(new Uint8Array(receivedAt(received, "eciesEncrypt", 2))).toStrictEqual(
+      new Uint8Array(32),
+    );
+  });
+
+  test("splitSecretWithProofs view random is copied and wiped", async () => {
+    const { crypto, received } = await loadBackend();
+    const randomBacking = new Uint8Array(64);
+    randomBacking.set(hex("44".repeat(32)), 5);
+    const out = crypto.splitSecretWithProofs(
+      hex("20".repeat(32)),
+      2,
+      3,
+      randomBacking.subarray(5, 37),
+    );
+    expect(out).toHaveLength(2 * 33 + 3 * 32);
+    expect(new Uint8Array(receivedAt(received, "splitSecretWithProofs", 1))).toStrictEqual(
+      new Uint8Array(32),
+    );
   });
 });
 
