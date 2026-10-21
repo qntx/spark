@@ -961,7 +961,8 @@ describe("claimInboundTransfer", () => {
       }),
     ];
     const context = inboundContext(signer, {
-      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: pending }),
+      query_pending_transfers: () =>
+        create(QueryTransfersResponseSchema, { transfers: pending, offset: -1n }),
     });
     // The selected transfer reaches claimTransfer and fails there on its (stub) leaf signature —
     // the leaf id in the error proves the oldest matching candidate was picked.
@@ -983,6 +984,7 @@ describe("claimInboundTransfer", () => {
               totalSats: 100n,
             }),
           ],
+          offset: -1n,
         }),
     });
     await expect(claimInboundTransfer(context, CREDIT)).resolves.toStrictEqual([]);
@@ -1701,7 +1703,7 @@ describe("deposits.claimStatic via the client", () => {
         generate_static_deposit_address: staticAddressHandler(fabricated),
         query_pending_transfers: () => {
           pendingQueries += 1;
-          return create(QueryTransfersResponseSchema, { transfers: [pending] });
+          return create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n });
         },
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
@@ -1752,7 +1754,8 @@ describe("deposits.claimStatic via the client", () => {
       signer,
       {
         generate_static_deposit_address: staticAddressHandler(fabricated),
-        query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: [] }),
+        query_pending_transfers: () =>
+          create(QueryTransfersResponseSchema, { transfers: [], offset: -1n }),
         claim_transfer: () => {
           claimCalls += 1;
           return create(ClaimTransferResponseSchema, {});

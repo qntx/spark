@@ -872,7 +872,8 @@ describe("transfers.claim", () => {
     let commitmentsReq: GetSigningCommitmentsRequest | undefined;
     let claimReq: ClaimTransferRequest | undefined;
     const client = makeClient(receiver, {
-      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+      query_pending_transfers: () =>
+        create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
       get_signing_commitments: (req) => {
         commitmentsReq = req;
         return create(GetSigningCommitmentsResponseSchema, {
@@ -1123,7 +1124,8 @@ describe("transfers.claim", () => {
     });
     let claimCalls = 0;
     const client = makeClient(receiver, {
-      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+      query_pending_transfers: () =>
+        create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
       claim_transfer: () => {
         claimCalls += 1;
         return create(ClaimTransferResponseSchema, {});
@@ -1155,7 +1157,7 @@ describe("transfers.claim", () => {
     });
     const client = makeClient(receiver, {
       query_pending_transfers: () =>
-        create(QueryTransfersResponseSchema, { transfers: [poison, good] }),
+        create(QueryTransfersResponseSchema, { transfers: [poison, good], offset: -1n }),
       get_signing_commitments: (req) =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3 * req.nodeIdCount),
@@ -1467,7 +1469,7 @@ describe("transfers.claim", () => {
       receiver,
       {
         query_pending_transfers: () =>
-          create(QueryTransfersResponseSchema, { transfers: [pending] }),
+          create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
@@ -1616,7 +1618,8 @@ describe("transfers.claim", () => {
 
     let claimReq: ClaimTransferRequest | undefined;
     const client = makeClient(receiver, {
-      query_pending_transfers: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+      query_pending_transfers: () =>
+        create(QueryTransfersResponseSchema, { transfers: [pending], offset: -1n }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3 * leafIds.length),
