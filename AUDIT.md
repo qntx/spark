@@ -1,6 +1,6 @@
 # Security audit scope and code guide
 
-Commit under review: 73e23fe88b2b4cef60c0490b85515fee602b0182
+Commit under review: 495e9680700dd4ef439d838edcc7a6c3b30c2761
 
 ## Purpose and deliverables
 
@@ -138,10 +138,17 @@ identifiers are authoritative.
 - **P2 — No sign-arbitrary-hash.** `SparkSigner` computes every digest it
   signs from full protocol content inside the signer; no method accepts a
   caller-supplied digest (`signer/types.ts`, `signer/local.ts`).
-- **P3 — FROST nonce single use.** Commitments are removed from the
-  `NonceStore` before signing, so reuse fails even on error;
-  `MAX_OUTSTANDING` bounds outstanding nonces (`signer/nonces.ts`,
-  `signer/backend.ts`).
+- **P3 — FROST nonce single use.** `signFrost` consumes every commitment of
+  the batch up front — before any other validation, key resolution, or
+  backend call — so a mid-batch failure leaves no outstanding nonces;
+  commitments are removed before signing and wiped on every exit path.
+  `MAX_OUTSTANDING` is enforced by evicting the oldest outstanding
+  commitments (wiped, insertion order), so remote-driven leaks can never
+  wedge the signer. Each commitment's hedge is
+  `HMAC-SHA256(hedge key, tag ‖ u64be counter)` over a store-local monotone
+  counter combined with the injected randomness, so an RNG that repeats
+  within one signer instance no longer repeats nonces (`signer/nonces.ts`,
+  `signer/frost.ts`, `signer/backend.ts`).
 - **P4 — Local transaction validation.** Every transaction the wallet signs
   is constructed or fully validated locally: refund trees, exit chains paying
   the wallet's own leaf key, deposit trees, the cooperative-exit
@@ -153,12 +160,19 @@ identifiers are authoritative.
   (`deposit/index.ts`).
 - **P6 — Operator agreement and per-leaf quarantine.** `syncLeaves` requires
   field agreement across all operators — including `directTx`,
-  `directRefundTx`, `directFromCpfpRefundTx` — quarantines leaves whose exit
-  chain fails verification, and isolates rows `mapTreeNode` cannot map, so a
-  single malformed row never takes the wallet down. A stored exit chain is
-  swept only when no operator reported that node id at all in the sync, or
-  when the coordinator's row is not owned and every other operator serves an
-  agreeing row (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
+  `directRefundTx`, `directFromCpfpRefundTx`, `parentNodeId` and `treeId` —
+  quarantines leaves whose exit chain fails verification, and isolates rows
+  `mapTreeNode` cannot map, so a single malformed row never takes the
+  wallet down. Every node on an exit chain — leaf and ancestors, on the
+  sync, claim, swap, deposit and renew paths alike — must be served
+  identically by the coordinator and every operator (transaction bytes,
+  parent linkage, `treeId`, `vout` and the direct variants), and a leaf's
+  `valueSats` must equal output 0 of its `nodeTx`; a leaf that fails either
+  check is quarantined and, for an explicit exit, the error names the leaf
+  and the field. A stored exit chain is swept only when no operator
+  reported that node id at all in the sync, or when the coordinator's row
+  is not owned and every other operator serves an agreeing row
+  (`client/context.ts`, `tree/verify.ts`, `tree/index.ts`,
   `exit/unilateral.ts`).
 - **P7 — Idempotent retries never double-spend.** Sats transfers take a
   caller-supplied `transferId`; retries rebind and verify the committed
@@ -169,8 +183,14 @@ identifiers are authoritative.
   (`transfer/query.ts`, `transfer/send.ts`, `tokens/transfer.ts`).
 - **P8 — Fail-closed on unverifiable SO/SSP data.** Unverifiable or
   inconsistent remote state throws (`SparkRequestError`/`SparkError`) rather
-  than being trusted (`client/context.ts`, `transfer/claim.ts`,
-  `transfer/query.ts`, `tokens/transfer.ts`, `exit/coop.ts`).
+  than being trusted. Public entry points validate sats amounts and fee
+  bounds (safe integers ≥ 0) before any remote call. Pending-transfer rows
+  that cannot be mapped are isolated and reported as failures instead of
+  starving valid transfers. SSP read-only queries retry up to three
+  attempts with injected-sleep backoff, and only on transport/timeout
+  errors — mutations are never retried (`client/context.ts`,
+  `transfer/claim.ts`, `transfer/query.ts`, `tokens/transfer.ts`,
+  `exit/coop.ts`, `ssp/index.ts`).
 - **P9 — Bounded resource use.** All remote-driven loops are bounded:
   pagination caps and the coordinator's explicit `-1` end offset with
   strictly-advancing offsets on every paged RPC, request timeouts, LNURL per-user/global invoice quotas and HTTP body limits, and
@@ -189,8 +209,11 @@ identifiers are authoritative.
   broadcast order: `unilateralExit` queries the operators live, and
   `offlineExitTransactions` derives the list purely from the exit chains the
   store persists — no network — for when the operators are unreachable or
-  withholding data; stored chains are refreshed on every leaves sync. Every
-  transaction must be broadcast and confirmed within the
+  withholding data; stored chains are refreshed on every leaves sync.
+  Chains are built only from nodes served identically by every operator and
+  walked via the agreed `parentNodeId` — truncated or retargeted chains are
+  rejected — and the leaf's `valueSats` must equal output 0 of its
+  `nodeTx`. Every transaction must be broadcast and confirmed within the
   `DIRECT_TIMELOCK_OFFSET` (50-block) deadline of it becoming broadcastable,
   or the watchtower may publish variants instead (`exit/unilateral.ts`,
   `exit/watchtower.ts`, `client/withdrawals.ts`).
@@ -260,7 +283,11 @@ Ranked by risk:
 - Zero-amount invoice retry cannot re-verify the committed amount
   client-side beyond the fee bound.
 - LNURL quota check-then-insert is soft (a race window exists).
-- `users`/`statements` tables are only time-window bounded.
+- `users`/`statements` tables: statements are only time-window bounded;
+  registered users are also row-count bounded (`LNURL_MAX_USERS`, default
+  100 000, same soft-quota style as the invoice quotas). The cap is a
+  storage bound — per-IP registration limiting belongs in front of the
+  server.
 - DNS rebinding must be mitigated at the network layer in front of the LNURL
   server.
 - Per-IP rate limiting must be deployed in front of the LNURL server.
@@ -271,8 +298,26 @@ Ranked by risk:
 - Reusable workflows are referenced by the moving `qntx/workflows@v2` tag;
   moving it requires a protected-environment retag approved by a second
   account (third-party actions are SHA-pinned).
-- `renewLeaf` trusts the coordinator's returned node until the next sync
-  re-verifies it; signing would fail on a bad node.
+- `renewLeaf` no longer trusts the coordinator's returned node: the node is
+  adopted only after the same cross-operator verification and leaf-value
+  binding applied to every other chain source; a disagreeing or mislabelled
+  node is rejected and quarantined instead of carried until the next sync.
+- `SparkSigner` enforces no transaction-semantics policy — it signs what the
+  client layer asks it to. Funds safety relies on client-layer transaction
+  construction and validation (P4); callers must not use the signer as a
+  policy oracle.
+- `claimStaticDeposit` releases the static-deposit child key ECIES-sealed to
+  the SSP identity, so the SSP can hold the key for that deposit; the
+  static-deposit key is derived at fixed index 0.
+- Spending requires every operator online and in agreement: leaf selection,
+  sync and exit-chain verification query all operators and fail closed on a
+  missing or disagreeing row — one offline or dissenting operator blocks the
+  spend.
+- Stored exit chains are not retained for in-flight lightning leaves.
+  Recovering the sender's side of an expired lightning HTLC uses
+  `lightning.sweepHtlcTimeout` against the SSP-served HTLC transaction
+  (BIP-342 script-path signature after `LIGHTNING_HTLC_SEQUENCE` blocks),
+  not stored chains.
 - `loadSparkWasm()` does not verify `SPARK_WASM_INTEGRITY` itself; consumers
   needing SRI must fetch with `integrity` and pass the bytes as `module`.
 - Served exit-chain transactions are checked for linkage, output scripts
@@ -283,7 +328,9 @@ Ranked by risk:
 
 ## Prior internal review
 
-Eight internal review rounds have run before this audit. Areas covered:
+Nine review rounds have run. Rounds 1–8 were internal; round 9 was the
+external audit scoped by this document, whose remediations are listed last.
+Areas covered:
 
 - Transfer claim/pending-transfer failure and pagination handling.
 - LNURL invoice/database growth and repeated settlement polling; request
@@ -300,6 +347,28 @@ Eight internal review rounds have run before this audit. Areas covered:
 - Leaves-sync per-row isolation and union-based exit-chain retention,
   explicit end-offset paging, offline exit from stored chains, and token
   commit-status handling.
+
+Round 9 (external audit) remediations:
+
+- Exit chains built only from cross-operator-verified nodes — caller-provided
+  rows (claim/swap/deposit/renew) verified like sync rows, `parentNodeId`
+  and `treeId` compared; leaf `valueSats` bound to `nodeTx` output 0
+  (H-01, H-02).
+- FROST batch commitment consumption up front, nonce-store eviction instead
+  of wedging, per-call HMAC hedge counter, `checkThreshold` ≥ 2, operator
+  dedup, wasm linear-memory zeroization on trap (M-01, I-01, L-04, L-05,
+  I-05).
+- Uniform sats input validation before remote calls, malformed
+  pending-transfer row isolation, invoice `transferId`/`inputOutputIds`
+  retry handles, read-only SSP retries with injected-sleep backoff
+  (M-04, L-01, L-02, I-12).
+- Lightning HTLC timeout sweep: `signHtlcTimeout` +
+  `lightning.sweepHtlcTimeout` (M-02).
+- LNURL registered-user cap `LNURL_MAX_USERS`; zap `p`-tag misattribution
+  risk documented as Breez parity (L-07).
+- Release pipeline: tagged-release ancestry check against `origin/main`,
+  WASM reproducibility job gating publish, and an unprivileged pack job
+  split from the privileged OIDC publish in `qntx/workflows` (L-06, M-03).
 
 ## Build, test and reproduce
 
@@ -409,8 +478,9 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
 6. `transfer/send.ts:prepareTransferPackage`/`sendTransfer` builds and signs
    refund jobs via `transfer/refunds.ts:signRefundJobs` and submits
    `start_transfer`.
-7. On a fresh response, `assertCommittedTransfer` binds id, sender,
-   receiver, leaves, and terms (`transfer/query.ts`). On a lost or non-final
+7. On a fresh response, `assertCommittedTransfer` binds the transfer id,
+   type, sender, the exact receiver set (per-receiver amounts when given),
+   and the total (`transfer/query.ts`). On a lost or non-final
    response with `transferId`, `queryCommittedTransfer` probes and validates
    the same terms — retry never double-spends.
 8. `exit/store.ts` `deleteExitChains` runs for spent leaves.
@@ -492,6 +562,22 @@ Lock notation: `[leafLock]` means `context.leafLock` is held across the step;
    `exit/watchtower.ts:recoverWatchtowerExit` re-signs a recovery
    transaction while the SO is online; `sweepRefund` sweeps a published
    direct refund.
+
+#### Lightning HTLC timeout sweep
+
+1. Applies when an in-flight lightning send's HTLC refund reached the chain
+   and its `LIGHTNING_HTLC_SEQUENCE` CSV has elapsed — the sender takes the
+   funds back on chain.
+2. `client/lightning.ts:sweepHtlcTimeout({ htlcTx, vout, paymentHash,
+destinationAddress, feeRateSatPerVbyte })` builds the sweep with
+   `constructHtlcSenderSpend` (SSP identity as hash-lock key) and
+   `signer.signHtlcTimeout` signs the BIP-342 script-path sighash of the
+   sequence-lock leaf after the signer rebuilds the output script,
+   reconstructs the prevout, and enforces the input sequence.
+3. Returns the signed transaction unbroadcast — same contract as
+   `sweepRefund`. Broadcasting is the host's job.
+4. Known limitation: stored exit chains are not retained for in-flight
+   lightning leaves — this sweep is the recovery path for the sender side.
 
 #### Single deposit
 
@@ -604,7 +690,8 @@ C ABI is defined by `crates/spark-ffi/include/qntx_spark.h`; bytes only;
 ### Validation helper index
 
 - `assertCommittedTransfer` — `transfer/query.ts` — binds a committed
-  transfer's id, sender, receiver, leaves, and terms.
+  transfer's id, type, sender, exact receiver set (per-receiver amounts when
+  given), and total.
 - `assertLiveTransfer` — `transfer/query.ts` — rejects non-live transfers.
 - `assertCommittedPaymentHash` — `lightning/send.ts` — rebuilds and compares
   the expected HTLC output script for the payment hash.
