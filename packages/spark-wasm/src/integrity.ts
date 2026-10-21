@@ -1,1 +1,1 @@
-export const SPARK_WASM_INTEGRITY = "sha256-Eof1wZLZsdEi90mIz3ZvJQe78uyk2k1yKxpH5I+mrjI=";
+export const SPARK_WASM_INTEGRITY = "sha256-vmU4/1adIrAUm03loV5f2FHhi32QP7isJgKUZHmZ86Q=";
