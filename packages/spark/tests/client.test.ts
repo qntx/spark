@@ -349,6 +349,74 @@ test("pending and all transfers map to plain SparkTransfer", async () => {
   expect(all[0]?.status).toBe("COMPLETED");
 });
 
+test("transfers.pending() pages until a short page", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const pubkey = await signer.identityPublicKey();
+  const requests: Array<{ limit: bigint; offset: bigint }> = [];
+  const transfer = (id: string) => ({
+    id,
+    senderIdentityPublicKey: new Uint8Array(33).fill(3),
+    receiverIdentityPublicKey: pubkey,
+    status: TransferStatus.SENDER_KEY_TWEAKED,
+    totalValue: 1n,
+    expiryTime: timestampFromMs(1_700_000_600_000),
+    createdTime: timestampFromMs(1_700_000_000_000),
+    updatedTime: timestampFromMs(1_700_000_000_000),
+    type: TransferType.TRANSFER,
+    network: Network.MAINNET,
+    leaves: [],
+    receivers: [],
+    senders: [],
+  });
+  const pages = [
+    {
+      transfers: Array.from({ length: 100 }, (_, i) => transfer(`t-${i}`)),
+      offset: 100n,
+    },
+    { transfers: [transfer("t-last")], offset: -1n },
+  ];
+  const client = makeClient(signer, {
+    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_pending_transfers: (req: { limit: bigint; offset: bigint }) => {
+      requests.push({ limit: req.limit, offset: req.offset });
+      const page = pages[requests.length - 1]!;
+      return create(QueryTransfersResponseSchema, page);
+    },
+  });
+  const pending = await client.transfers.pending();
+  expect(pending).toHaveLength(101);
+  expect(pending[100]?.id).toBe("t-last");
+  expect(requests).toStrictEqual([
+    { limit: 100n, offset: 0n },
+    { limit: 100n, offset: 100n },
+  ]);
+});
+
+test("transfers.pending() throws when the coordinator's offset does not advance", async () => {
+  const signer = createTestSigner(new Uint8Array(32).fill(7));
+  const pubkey = await signer.identityPublicKey();
+  const client = makeClient(signer, {
+    query_nodes: () => ({ nodes: {}, offset: 0n }),
+    query_pending_transfers: () =>
+      create(QueryTransfersResponseSchema, {
+        transfers: Array.from({ length: 100 }, (_, i) => ({
+          id: `t-${i}`,
+          senderIdentityPublicKey: new Uint8Array(33).fill(3),
+          receiverIdentityPublicKey: pubkey,
+          status: TransferStatus.SENDER_KEY_TWEAKED,
+          totalValue: 1n,
+          type: TransferType.TRANSFER,
+          network: Network.MAINNET,
+          leaves: [],
+          receivers: [],
+          senders: [],
+        })),
+        offset: 0n,
+      }),
+  });
+  await expect(client.transfers.pending()).rejects.toThrow("non-advancing offset");
+});
+
 test("swapFeeEstimate goes through SSP auth and returns sats", async () => {
   const signer = createTestSigner(new Uint8Array(32).fill(7));
   const client = makeClient(signer, {
