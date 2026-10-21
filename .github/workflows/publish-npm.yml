@@ -26,17 +26,15 @@ concurrency:
 jobs:
   # Release builds (tag pushes) disable the shared rust cache — it is
   # populated by untrusted PR jobs and could smuggle code into published
-  # binaries — and get a build-provenance attestation per artifact. Dry-run
-  # calls keep the cache.
+  # binaries. Dry-run calls keep the cache. The called workflow gets no OIDC:
+  # provenance is attested by the native-artifact job below, the only job in
+  # the whole pipeline that holds id-token besides the publish jobs.
   native:
     uses: ./.github/workflows/native.yml
     with:
       release: ${{ github.event_name == 'push' }}
     permissions:
       contents: read
-      # Needed by the release-only attestation steps in native.yml.
-      id-token: write
-      attestations: write
 
   # On tag pushes, fails unless every package version equals the tag and the
   # tagged commit is an ancestor of origin/main. The called publish-npm
@@ -89,6 +87,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Only the tag-push attestation step mints an OIDC token.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -103,6 +104,14 @@ jobs:
           name: spark-native-prebuilt
           path: staging
           retention-days: 1
+      # Real publishes only: attest every file packaged into spark-native-prebuilt
+      # (the downloaded xcframework and jniLibs). PR/dispatch dry-runs skip this —
+      # and never touch the OIDC token.
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: staging/**
 
   # The checked-in spark.wasm (and its SRI integrity hash) is what publish
   # ships: rebuild it in the pinned linux/amd64 image and byte-compare, the

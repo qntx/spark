@@ -15,8 +15,8 @@ on:
         description: >-
           Release build for a publish run: the shared rust cache is disabled (it
           is populated by untrusted PR jobs and could smuggle in code that ends
-          up in published binaries) and both artifacts get a build-provenance
-          attestation.
+          up in published binaries). Build-provenance attestations live on the
+          caller's native-artifact job, which attests the uploaded files there.
         required: false
         type: boolean
         default: false
@@ -56,11 +56,6 @@ concurrency:
 jobs:
   ios:
     runs-on: macos-latest
-    permissions:
-      contents: read
-      # Only exercised on release builds (inputs.release); inert otherwise.
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,24 +71,12 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build:native --ios
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        id: artifact
         with:
           name: QntxSpark.xcframework
           path: packages/spark-native/ios/QntxSpark.xcframework
-      - name: Attest build provenance
-        if: ${{ inputs.release }}
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: QntxSpark.xcframework
-          subject-digest: ${{ steps.artifact.outputs.artifact-digest }}
 
   android:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Only exercised on release builds (inputs.release); inert otherwise.
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -115,7 +98,6 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        id: artifact
         with:
           name: qntx-spark-jniLibs
           # include/ ships the generated qntx_spark.h copy; both paths sit
@@ -124,9 +106,3 @@ jobs:
           path: |
             packages/spark-native/android/src/main/jniLibs
             packages/spark-native/include
-      - name: Attest build provenance
-        if: ${{ inputs.release }}
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: qntx-spark-jniLibs
-          subject-digest: ${{ steps.artifact.outputs.artifact-digest }}
