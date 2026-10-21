@@ -18,6 +18,8 @@ const NOT_IMPLEMENTED = "test signer: not implemented";
 export function createTestSigner(
   secretKey: Uint8Array,
   leafPublicKeys: ReadonlyMap<string, Uint8Array> = new Map(),
+  /** Returned for any leaf id missing from `leafPublicKeys` — corrupted-response harnesses. */
+  defaultLeafPublicKey?: Uint8Array,
 ): SparkSigner & {
   readonly secretKey: Uint8Array;
 } {
@@ -35,7 +37,10 @@ export function createTestSigner(
     publicKeys: async (keys) => {
       await ready;
       return keys.map((key) => {
-        const resolved = key.type === "leaf" ? leafPublicKeys.get(key.leafId) : undefined;
+        const resolved =
+          key.type === "leaf"
+            ? (leafPublicKeys.get(key.leafId) ?? defaultLeafPublicKey)
+            : undefined;
         if (resolved === undefined) {
           throw new Error(NOT_IMPLEMENTED);
         }

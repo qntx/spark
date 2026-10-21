@@ -445,6 +445,7 @@ async function lightningDeps(options: {
 }): Promise<LightningDeps> {
   return {
     spark: options.spark ?? fakeSpark({}).spark,
+    operatorSparks: [],
     ssp: options.ssp,
     sspIdentityPublicKey: SSP_IDENTITY,
     signer: await testSigner(),
@@ -1153,7 +1154,9 @@ describe("payLightningInvoice", () => {
     expect(sendRequests[0]!.userOutboundTransferExternalId).toBe(
       "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
     );
-    expect(deleted).toStrictEqual([["leaf-1"]]);
+    // A probe hit deletes nothing: the leaves were committed in an earlier call — the sync
+    // sweep reclaims their chains on endorsed evidence (N-01).
+    expect(deleted).toStrictEqual([]);
     expect(payment.requestId).toBe("send-req-1");
     expect(payment.transferId).toBe("0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee");
   });
@@ -1368,7 +1371,7 @@ describe("payLightningInvoice", () => {
     expect(sendRequests).toHaveLength(0);
   });
 
-  test("exit chains are deleted for the returned transfer's leaves, not the selection", async () => {
+  test("a commit naming leaves this call never selected deletes no chains", async () => {
     const signer = await testSigner();
     const selected = await fabricateLeaf(signer, { leafId: "selected-1" });
     const returned = await fabricateLeaf(signer, { leafId: "returned-9" });
@@ -1379,7 +1382,9 @@ describe("payLightningInvoice", () => {
     });
     const { deps, deleted } = await sendDeps({ leaves: [selected], transferLeaves: [returned] });
     await payLightningInvoice(deps, { invoice, maxFeeSats: 200 });
-    expect(deleted).toStrictEqual([["returned-9"]]);
+    // Only the intersection of this call's selection and the verified transfer's leaves can be
+    // deleted — a reported list cannot strip another leaf's exit data (N-01).
+    expect(deleted).toStrictEqual([]);
   });
 
   test("exit chains are deleted before the ssp send request runs", async () => {

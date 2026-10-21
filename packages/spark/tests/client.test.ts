@@ -76,6 +76,7 @@ function ownedLeaf(
   status = "AVAILABLE",
 ): TreeNode {
   const node = makeLeaf(id, valueSats, status);
+  node.ownerIdentityPublicKey = secp256k1.getPublicKey(new Uint8Array(32).fill(7), true);
   node.nodeTx = txSpending(fakeTxid((id.codePointAt(0) ?? 0) + id.length), 0, KEY, valueSats);
   node.refundTx = txSpending(
     hexToBytes(txId(node.nodeTx)),

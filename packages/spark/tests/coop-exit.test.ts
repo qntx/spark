@@ -608,6 +608,7 @@ async function exitDeps(overrides: {
     deleteExitChains: (leafIds: ReadonlyArray<string>) => Promise<void>;
   } = {
     spark,
+    operatorSparks: [],
     ssp,
     sspIdentityPublicKey: SSP_IDENTITY,
     signer,
@@ -1254,11 +1255,10 @@ describe("cooperativeExit", () => {
     });
     const { deps, calls, exitRequests, completions, deleted, spendAmounts, frostJobs, events } =
       await exitDeps({ leaves: [leaf], recoveredTransfer: committed, payoutTx, connectorTx });
-    // maxFeeSats: 0 proves the resume path is not gated by the fee cap.
     const result = await cooperativeExit(deps, {
       address: WITHDRAW_ADDRESS,
       speed: "SLOW",
-      maxFeeSats: 0,
+      maxFeeSats: 100,
       transferId: committed.id,
     });
     expect(result).toMatchObject({
@@ -1281,11 +1281,52 @@ describe("cooperativeExit", () => {
         userOutboundTransferExternalId: committed.id,
       },
     ]);
-    expect(deleted).toStrictEqual([["leaf-p"]]);
-    expect(events).toStrictEqual(["delete", "complete"]);
+    // A resume deletes nothing — the endorsed sync sweep reclaims the spent leaves.
+    expect(deleted).toStrictEqual([]);
+    expect(events).toStrictEqual(["complete"]);
     expect(completions).toStrictEqual([
       { coopExitRequestId: "exit-1", userOutboundTransferExternalId: committed.id },
     ]);
+  });
+
+  test("a resumed exit whose derived fee exceeds maxFeeSats fails loud", async () => {
+    const signer0 = createSparkSigner({
+      crypto: await loadWasmBackend(),
+      accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
+      network: "regtest",
+      random: fixedRandom(),
+    });
+    const leaf = await fabricateLeaf(signer0, { leafId: "leaf-f", valueSats: 100_000n });
+    const identity = await signer0.identityPublicKey();
+    const payoutTx = payoutTxFor(WITHDRAW_ADDRESS, 99_990);
+    const connectorTx = connectorTxFor(txId(payoutTx), 2);
+    const committed = transferProto({
+      id: "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      sender: identity,
+      receiver: SSP_IDENTITY,
+      leaves: [leaf],
+      totalValue: 100_000n,
+      connectorTx,
+    });
+    const { deps, completions, deleted } = await exitDeps({
+      leaves: [leaf],
+      recoveredTransfer: committed,
+      payoutTx,
+      connectorTx,
+    });
+    await expect(
+      cooperativeExit(deps, {
+        address: WITHDRAW_ADDRESS,
+        speed: "SLOW",
+        maxFeeSats: 5,
+        transferId: committed.id,
+      }),
+    ).rejects.toThrow(
+      `coop exit: transfer ${committed.id} is already committed; its derived fee 10 ` +
+        `exceeds maxFeeSats 5 (payout 99990 sats)`,
+    );
+    expect(completions).toStrictEqual([]);
+    expect(deleted).toStrictEqual([]);
   });
 
   test("a resumed exit fails when the payout does not pay the requested address", async () => {
@@ -1371,7 +1412,7 @@ describe("cooperativeExit", () => {
       }),
     ).rejects.toThrow("does not spend the ssp connector transaction");
     expect(completions).toStrictEqual([]);
-    expect(deleted).toStrictEqual([["leaf-c"]]);
+    expect(deleted).toStrictEqual([]);
   });
 
   test("a resumed exit fails when the committed transfer carries no intermediate refunds", async () => {

@@ -23,6 +23,7 @@ import {
   GetSigningCommitmentsResponseSchema,
   Network,
   QueryNodesResponseSchema,
+  QueryTransfersResponseSchema,
   RenewLeafResponseSchema,
   RequestedSigningCommitmentsSchema,
   SparkService,
@@ -40,6 +41,7 @@ import type {
   RenewNodeTimelockSigningJob,
   RenewNodeZeroTimelockSigningJob,
   StartTransferRequest,
+  Transfer,
 } from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner, SigningTarget } from "../src/signer/index.ts";
@@ -195,6 +197,7 @@ type SparkImpl = Partial<{
   get_signing_commitments: (req: GetSigningCommitmentsRequest) => unknown;
   renew_leaf: (req: RenewLeafRequest, ctx: HandlerContext) => unknown;
   start_transfer_v2: (req: StartTransferRequest) => unknown;
+  query_transfers_by_id: (req: unknown) => unknown;
 }>;
 
 function makeSparkClient(sparkImpl: SparkImpl): Client<typeof SparkService> {
@@ -649,6 +652,7 @@ describe("transfers.send renewal", () => {
 
     const events: string[] = [];
     let startReq: StartTransferRequest | undefined;
+    const served: Transfer[] = [];
     const client = makeWalletClient(signer, {
       query_nodes: () =>
         create(QueryNodesResponseSchema, { nodes: { [leaf.id]: node }, offset: -1n }),
@@ -663,18 +667,19 @@ describe("transfers.send renewal", () => {
       start_transfer_v2: (req) => {
         events.push("send");
         startReq = req;
-        return create(StartTransferResponseSchema, {
-          transfer: create(TransferSchema, {
-            id: req.transferId,
-            senderIdentityPublicKey: req.ownerIdentityPublicKey,
-            receiverIdentityPublicKey: req.receiverIdentityPublicKey,
-            status: TransferStatus.SENDER_INITIATED,
-            type: TransferType.TRANSFER,
-            network: Network.REGTEST,
-            totalValue: 100_000n,
-          }),
+        const transfer = create(TransferSchema, {
+          id: req.transferId,
+          senderIdentityPublicKey: req.ownerIdentityPublicKey,
+          receiverIdentityPublicKey: req.receiverIdentityPublicKey,
+          status: TransferStatus.SENDER_INITIATED,
+          type: TransferType.TRANSFER,
+          network: Network.REGTEST,
+          totalValue: 100_000n,
         });
+        served.push(transfer);
+        return create(StartTransferResponseSchema, { transfer });
       },
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [...served] }),
     });
 
     await client.transfers.send({ receiver: receiverIdentity, amountSats: 100_000 });
