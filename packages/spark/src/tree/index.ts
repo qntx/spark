@@ -37,6 +37,9 @@ const LEAF_PAGE_SIZE = 50;
  */
 const MAX_PAGES = 1000;
 
+/** SO `query_nodes` caps `nodeIds` at DefaultMaxQueryNodesByID. */
+export const MAX_QUERY_NODE_IDS = 1000;
+
 function optionalBytes(value: Uint8Array): Uint8Array | undefined {
   return value.length === 0 ? undefined : value;
 }
@@ -123,6 +126,40 @@ export async function queryOwnerNodes(options: {
     offset = nextOffset;
   }
   throw new SparkError("query nodes: coordinator did not stop returning full pages");
+}
+
+/**
+ * Queries `ids` in `MAX_QUERY_NODE_IDS` chunks (sequential by design — chunk N+1 is not requested
+ * until N returns) and returns the raw rows in response order. Callers decide per-row handling:
+ * duplicates, unmappable rows and whether parents are wanted.
+ */
+export async function queryNodesByIds(
+  spark: Client<typeof SparkService>,
+  ids: ReadonlyArray<string>,
+  network: SparkNetwork,
+  includeParents: boolean,
+  call?: CallOptions,
+): Promise<TreeNode[]> {
+  const rows: TreeNode[] = [];
+  for (let i = 0; i < ids.length; i += MAX_QUERY_NODE_IDS) {
+    // oxlint-disable-next-line no-await-in-loop -- chunks are sequential by design
+    const response = await spark.query_nodes(
+      {
+        source: {
+          case: "nodeIds",
+          value: { nodeIds: ids.slice(i, i + MAX_QUERY_NODE_IDS) },
+        },
+        includeParents,
+        limit: 0n,
+        offset: 0n,
+        network: sparkNetworkProto(network),
+        statuses: [],
+      },
+      call,
+    );
+    rows.push(...Object.values(response.nodes));
+  }
+  return rows;
 }
 
 /** Result of an owner-leaf walk: rows that could not be mapped are reported, not thrown over. */

@@ -5,7 +5,6 @@ import { decodeSparkAddress, verifySparkAddressSignature } from "../core/address
 import { createMutex } from "../core/mutex.ts";
 import type { Mutex } from "../core/mutex.ts";
 import type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "../core/network.ts";
-import { sparkNetworkProto } from "../core/network.ts";
 import { decodeTokenIdentifier } from "../core/token-identifier.ts";
 import type { DepositCoordinator } from "../deposit/index.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
@@ -23,6 +22,7 @@ import {
   operatorsDisagree,
   ownsLeaf,
   queryLeaves,
+  queryNodesByIds,
   sameLeafRow,
 } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
@@ -65,9 +65,6 @@ export type ClientContext = {
   readonly receiverIdentityKey: (receiver: string | Uint8Array) => Uint8Array;
   readonly tokenIdentifierForNetwork: (text: string) => Uint8Array;
 };
-
-/** SO `query_nodes` caps `nodeIds` at DefaultMaxQueryNodesByID. */
-const MAX_QUERY_NODE_IDS = 1000;
 
 /**
  * The node statuses that prove a stored exit chain can never be broadcast again — deletion is
@@ -251,26 +248,12 @@ export function createClientContext(
       maps = await Promise.all(
         clients.map(async (spark) => {
           const rows = new Map<string, TreeNode[]>();
-          for (let i = 0; i < leafIds.length; i += MAX_QUERY_NODE_IDS) {
-            // oxlint-disable-next-line no-await-in-loop -- chunks are sequential by design
-            const response = await spark.query_nodes({
-              source: {
-                case: "nodeIds",
-                value: { nodeIds: leafIds.slice(i, i + MAX_QUERY_NODE_IDS) },
-              },
-              includeParents: false,
-              limit: 0n,
-              offset: 0n,
-              network: sparkNetworkProto(network),
-              statuses: [],
-            });
-            for (const node of Object.values(response.nodes)) {
-              const list = rows.get(node.id);
-              if (list === undefined) {
-                rows.set(node.id, [node]);
-              } else {
-                list.push(node);
-              }
+          for (const node of await queryNodesByIds(spark, leafIds, network, false)) {
+            const list = rows.get(node.id);
+            if (list === undefined) {
+              rows.set(node.id, [node]);
+            } else {
+              list.push(node);
             }
           }
           return rows;

@@ -239,11 +239,8 @@ export function constructRefundTxTrio(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Upstream TS wrappers (sdks/…/utils/transaction.ts): take parsed/raw parent
 // transactions and pick the destination address from the parent output.
-// ---------------------------------------------------------------------------
-
 export type NodeTxsParams = {
   readonly parentTx: Uint8Array;
   readonly vout: number;

@@ -1032,11 +1032,13 @@ function asHexBytes(value: unknown, field: string): Uint8Array {
 /** Display-order txid hex, exactly 32 bytes. */
 function asTxidHex(value: unknown, field: string): string {
   const txid = asString(value, field);
+  let bytes: Uint8Array;
   try {
-    if (hexToBytes(txid).length !== 32) {
-      throw new Error("wrong length");
-    }
+    bytes = hexToBytes(txid);
   } catch {
+    throw unexpectedResponse(field, "is not a 32-byte hex txid");
+  }
+  if (bytes.length !== 32) {
     throw unexpectedResponse(field, "is not a 32-byte hex txid");
   }
   return txid;
