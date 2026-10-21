@@ -19,6 +19,7 @@ import type {
   LightningInvoice,
   LightningPayment,
   LightningReceiveStatus,
+  LightningReceiveStatusRequest,
   LightningSendStatus,
   LightningSendStatusRequest,
 } from "../lightning/index.ts";
@@ -248,10 +249,12 @@ export type SparkClient = {
     readonly sendStatus: (request: LightningSendStatusRequest) => Promise<LightningSendStatus>;
     /**
      * `user_request` status of a receive, with the inbound transfer id once present and the settled
-     * `preimage` once the SSP reports it — returned only after `sha256(preimage)` checks out
-     * against the request invoice's payment hash (a mismatch throws).
+     * `preimage` once the SSP reports it — the request's invoice and preimage are both checked
+     * against the payment hash of the invoice we created (a mismatch throws).
      */
-    readonly receiveStatus: (requestId: string) => Promise<LightningReceiveStatus>;
+    readonly receiveStatus: (
+      request: LightningReceiveStatusRequest,
+    ) => Promise<LightningReceiveStatus>;
   };
   readonly deposits: {
     /** Fresh single-use deposit address with a verified proof-of-possession. */

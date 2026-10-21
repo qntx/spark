@@ -1474,15 +1474,19 @@ describe("lightningReceiveStatus", () => {
     const { ssp } = fakeSsp({
       lightningReceiveRequest: () => ({
         status: "TRANSFER_COMPLETED",
+        invoice: RECEIVED_INVOICE,
         transferId: "transfer-abc",
       }),
     });
-    const status = await lightningReceiveStatus(ssp, "req-2");
+    const status = await lightningReceiveStatus(ssp, {
+      requestId: "req-2",
+      paymentHash: PAYMENT_HASH,
+    });
     expect(status.status).toBe("TRANSFER_COMPLETED");
     expect(status.transferId).toBe("transfer-abc");
   });
 
-  test("returns the preimage once it verifies against the request invoice", async () => {
+  test("returns the preimage once it verifies against the request payment hash", async () => {
     const { ssp } = fakeSsp({
       lightningReceiveRequest: () => ({
         status: "TRANSFER_COMPLETED",
@@ -1491,12 +1495,36 @@ describe("lightningReceiveStatus", () => {
         paymentPreimage: PREIMAGE,
       }),
     });
-    const status = await lightningReceiveStatus(ssp, "req-2");
+    const status = await lightningReceiveStatus(ssp, {
+      requestId: "req-2",
+      paymentHash: PAYMENT_HASH,
+    });
     expect(status.transferId).toBe("transfer-abc");
     expect(bytesToHex(required(status.preimage, "preimage"))).toBe(bytesToHex(PREIMAGE));
   });
 
-  test("rejects a preimage that does not hash to the request invoice's payment hash", async () => {
+  test("rejects a self-consistent status for a different payment", async () => {
+    // The SSP returns an invoice + preimage pair that verifies internally — but against a
+    // payment hash other than the one our request created.
+    const otherPreimage = new Uint8Array(32).fill(0x77);
+    const foreign = encodeTestBolt11({
+      secretKey: INVOICE_SECRET,
+      paymentHash: sha256(otherPreimage),
+      amountMsat: 1_000_000n,
+    });
+    const { ssp } = fakeSsp({
+      lightningReceiveRequest: () => ({
+        status: "TRANSFER_COMPLETED",
+        invoice: foreign,
+        paymentPreimage: otherPreimage,
+      }),
+    });
+    await expect(
+      lightningReceiveStatus(ssp, { requestId: "req-2", paymentHash: PAYMENT_HASH }),
+    ).rejects.toThrow("not the invoice we created");
+  });
+
+  test("rejects a preimage that does not hash to the request payment hash", async () => {
     const { ssp } = fakeSsp({
       lightningReceiveRequest: () => ({
         status: "TRANSFER_COMPLETED",
@@ -1504,10 +1532,12 @@ describe("lightningReceiveStatus", () => {
         paymentPreimage: new Uint8Array(32).fill(0x99),
       }),
     });
-    await expect(lightningReceiveStatus(ssp, "req-2")).rejects.toThrow(SparkError);
-    await expect(lightningReceiveStatus(ssp, "req-2")).rejects.toThrow(
-      "does not match the invoice payment hash",
-    );
+    await expect(
+      lightningReceiveStatus(ssp, { requestId: "req-2", paymentHash: PAYMENT_HASH }),
+    ).rejects.toThrow(SparkError);
+    await expect(
+      lightningReceiveStatus(ssp, { requestId: "req-2", paymentHash: PAYMENT_HASH }),
+    ).rejects.toThrow("does not match the request payment hash");
   });
 });
 

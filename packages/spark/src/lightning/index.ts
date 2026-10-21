@@ -6,6 +6,7 @@ export type { LightningPayment } from "./send.ts";
 export { lightningReceiveStatus, lightningSendStatus } from "./status.ts";
 export type {
   LightningReceiveStatus,
+  LightningReceiveStatusRequest,
   LightningSendOutcome,
   LightningSendStatus,
   LightningSendStatusRequest,

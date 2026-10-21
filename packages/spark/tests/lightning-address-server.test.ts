@@ -141,7 +141,8 @@ function fakeClient(options?: {
           expiresAtMs: NOW_MS + 600_000,
         });
       },
-      receiveStatus: async (requestId: string) => {
+      receiveStatus: async (request: { requestId: string; paymentHash: Uint8Array }) => {
+        const { requestId } = request;
         statusCalls.push(requestId);
         if (options?.failFor?.includes(requestId)) {
           throw new Error(`status read failed for ${requestId}`);

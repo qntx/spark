@@ -47,6 +47,6 @@ export function createLightning(context: ClientContext): SparkClient["lightning"
         options,
       ),
     sendStatus: async (request) => lightningSendStatus(context.sspClient, request),
-    receiveStatus: async (requestId) => lightningReceiveStatus(context.sspClient, requestId),
+    receiveStatus: async (request) => lightningReceiveStatus(context.sspClient, request),
   };
 }
