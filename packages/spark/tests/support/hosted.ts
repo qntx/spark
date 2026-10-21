@@ -1,8 +1,8 @@
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 
+import { envSeed } from "../../scripts/env-seed.ts";
 import { createSparkClient } from "../../src/client/index.ts";
 import { createMemorySparkStore } from "../../src/exit/store.ts";
 import type { LightningSendStatus } from "../../src/lightning/index.ts";
@@ -15,27 +15,7 @@ import { claimPendingUntil } from "./local.ts";
 const ENV_HOSTED = fileURLToPath(new URL("../../../../.env.hosted", import.meta.url));
 
 export function hostedSeed(): Uint8Array {
-  let hex = process.env["SPARK_HOSTED_SEED"]?.trim();
-  if (hex === undefined) {
-    let content: string | undefined;
-    try {
-      content = readFileSync(ENV_HOSTED, "utf8");
-    } catch {
-      // The env var is the primary source; a missing file is fine.
-    }
-    for (const line of (content ?? "").split("\n")) {
-      const [key, ...rest] = line.split("=");
-      if (key?.trim() === "SPARK_HOSTED_SEED") {
-        hex = rest.join("=").trim();
-      }
-    }
-  }
-  if (hex === undefined || !/^[0-9a-f]{128}$/i.test(hex)) {
-    throw new Error(
-      "hosted e2e needs SPARK_HOSTED_SEED (64-byte hex) in the environment or .env.hosted",
-    );
-  }
-  return hexToBytes(hex);
+  return envSeed({ envVar: "SPARK_HOSTED_SEED", envFile: ENV_HOSTED });
 }
 
 export type HostedWallet = {
