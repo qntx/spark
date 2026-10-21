@@ -46,7 +46,7 @@ export async function prepareTransferPackage(
     readonly call?: CallOptions;
   },
 ): Promise<TransferPackage> {
-  const { spark, signer, operators, threshold } = options;
+  const { spark, signer } = options;
   if (options.leaves.length === 0) {
     throw new SparkInputError("prepareTransferPackage: leaves must not be empty");
   }
@@ -58,8 +58,6 @@ export async function prepareTransferPackage(
       key: { type: "leaf", leafId: leaf.leaf.id },
       receiverIdentityPublicKey: leaf.receiverIdentityPublicKey,
     })),
-    operators,
-    threshold,
   });
 
   const signingCommitments = await spark.get_signing_commitments(

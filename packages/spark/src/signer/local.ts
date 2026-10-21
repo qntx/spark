@@ -1,6 +1,7 @@
-import { schnorr } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { taprootTweakPrivKey } from "@scure/btc-signer/utils.js";
 
+import { requireLength } from "../core/assert.ts";
 import {
   createSequenceLockScript,
   LIGHTNING_HTLC_SEQUENCE,
@@ -13,11 +14,19 @@ import {
   taprootScriptSpendSighash,
 } from "../core/bitcoin/sighash.ts";
 import type { SigningTarget } from "../core/bitcoin/sighash.ts";
+import { sparkNetworkConfig } from "../core/network.ts";
 import type { SparkNetwork } from "../core/network.ts";
 import { SPARK_ABI_VERSION } from "../crypto/index.ts";
 import type { SparkCrypto } from "../crypto/index.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
-import { checkBatch, randomBytes, ready } from "./backend.ts";
+import {
+  checkBatch,
+  checkOperators,
+  checkThreshold,
+  PUBLIC_KEY_LENGTH,
+  randomBytes,
+  ready,
+} from "./backend.ts";
 import { frostAggregateJobs, frostSignJobs } from "./frost.ts";
 import { openKeys } from "./keys.ts";
 import type { SignerKeys } from "./keys.ts";
@@ -60,12 +69,27 @@ export { sparkAccountKey } from "./keys.ts";
  * Creates the local Spark signer: the implementation of {@link SparkSigner} that holds the account
  * extended private key and delegates curve-heavy FROST/ECIES/VSS work to a `SparkCrypto` backend.
  * Throws `SparkInputError` on an ABI version mismatch or a malformed `accountKey`.
+ *
+ * The operator set, VSS threshold and SSP identity are bound here and default to the network's
+ * `sparkNetworkConfig`; every key-tweak share and the static-deposit secret is sealed to these keys
+ * and no request can retarget them. Pass explicit values only to point the signer at a different
+ * deployment (the local stack's operators/SSP), exactly like the client's `operators` and `ssp`
+ * options.
  */
 export function createSparkSigner(options: {
   readonly crypto: SparkCrypto;
   readonly accountKey: Uint8Array;
   readonly network: SparkNetwork;
   readonly random: (length: number) => Uint8Array;
+  /**
+   * Signing-operator set the key-tweak and preimage shares are sealed to; defaults to the network's
+   * operator set.
+   */
+  readonly operators?: ReadonlyArray<SparkOperator>;
+  /** VSS threshold across `operators`; defaults to the network's threshold. */
+  readonly threshold?: number;
+  /** SSP identity the static-deposit secret is sealed to; defaults to the network's SSP key. */
+  readonly sspIdentityPublicKey?: Uint8Array;
 }): SparkSigner {
   const { crypto, network, random } = options;
   if (crypto.abiVersion !== SPARK_ABI_VERSION) {
@@ -77,6 +101,19 @@ export function createSparkSigner(options: {
     throw new SparkInputError(`network: unsupported network ${String(network)}`);
   }
 
+  const config = sparkNetworkConfig(network);
+  const operators = options.operators ?? config.operators;
+  const threshold = options.threshold ?? config.threshold;
+  const sspIdentityPublicKey = options.sspIdentityPublicKey ?? config.ssp.identityPublicKey;
+  checkOperators(operators);
+  checkThreshold(threshold, operators);
+  requireLength(sspIdentityPublicKey, PUBLIC_KEY_LENGTH, "sspIdentityPublicKey");
+  try {
+    secp256k1.Point.fromBytes(sspIdentityPublicKey);
+  } catch (error) {
+    throw new SparkInputError("sspIdentityPublicKey is not a valid point", { cause: error });
+  }
+
   const keys: SignerKeys = openKeys(options.accountKey, crypto);
   const nonces: NonceStore = createNonceStore(crypto, keys.accountPrivate, random);
   const statements: StatementContext = {
@@ -84,7 +121,15 @@ export function createSparkSigner(options: {
     identityPublicKey: keys.identityPublicKey,
     network,
   };
-  const packages: PackageContext = { crypto, keys, network, random };
+  const packages: PackageContext = {
+    crypto,
+    keys,
+    network,
+    random,
+    operators,
+    threshold,
+    sspIdentityPublicKey,
+  };
 
   let disposed = false;
 
@@ -226,14 +271,11 @@ export function createSparkSigner(options: {
     return prepareClaimPackage(request, packages);
   };
 
-  const prepareLightningReceive = async (request: {
-    readonly operators: ReadonlyArray<SparkOperator>;
-    readonly threshold: number;
-  }): Promise<PreparedLightningReceive> => {
+  const prepareLightningReceive = async (): Promise<PreparedLightningReceive> => {
     ensureAlive();
     await ready;
     ensureAlive();
-    return prepareLightningReceivePackage(request, packages);
+    return prepareLightningReceivePackage(packages);
   };
 
   const claimStaticDeposit = async (

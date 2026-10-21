@@ -128,19 +128,20 @@ function fixedRandom(): (length: number) => Uint8Array {
   };
 }
 
+const STATIC_PUB_SLOT = { type: "static-deposit", index: 0 } as const;
+
+const SSP_SECRET = new Uint8Array(32).fill(77);
+const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
+
 async function testSigner(): Promise<SparkSigner> {
   return createSparkSigner({
     crypto: await loadWasmBackend(),
     accountKey: sparkAccountKey(new Uint8Array(32).fill(11), "regtest"),
     network: "regtest",
     random: fixedRandom(),
+    sspIdentityPublicKey: SSP_IDENTITY,
   });
 }
-
-const STATIC_PUB_SLOT = { type: "static-deposit", index: 0 } as const;
-
-const SSP_SECRET = new Uint8Array(32).fill(77);
-const SSP_IDENTITY = secp256k1.getPublicKey(SSP_SECRET, true);
 
 async function staticPublicKey(signer: SparkSigner): Promise<Uint8Array> {
   const keys = await signer.publicKeys([STATIC_PUB_SLOT]);
@@ -645,14 +646,13 @@ describe("claimStaticDeposit", () => {
       ...signer,
       claimStaticDeposit: async (request) => {
         claimCalls += 1;
-        expect(request.sspIdentityPublicKey).toStrictEqual(SSP_IDENTITY);
         const result = await signer.claimStaticDeposit(request);
         sealed = new Uint8Array(result.encryptedSecretKey);
         return result;
       },
     };
     const result = await claimStaticDeposit(
-      { ...claimCoordinator(spied, fabricated), ssp: ssp.ssp, sspIdentityPublicKey: SSP_IDENTITY },
+      { ...claimCoordinator(spied, fabricated), ssp: ssp.ssp },
       { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
     );
     expect(claimCalls).toBe(1);
@@ -712,7 +712,6 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(spied, fabricated),
           ssp: fakeSsp({ quoteCredit: QUOTE_CREDIT, quoteSignature: "zz" }).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
       ),
@@ -737,7 +736,6 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(spied, fabricated),
           ssp: fakeSsp({ quoteCredit: 0 }).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid, vout: 0, maxFeeSats: 500, rawTx: depositTx },
       ),
@@ -762,7 +760,6 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(spied, fabricated),
           ssp: fakeSsp({ quoteCredit: QUOTE_CREDIT }).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid, vout: 0, maxFeeSats: 199, rawTx: depositTx },
       ),
@@ -780,7 +777,6 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(signer, fabricated),
           ssp: fakeSsp({}).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid: "ab".repeat(32), vout: 0, maxFeeSats: 500, rawTx: other },
       ),
@@ -800,7 +796,6 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(signer, fabricated),
           ssp: fakeSsp({}).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid: txId(foreign), vout: 0, maxFeeSats: 500, rawTx: foreign },
       ),
@@ -816,7 +811,6 @@ describe("claimStaticDeposit", () => {
         {
           ...claimCoordinator(signer, fabricated, [{ txid, vout: 0 }]),
           ssp: fakeSsp({}).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
         },
         { txid, vout: 0, maxFeeSats: 500 },
       ),
@@ -850,7 +844,6 @@ describe("claimStaticDeposit", () => {
             },
           }),
           ssp: fakeSsp({}).ssp,
-          sspIdentityPublicKey: SSP_IDENTITY,
           maxPages: 3,
         },
         { txid, vout: 0, maxFeeSats: 500 },
@@ -868,7 +861,6 @@ describe("claimStaticDeposit", () => {
       {
         ...claimCoordinator(signer, fabricated, [{ txid, vout: 0, rawTx: depositTx }]),
         ssp: ssp.ssp,
-        sspIdentityPublicKey: SSP_IDENTITY,
       },
       { txid, vout: 0, maxFeeSats: 500 },
     );
@@ -1093,7 +1085,6 @@ describe("refundStaticDeposit", () => {
     const { encryptedSecretKey } = await signer.claimStaticDeposit({
       index: 0,
       statement,
-      sspIdentityPublicKey: SSP_IDENTITY,
     });
     const crypto = await loadWasmBackend();
     const secretKey = crypto.eciesDecrypt(SSP_SECRET, encryptedSecretKey);

@@ -283,7 +283,6 @@ async function resolveStaticUtxo(
 export async function claimStaticDeposit(
   options: DepositCoordinator & {
     readonly ssp: SspClient;
-    readonly sspIdentityPublicKey: Uint8Array;
     readonly call?: CallOptions;
     /** Page bound override for the UTXO lookup, for focused tests. */
     readonly maxPages?: number;
@@ -348,7 +347,6 @@ export async function claimStaticDeposit(
       creditAmountSats,
       sspSignature: quoteSignatureBytes,
     },
-    sspIdentityPublicKey: options.sspIdentityPublicKey,
   });
   const claim = await options.ssp.claimStaticDeposit({
     transactionId: request.txid,

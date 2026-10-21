@@ -121,6 +121,7 @@ export async function localWallet(
     accountKey: sparkAccountKey(seed, "regtest"),
     network: "regtest",
     random: (length: number) => randomBytes(length),
+    operators: LOCAL_OPERATORS,
   });
   const store = createMemorySparkStore();
   const client = createSparkClient({
