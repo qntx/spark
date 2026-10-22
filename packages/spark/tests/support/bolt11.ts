@@ -1,5 +1,6 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
 
 // Minimal BOLT-11 encoder for tests: emits the tagged fields core/bolt11.ts decodes
@@ -66,6 +67,38 @@ function wordsToBytesPadded(words: ReadonlyArray<number>): Uint8Array {
     out[index] = (acc << (8 - bits)) & 0xff;
   }
   return out;
+}
+
+/**
+ * Bech32-encodes `hrp` + `dataWords` plus a 65-byte BOLT-11 signature. Given `signature` the bytes
+ * are appended verbatim; otherwise a real recoverable signature over the hrp+data preimage is
+ * produced with `secretKey` (recovery id overridable for malformed-signature probes).
+ */
+export function encodeRawBolt11(options: {
+  readonly hrp: string;
+  readonly dataWords: ReadonlyArray<number>;
+  readonly secretKey?: Uint8Array | undefined;
+  readonly recoveryId?: number | undefined;
+  readonly signature?: Uint8Array | undefined;
+}): string {
+  const words = [...options.dataWords];
+  let recoverable = options.signature;
+  if (recoverable === undefined) {
+    if (options.secretKey === undefined) {
+      throw new Error("encodeRawBolt11 needs secretKey or signature");
+    }
+    const preimage = concatBytes(utf8ToBytes(options.hrp), wordsToBytesPadded(options.dataWords));
+    const signature = secp256k1.sign(sha256(preimage), options.secretKey, {
+      prehash: false,
+      format: "recovered",
+    });
+    // noble packs recovery first; BOLT-11 appends it last.
+    recoverable = new Uint8Array(65);
+    recoverable.set(signature.subarray(1), 0);
+    recoverable[64] = options.recoveryId ?? signature[0] ?? 0;
+  }
+  words.push(...bytesToWords(recoverable));
+  return bech32.encode(options.hrp, words, false).toLowerCase();
 }
 
 /** Minimal big-endian base-32 words — BOLT-11 integer fields are words, not bytes. */
@@ -149,21 +182,5 @@ export function encodeTestBolt11(options: {
   const payee = secp256k1.getPublicKey(options.secretKey, true);
   field(TAG_PAYEE, bytesToWords(payee));
 
-  // The signed preimage is the hrp bytes plus the data words packed 5→8 with zero padding.
-  const preimage = new Uint8Array(hrp.length + Math.ceil((words.length * 5) / 8));
-  for (let i = 0; i < hrp.length; i++) {
-    preimage[i] = hrp.codePointAt(i) ?? 0;
-  }
-  preimage.set(wordsToBytesPadded(words), hrp.length);
-  const signature = secp256k1.sign(sha256(preimage), options.secretKey, {
-    prehash: false,
-    format: "recovered",
-  });
-  // noble packs recovery first; BOLT-11 appends it last.
-  const recoverable = new Uint8Array(65);
-  recoverable.set(signature.subarray(1), 0);
-  recoverable[64] = signature[0] ?? 0;
-  words.push(...bytesToWords(recoverable));
-
-  return bech32.encode(hrp, words, false).toLowerCase();
+  return encodeRawBolt11({ hrp, dataWords: words, secretKey: options.secretKey });
 }

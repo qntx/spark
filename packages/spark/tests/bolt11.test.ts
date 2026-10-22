@@ -7,7 +7,7 @@ import { expect, test } from "vite-plus/test";
 
 import { decodeBolt11, isExpired } from "../src/core/bolt11.ts";
 import { SparkInputError } from "../src/errors/index.ts";
-import { encodeTestBolt11 } from "./support/bolt11.ts";
+import { bytesToWords, encodeRawBolt11, encodeTestBolt11 } from "./support/bolt11.ts";
 
 const vectors = JSON.parse(
   readFileSync(resolve(import.meta.dirname, "../../../vectors/bolt11.json"), "utf8"),
@@ -28,8 +28,34 @@ test.each(vectors.cases.filter((entry) => entry.valid))("decodes valid case %#",
   expect(() => decodeBolt11(c.invoice)).not.toThrow();
 });
 
+const INVALID_REASONS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["Same, but adding invalid unknown feature 100", /unknown required feature bit 100/],
+  ["Bech32 checksum is invalid", /invalid bech32/],
+  ["Malformed bech32 string (no 1)", /invalid bech32/],
+  ["Malformed bech32 string (mixed case)", /invalid bech32/],
+  ["Signature is not recoverable", /not recoverable/],
+  ["String is too short", /too short/],
+  ["Invalid multiplier", /multiplier/],
+  ["Invalid sub-millisatoshi precision", /multiple of 10/],
+  ["Missing required `s` field", /missing payment secret/],
+  [
+    "Non canonical signature (high-S) with 'n' field defined",
+    /does not verify against the n field/,
+  ],
+];
+
+test("every invalid vector has a mapped rejection reason", () => {
+  const mapped = new Set(INVALID_REASONS.map(([title]) => title));
+  for (const c of vectors.cases.filter((entry) => !entry.valid)) {
+    expect(mapped.has(c.title), `unmapped invalid vector: ${c.title}`).toBe(true);
+  }
+});
+
 test.each(vectors.cases.filter((entry) => !entry.valid))("rejects invalid case %#", (c) => {
+  const reason = INVALID_REASONS.find(([title]) => title === c.title)?.[1];
+  expect(reason, `unmapped invalid vector: ${c.title}`).toBeDefined();
   expect(() => decodeBolt11(c.invoice)).toThrow(SparkInputError);
+  expect(() => decodeBolt11(c.invoice)).toThrow(reason!);
 });
 
 test("donation invoice: no amount, fields decoded", () => {
@@ -277,4 +303,258 @@ test("non-minimal x and c fields are rejected", () => {
       ),
     ).toThrow("non-minimal data_length");
   }
+});
+
+// Raw-word crafting helpers for negative coverage: the tagged data part is
+// [7 timestamp words][tagged fields]; encodeRawBolt11 appends the signature.
+const PAYMENT_SECRET = new Uint8Array(32).fill(2);
+const OTHER_SECRET = new Uint8Array(32).fill(7);
+
+function tsWords(timestamp = 1_700_000_000): number[] {
+  const words: number[] = [];
+  for (let i = 6; i >= 0; i--) {
+    words.push(Math.floor(timestamp / 32 ** i) & 31);
+  }
+  return words;
+}
+
+function taggedField(tag: number, data: ReadonlyArray<number>): number[] {
+  return [tag, Math.floor(data.length / 32), data.length % 32, ...data];
+}
+
+function minimalWords(): number[] {
+  return [
+    ...tsWords(),
+    ...taggedField(1, bytesToWords(PAYMENT_HASH)),
+    ...taggedField(16, bytesToWords(PAYMENT_SECRET)),
+    ...taggedField(13, bytesToWords(new TextEncoder().encode("test"))),
+  ];
+}
+
+function crafted(
+  dataWords: ReadonlyArray<number>,
+  options?: { hrp?: string; secretKey?: Uint8Array; recoveryId?: number; signature?: Uint8Array },
+): string {
+  return encodeRawBolt11({
+    hrp: options?.hrp ?? "lnbcrt",
+    dataWords,
+    secretKey: SECRET,
+    ...options,
+  });
+}
+
+test("mixed-case crafted invoice is rejected as invalid bech32", () => {
+  const valid = crafted(minimalWords());
+  const mixed = `lN${valid.slice(2)}`;
+  expect(() => decodeBolt11(mixed)).toThrow(/invalid bech32/);
+});
+
+test.each([
+  ["zz", /expected 'ln'/],
+  ["lnxy", /unknown currency/],
+  ["ln123", /unknown currency/],
+  ["lnbcrt-10u", /amount/],
+  ["lnbcrt!", /amount/],
+  ["lnbcrt01u", /leading zeros/],
+  ["lnbcrt2500000001p", /multiple of 10/],
+])("hrp %s is rejected", (hrp, reason) => {
+  expect(() => decodeBolt11(crafted(minimalWords(), { hrp }))).toThrow(reason);
+});
+
+test.each([
+  ["lnbcrt0u", 0n],
+  ["lnbcrt3", 300_000_000_000n],
+  ["lnbcrt7n", 700n],
+  ["lnbcrt2500u", 250_000_000n],
+])("hrp %s parses the exact msat amount", (hrp, expected) => {
+  expect(decodeBolt11(crafted(minimalWords(), { hrp })).amountMsat).toBe(expected);
+});
+
+test("seven data words before the signature means missing payment hash, not too short", () => {
+  expect(() => decodeBolt11(crafted(tsWords()))).toThrow(/missing payment hash/);
+  expect(() => decodeBolt11(crafted(tsWords().slice(0, 6)))).toThrow(/too short/);
+});
+
+test("one or two dangling header words are a truncated header", () => {
+  expect(() => decodeBolt11(crafted([...tsWords(), 5]))).toThrow(/truncated header/);
+  expect(() => decodeBolt11(crafted([...tsWords(), 5, 3]))).toThrow(/truncated header/);
+});
+
+test("a field whose declared length overruns the signature is rejected", () => {
+  // Tag 13 with declared length 5 but only 2 data words before the signature.
+  expect(() => decodeBolt11(crafted([...tsWords(), 13, 0, 5, 1, 2]))).toThrow(/overruns/);
+});
+
+test("an x field larger than 2^53 overflows a safe integer", () => {
+  const huge = taggedField(
+    6,
+    Array.from({ length: 11 }, () => 31),
+  );
+  expect(() => decodeBolt11(crafted([...tsWords(), ...huge]))).toThrow(/overflows a safe integer/);
+});
+
+test("minFinalCltvExpiry decodes the exact c field value", () => {
+  const inv = decodeBolt11(
+    encodeTestBolt11({ secretKey: SECRET, paymentHash: PAYMENT_HASH, minFinalCltvExpiry: 42 }),
+  );
+  expect(inv.minFinalCltvExpiry).toBe(42);
+});
+
+test("non-minimal features field is rejected", () => {
+  expect(() =>
+    decodeBolt11(crafted([...tsWords(), ...taggedField(5, [0, 1]), ...minimalWords().slice(7)])),
+  ).toThrow(/non-minimal/);
+});
+
+test("an empty f field is missing its version", () => {
+  expect(() =>
+    decodeBolt11(crafted([...tsWords(), ...taggedField(9, []), ...minimalWords().slice(7)])),
+  ).toThrow(/missing version/);
+});
+
+test.each([
+  [[], /51-byte/],
+  [bytesToWords(new Uint8Array(50)), /51-byte/],
+])("a route hint that is not a multiple of 51 bytes is rejected", (data, reason) => {
+  expect(() =>
+    decodeBolt11(crafted([...tsWords(), ...taggedField(3, data), ...minimalWords().slice(7)])),
+  ).toThrow(reason);
+});
+
+const OTHER_HASH = new Uint8Array(32).fill(9);
+
+test.each([
+  {
+    name: "p",
+    build: () => [
+      ...tsWords(),
+      ...taggedField(1, bytesToWords(OTHER_HASH)),
+      ...minimalWords().slice(7),
+    ],
+    pick: (inv: ReturnType<typeof decodeBolt11>) => inv.paymentHash,
+    expected: OTHER_HASH,
+  },
+  {
+    name: "s",
+    build: () => [
+      ...tsWords(),
+      ...taggedField(16, bytesToWords(OTHER_HASH)),
+      ...minimalWords().slice(7),
+    ],
+    pick: (inv: ReturnType<typeof decodeBolt11>) => inv.paymentSecret,
+    expected: OTHER_HASH,
+  },
+  {
+    name: "h",
+    build: () => [
+      ...tsWords(),
+      ...taggedField(1, bytesToWords(PAYMENT_HASH)),
+      ...taggedField(16, bytesToWords(PAYMENT_SECRET)),
+      ...taggedField(23, bytesToWords(OTHER_HASH)),
+      ...taggedField(23, bytesToWords(new Uint8Array(32).fill(5))),
+    ],
+    pick: (inv: ReturnType<typeof decodeBolt11>) => inv.descriptionHash,
+    expected: OTHER_HASH,
+  },
+  {
+    name: "n",
+    build: () => [
+      ...minimalWords(),
+      ...taggedField(19, bytesToWords(secp256k1.getPublicKey(SECRET, true))),
+      ...taggedField(19, bytesToWords(secp256k1.getPublicKey(OTHER_SECRET, true))),
+    ],
+    pick: (inv: ReturnType<typeof decodeBolt11>) => inv.payee,
+    expected: secp256k1.getPublicKey(SECRET, true),
+  },
+])("duplicate $name fields: the first wins", ({ build, pick, expected }) => {
+  expect(pick(decodeBolt11(crafted(build())))).toStrictEqual(expected);
+});
+
+test("invalid UTF-8 in a d field is rejected", () => {
+  const badUtf8 = bytesToWords(new Uint8Array([0xff, 0xfe, 0xfd]));
+  expect(() =>
+    decodeBolt11(
+      crafted([
+        ...tsWords(),
+        ...taggedField(1, bytesToWords(PAYMENT_HASH)),
+        ...taggedField(16, bytesToWords(PAYMENT_SECRET)),
+        ...taggedField(13, badUtf8),
+      ]),
+    ),
+  ).toThrow(/invalid UTF-8/);
+});
+
+test("an invoice with neither d nor h is missing its description", () => {
+  expect(() =>
+    decodeBolt11(
+      crafted([
+        ...tsWords(),
+        ...taggedField(1, bytesToWords(PAYMENT_HASH)),
+        ...taggedField(16, bytesToWords(PAYMENT_SECRET)),
+      ]),
+    ),
+  ).toThrow(/missing description/);
+});
+
+test("an invoice with both d and h is rejected", () => {
+  expect(() =>
+    decodeBolt11(
+      crafted([
+        ...tsWords(),
+        ...taggedField(1, bytesToWords(PAYMENT_HASH)),
+        ...taggedField(16, bytesToWords(PAYMENT_SECRET)),
+        ...taggedField(13, bytesToWords(new TextEncoder().encode("test"))),
+        ...taggedField(23, bytesToWords(OTHER_HASH)),
+      ]),
+    ),
+  ).toThrow(/both description/);
+});
+
+test("a recovery id of 4 is rejected without an n field", () => {
+  expect(() => decodeBolt11(crafted(minimalWords(), { recoveryId: 4 }))).toThrow(/recovery id/);
+});
+
+test("a 33-byte n field that is not a valid point falls back to signature recovery", () => {
+  const notAPoint = new Uint8Array(33); // 0x00 prefix: never a compressed point.
+  const inv = decodeBolt11(
+    crafted([...minimalWords(), ...taggedField(19, bytesToWords(notAPoint))], {
+      secretKey: SECRET,
+    }),
+  );
+  expect(inv.payee).toStrictEqual(secp256k1.getPublicKey(SECRET, true));
+});
+
+test("a valid n field whose signature was made by a different key is rejected", () => {
+  expect(() =>
+    decodeBolt11(
+      crafted(
+        [
+          ...minimalWords(),
+          ...taggedField(19, bytesToWords(secp256k1.getPublicKey(OTHER_SECRET, true))),
+        ],
+        { secretKey: SECRET },
+      ),
+    ),
+  ).toThrow(/does not verify/);
+});
+
+function featureWords(bit: number): number[] {
+  const words = Array.from({ length: Math.floor(bit / 5) + 1 }, () => 0);
+  words[words.length - 1 - Math.floor(bit / 5)] = 1 << (bit % 5);
+  return words;
+}
+
+test.each([2, 20])("unknown even feature bit %d is rejected", (bit) => {
+  expect(() =>
+    decodeBolt11(
+      crafted([...tsWords(), ...taggedField(5, featureWords(bit)), ...minimalWords().slice(7)]),
+    ),
+  ).toThrow(new RegExp(`unknown required feature bit ${bit}`));
+});
+
+test.each([14, 101])("known even or odd feature bit %d is accepted", (bit) => {
+  const inv = decodeBolt11(
+    crafted([...tsWords(), ...taggedField(5, featureWords(bit)), ...minimalWords().slice(7)]),
+  );
+  expect(inv.features).toBeDefined();
 });
