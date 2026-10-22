@@ -84,7 +84,12 @@ const NETWORK_PREFIX: Record<string, Bolt11Network> = {
 
 // Millisatoshis per whole/milli/micro/nano BTC; "p" (pico) is handled
 // separately because it must divide evenly into millisatoshis.
-const MULTIPLIER_MSAT = { "": 100_000_000_000n, m: 100_000_000n, u: 100_000n, n: 100n } as const;
+const MULTIPLIER_MSAT: Readonly<Record<string, bigint>> = {
+  "": 100_000_000_000n,
+  m: 100_000_000n,
+  u: 100_000n,
+  n: 100n,
+};
 
 // Even feature bits assigned by BOLT #9. An unknown set even bit requires the
 // reader to fail the payment ("it's ok to be odd").
@@ -167,7 +172,7 @@ function parseAmount(hrpAmount: string): bigint | undefined {
     }
     return value / 10n;
   }
-  const factor = (MULTIPLIER_MSAT as Record<string, bigint>)[multiplier];
+  const factor = MULTIPLIER_MSAT[multiplier];
   if (factor === undefined) {
     fail("amount: invalid multiplier");
   }
