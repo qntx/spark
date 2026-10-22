@@ -822,4 +822,34 @@ mod tests {
         });
         assert!(result.is_err());
     }
+
+    #[test]
+    fn debug_redacts_secret_material() {
+        let keys = generate_keys(3, 2);
+        let secret_key = bytes32(keys.user_key.serialize());
+        let round1 = commit(&secret_key, &[8u8; 32]).unwrap();
+        let nonces = *round1.nonces();
+        let user_commitment = *round1.commitments();
+
+        let commitment_debug = format!("{round1:?}");
+        assert!(commitment_debug.contains("[REDACTED]"));
+        assert!(!commitment_debug.contains(&format!("{nonces:?}")));
+        assert!(!commitment_debug.contains(&hex::encode(nonces)));
+
+        let job = SignJob {
+            message: b"m",
+            secret_key: &secret_key,
+            verifying_key: &bytes33(keys.combined_vk.serialize().unwrap()),
+            nonce: &nonces,
+            user_commitment: &user_commitment,
+            operators: &[],
+            adaptor_public_key: None,
+        };
+        let job_debug = format!("{job:?}");
+        assert!(job_debug.contains("[REDACTED]"));
+        for secret in [&secret_key[..], &nonces[..]] {
+            assert!(!job_debug.contains(&format!("{secret:?}")));
+            assert!(!job_debug.contains(&hex::encode(secret)));
+        }
+    }
 }
