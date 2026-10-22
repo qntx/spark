@@ -419,6 +419,15 @@ describe("createLightningInvoice", () => {
     expect(stored.count).toBe(1);
   });
 
+  test("expiresAtMs is (invoice timestamp + expirySeconds) * 1000", async () => {
+    const { deps } = await setup((options) => {
+      options.timestamp = 1_234_567;
+      options.expirySeconds = 777;
+    });
+    const invoice = await createLightningInvoice(deps, { amountSats: 1000 });
+    expect(invoice.expiresAtMs).toBe((1_234_567 + 777) * 1000);
+  });
+
   test("a receiver creates the invoice for another identity", async () => {
     const signer = await testSigner();
     const ownIdentity = await signer.identityPublicKey();

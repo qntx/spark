@@ -1,5 +1,6 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
 
 import { SparkInputError } from "../errors/index.ts";
@@ -81,6 +82,10 @@ const NETWORK_PREFIX: Record<string, Bolt11Network> = {
   tbs: "signet",
 };
 
+// Millisatoshis per whole/milli/micro/nano BTC; "p" (pico) is handled
+// separately because it must divide evenly into millisatoshis.
+const MULTIPLIER_MSAT = { "": 100_000_000_000n, m: 100_000_000n, u: 100_000n, n: 100n } as const;
+
 // Even feature bits assigned by BOLT #9. An unknown set even bit requires the
 // reader to fail the payment ("it's ok to be odd").
 const KNOWN_EVEN_FEATURES = new Set([
@@ -136,28 +141,8 @@ function wordsToInt(words: ReadonlyArray<number>): number {
 
 /** Feature bit `n` of a big-endian bitfield expressed as 5-bit words (bit 0 = LSB). */
 function hasFeatureBit(words: ReadonlyArray<number>, bit: number): boolean {
-  const index = words.length - 1 - Math.floor(bit / 5);
-  const word = index < 0 ? undefined : words[index];
-  if (word === undefined) {
-    return false;
-  }
+  const word = words[words.length - 1 - Math.floor(bit / 5)] ?? 0;
   return ((word >>> (bit % 5)) & 1) === 1;
-}
-
-function maxFeatureBit(words: ReadonlyArray<number>): number {
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i];
-    if (word === undefined || word === 0) {
-      continue;
-    }
-    const fromEnd = words.length - 1 - i;
-    let highest = 4;
-    while (highest > 0 && ((word >>> highest) & 1) === 0) {
-      highest--;
-    }
-    return fromEnd * 5 + highest;
-  }
-  return -1;
 }
 
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -176,23 +161,17 @@ function parseAmount(hrpAmount: string): bigint | undefined {
     fail("amount: leading zeros are not allowed");
   }
   const value = BigInt(digits);
-  switch (multiplier) {
-    case "":
-      return value * 100_000_000_000n;
-    case "m":
-      return value * 100_000_000n;
-    case "u":
-      return value * 100_000n;
-    case "n":
-      return value * 100n;
-    case "p":
-      if (value % 10n !== 0n) {
-        fail("amount: pico-BTC value must be a multiple of 10 (whole millisatoshis)");
-      }
-      return value / 10n;
-    default:
-      return fail("amount: invalid multiplier");
+  if (multiplier === "p") {
+    if (value % 10n !== 0n) {
+      fail("amount: pico-BTC value must be a multiple of 10 (whole millisatoshis)");
+    }
+    return value / 10n;
   }
+  const factor = (MULTIPLIER_MSAT as Record<string, bigint>)[multiplier];
+  if (factor === undefined) {
+    fail("amount: invalid multiplier");
+  }
+  return value * factor;
 }
 
 function parseRouteHint(words: ReadonlyArray<number>): Bolt11RouteHintHop[] {
@@ -222,12 +201,10 @@ function parseRouteHint(words: ReadonlyArray<number>): Bolt11RouteHintHop[] {
  * that fails verification/recovery.
  */
 export function decodeBolt11(invoice: string): Bolt11Invoice {
-  if (/[a-z]/.test(invoice) && /[A-Z]/.test(invoice)) {
-    fail("mixed case");
-  }
+  // bech32.decode rejects mixed case and lowercases an all-uppercase input.
   let decoded;
   try {
-    decoded = bech32.decode(invoice.toLowerCase(), false);
+    decoded = bech32.decode(invoice, false);
   } catch (error) {
     throw new SparkInputError("invoice: invalid bech32", { cause: error });
   }
@@ -271,10 +248,10 @@ export function decodeBolt11(invoice: string): Bolt11Invoice {
       fail("tagged field: truncated header");
     }
     const length = lengthHi * 32 + lengthLo;
-    const field = words.slice(i + 3, i + 3 + length);
-    if (field.length !== length || i + 3 + length > taggedEnd) {
+    if (i + 3 + length > taggedEnd) {
       fail("tagged field: data overruns the signature");
     }
+    const field = words.slice(i + 3, i + 3 + length);
     switch (tag) {
       case TAG_PAYMENT_HASH:
       case TAG_PAYMENT_SECRET:
@@ -357,8 +334,7 @@ export function decodeBolt11(invoice: string): Bolt11Invoice {
     fail("both description (d) and description hash (h) present");
   }
   if (featuresWords !== undefined) {
-    const top = maxFeatureBit(featuresWords);
-    for (let bit = 0; bit <= top; bit += 2) {
+    for (let bit = 0; bit < featuresWords.length * 5; bit += 2) {
       if (!KNOWN_EVEN_FEATURES.has(bit) && hasFeatureBit(featuresWords, bit)) {
         fail(`features: unknown required feature bit ${bit}`);
       }
@@ -374,11 +350,7 @@ export function decodeBolt11(invoice: string): Bolt11Invoice {
 
   // The signed preimage is the UTF-8 HRP plus the data words before the
   // signature, 5→8-bit packed with zero padding to the byte boundary.
-  const preimage = new Uint8Array(hrp.length + Math.ceil((taggedEnd * 5) / 8));
-  for (let i = 0; i < hrp.length; i++) {
-    preimage[i] = hrp.codePointAt(i) ?? 0;
-  }
-  preimage.set(wordsToBytesPadded(words.slice(0, taggedEnd)), hrp.length);
+  const preimage = concatBytes(utf8ToBytes(hrp), wordsToBytesPadded(words.slice(0, taggedEnd)));
   const messageHash = sha256(preimage);
 
   let payee: Uint8Array;
@@ -405,9 +377,6 @@ export function decodeBolt11(invoice: string): Bolt11Invoice {
       payee = secp256k1.recoverPublicKey(recoverable, messageHash, { prehash: false });
     } catch (error) {
       throw new SparkInputError("invoice: signature is not recoverable", { cause: error });
-    }
-    if (payee.length !== 33) {
-      payee = secp256k1.Point.fromBytes(payee).toBytes(true);
     }
   }
 

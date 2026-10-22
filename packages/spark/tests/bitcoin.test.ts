@@ -628,6 +628,22 @@ test("validateCoopExitPayoutTransaction checks txid, destination and amount", ()
   ).toThrow(SparkInputError);
 });
 
+test("validateCoopExitPayoutTransaction rethrows an undecodable payout address", () => {
+  const payout = new Transaction({ version: 3, allowUnknownOutputs: true });
+  payout.addInput({ txid: txIdInputBytes(parent()), index: 0 });
+  payout.addOutput({ script: hexToBytes(`0014${"33".repeat(20)}`), amount: 55_000n });
+  const payoutBytes = payout.toBytes(true);
+  expect(() =>
+    validateCoopExitPayoutTransaction({
+      rawCoopExitTransaction: payoutBytes,
+      expectedCoopExitTxid: txId(payoutBytes),
+      expectedPayoutAddress: "not a bitcoin address",
+      expectedPayoutAmountSats: 1,
+      network: "mainnet",
+    }),
+  ).toThrow(/could not decode the withdrawal address/);
+});
+
 // -- Sequence wrappers -----------------------------------------------------------
 
 test("getNextTransactionSequence decrements and carries bit 30", () => {
