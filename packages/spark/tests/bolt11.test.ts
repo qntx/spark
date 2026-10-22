@@ -2,12 +2,18 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { expect, test } from "vite-plus/test";
 
 import { decodeBolt11, isExpired } from "../src/core/bolt11.ts";
 import { SparkInputError } from "../src/errors/index.ts";
-import { bytesToWords, encodeRawBolt11, encodeTestBolt11 } from "./support/bolt11.ts";
+import {
+  bytesToWords,
+  encodeRawBolt11,
+  encodeTestBolt11,
+  wordsToBytesPadded,
+} from "./support/bolt11.ts";
 
 const vectors = JSON.parse(
   readFileSync(resolve(import.meta.dirname, "../../../vectors/bolt11.json"), "utf8"),
@@ -353,6 +359,7 @@ test.each([
   ["zz", /expected 'ln'/],
   ["lnxy", /unknown currency/],
   ["ln123", /unknown currency/],
+  ["ln1bc", /unknown currency/],
   ["lnbcrt-10u", /amount/],
   ["lnbcrt!", /amount/],
   ["lnbcrt01u", /leading zeros/],
@@ -383,6 +390,17 @@ test("one or two dangling header words are a truncated header", () => {
 test("a field whose declared length overruns the signature is rejected", () => {
   // Tag 13 with declared length 5 but only 2 data words before the signature.
   expect(() => decodeBolt11(crafted([...tsWords(), 13, 0, 5, 1, 2]))).toThrow(/overruns/);
+  // Exactly three words before the signature form a complete header whose
+  // data overruns — not a truncated header.
+  expect(() => decodeBolt11(crafted([...tsWords(), 13, 0, 5]))).toThrow(/overruns/);
+});
+
+test("an x field of exactly 2^53-1 still fits a safe integer", () => {
+  const maxSafe = intWords(Number.MAX_SAFE_INTEGER);
+  const inv = decodeBolt11(
+    crafted([...tsWords(), ...taggedField(6, maxSafe), ...minimalWords().slice(7)]),
+  );
+  expect(inv.expirySeconds).toBe(Number.MAX_SAFE_INTEGER);
 });
 
 test("an x field larger than 2^53 overflows a safe integer", () => {
@@ -510,6 +528,22 @@ test("an invoice with both d and h is rejected", () => {
   ).toThrow(/both description/);
 });
 
+test("recovery id 3 is accepted when an n field verifies", () => {
+  // Recovery ids 2/3 need r+n < p — unreachable for real signatures — but the
+  // byte is still legal when the n field verifies the signature directly.
+  const dataWords = [
+    ...minimalWords(),
+    ...taggedField(19, bytesToWords(secp256k1.getPublicKey(SECRET, true))),
+  ];
+  const digest = sha256(concatBytes(utf8ToBytes("lnbcrt"), wordsToBytesPadded(dataWords)));
+  const recovered = secp256k1.sign(digest, SECRET, { prehash: false, format: "recovered" });
+  const signature = new Uint8Array(65);
+  signature.set(recovered.subarray(1), 0);
+  signature[64] = 3;
+  const inv = decodeBolt11(encodeRawBolt11({ hrp: "lnbcrt", dataWords, signature }));
+  expect(inv.payee).toStrictEqual(secp256k1.getPublicKey(SECRET, true));
+});
+
 test("a recovery id of 4 is rejected without an n field", () => {
   expect(() => decodeBolt11(crafted(minimalWords(), { recoveryId: 4 }))).toThrow(/recovery id/);
 });
@@ -538,9 +572,37 @@ test("a valid n field whose signature was made by a different key is rejected", 
   ).toThrow(/does not verify/);
 });
 
+test("a duplicated fixed-length field does not shadow a later n field", () => {
+  expect(() =>
+    decodeBolt11(
+      crafted(
+        [
+          ...tsWords(),
+          ...taggedField(1, bytesToWords(PAYMENT_HASH)),
+          // The duplicate p is skipped; the real n still governs verification.
+          ...taggedField(1, bytesToWords(OTHER_HASH)),
+          ...taggedField(16, bytesToWords(PAYMENT_SECRET)),
+          ...taggedField(13, bytesToWords(new TextEncoder().encode("test"))),
+          ...taggedField(19, bytesToWords(secp256k1.getPublicKey(OTHER_SECRET, true))),
+        ],
+        { secretKey: SECRET },
+      ),
+    ),
+  ).toThrow(/does not verify/);
+});
+
 function featureWords(bit: number): number[] {
   const words = Array.from({ length: Math.floor(bit / 5) + 1 }, () => 0);
   words[words.length - 1 - Math.floor(bit / 5)] = 1 << (bit % 5);
+  return words;
+}
+
+/** Minimal big-endian base-32 words for a non-negative safe integer. */
+function intWords(value: number): number[] {
+  const words: number[] = [];
+  for (let v = value; v > 0; v = Math.floor(v / 32)) {
+    words.unshift(v % 32);
+  }
   return words;
 }
 
