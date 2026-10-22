@@ -67,41 +67,79 @@ test("hashed description invoice has descriptionHash, no d", () => {
   const inv = decodeBolt11(byTitle("Now send $24"));
   expect(inv.description).toBeUndefined();
   expect(inv.descriptionHash).toBeDefined();
+  expect(bytesToHex(inv.descriptionHash!)).toBe(
+    "3925b6f67e2c340036ed12093dd44e0368df1b6ea26c53dbe4811f58fd5db8c1",
+  );
   expect(inv.amountMsat).toBe(2_000_000_000n);
 });
 
-test("testnet invoice with fallback", () => {
+const fallbackVectors: Array<{
+  readonly fragment: string;
+  readonly version: number;
+  readonly program: string;
+}> = [
+  {
+    fragment: "The same, on testnet",
+    // mk2QpYatsKicvFVuTAQLBryyccRXMUaGHP — testnet P2PKH.
+    version: 17,
+    program: "3172b5654f6683c8fb146959d347ce303cae4ca7",
+  },
+  {
+    fragment: "On mainnet, with fallback address 1Rusty",
+    // 1RustyRX2oai4EYYDpQGWvEL62BBGqN9T — mainnet P2PKH.
+    version: 17,
+    program: "04b61f7dc1ea0dc99424464cc4064dc564d91e89",
+  },
+  {
+    fragment: "On mainnet, with fallback (P2SH)",
+    // 3EktnHQD7RiAE6uzMj2ZifT9YgRrkSgzQX — mainnet P2SH.
+    version: 18,
+    program: "8f55563b9a19f321c211e9b9f38cdf686ea07845",
+  },
+  {
+    fragment: "On mainnet, with fallback (P2WPKH)",
+    // bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 — v0 witness program.
+    version: 0,
+    program: "751e76e8199196d454941c45d1b3a323f1433bd6",
+  },
+  {
+    fragment: "On mainnet, with fallback (P2WSH)",
+    // bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qcckx79rqk — v0 witness program.
+    version: 0,
+    program: "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262",
+  },
+];
+
+test.each(fallbackVectors)("fallback of $fragment", ({ fragment, version, program }) => {
+  const inv = decodeBolt11(byTitle(fragment));
+  expect(inv.fallbackAddresses).toHaveLength(1);
+  expect(inv.fallbackAddresses[0]!.version).toBe(version);
+  expect(bytesToHex(inv.fallbackAddresses[0]!.program)).toBe(program);
+});
+
+test("testnet fallback invoice is on testnet", () => {
   const inv = decodeBolt11(byTitle("The same, on testnet"));
   expect(inv.network).toBe("testnet");
-  expect(inv.fallbackAddresses.length).toBeGreaterThan(0);
 });
 
-test("fallback fields of every version decode, including v31 spark invoices", () => {
-  const witnessProgram = hexToBytes("751e76e8199196d454941c45d1b3a323f1433bd6");
-  const sparkProgram = hexToBytes("a1b2c3d4e5f6");
-  const inv = decodeBolt11(
-    encodeTestBolt11({
-      secretKey: new Uint8Array(32).fill(66),
-      paymentHash: new Uint8Array(32).fill(1),
-      fallbacks: [
-        { version: 0, program: witnessProgram },
-        { version: 31, program: sparkProgram },
-      ],
-    }),
-  );
-  expect(inv.fallbackAddresses).toHaveLength(2);
-  expect(inv.fallbackAddresses[0]!.version).toBe(0);
-  expect(inv.fallbackAddresses[0]!.program).toStrictEqual(witnessProgram);
-  expect(inv.fallbackAddresses[1]!.version).toBe(31);
-  expect(inv.fallbackAddresses[1]!.program).toStrictEqual(sparkProgram);
-});
-
-test("route hint invoice", () => {
+test("1Rusty invoice: two-hop route hint decodes every field", () => {
   const inv = decodeBolt11(byTitle("On mainnet, with fallback address 1Rusty"));
-  expect(inv.routeHints.length).toBeGreaterThan(0);
-  const hop = inv.routeHints[0]![0]!;
-  expect(hop.publicKey).toHaveLength(33);
-  expect(hop.shortChannelId).toHaveLength(8);
+  expect(inv.routeHints).toHaveLength(1);
+  const [first, second] = inv.routeHints[0]!;
+  expect(bytesToHex(first!.publicKey)).toBe(
+    "029e03a901b85534ff1e92c43c74431f7ce72046060fcf7a95c37e148f78c77255",
+  );
+  expect(bytesToHex(first!.shortChannelId)).toBe("0102030405060708");
+  expect(first!.feeBaseMsat).toBe(1);
+  expect(first!.feeProportionalMillionths).toBe(20);
+  expect(first!.cltvExpiryDelta).toBe(3);
+  expect(bytesToHex(second!.publicKey)).toBe(
+    "039e03a901b85534ff1e92c43c74431f7ce72046060fcf7a95c37e148f78c77255",
+  );
+  expect(bytesToHex(second!.shortChannelId)).toBe("030405060708090a");
+  expect(second!.feeBaseMsat).toBe(2);
+  expect(second!.feeProportionalMillionths).toBe(30);
+  expect(second!.cltvExpiryDelta).toBe(4);
 });
 
 test("a multi-hop route hint decodes every 51-byte entry", () => {
@@ -137,18 +175,53 @@ test("invoice with n field verifies payee", () => {
   expect(bytesToHex(inv.payee)).toBe(
     "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
   );
-  // features 8, 14 and 99: unknown odd bit 99 is ignored
+});
+
+test("coffee beans features bytes encode bits 8, 14 and 99", () => {
+  const inv = decodeBolt11(byTitle("Please send $30 for coffee beans"));
+  // Spec bitstring b1000....00000100000100000000 — 100 wire bits, floor to 12 bytes.
   expect(inv.features).toBeDefined();
+  expect(bytesToHex(inv.features!)).toBe("800000000000000000000410");
+});
+
+test("uppercase invoice decodes identically to lowercase", () => {
+  const upper = decodeBolt11(byTitle("Same, but all upper case"));
+  const lower = decodeBolt11(byTitle("Please send $30 for coffee beans"));
+  expect(upper).toStrictEqual(lower);
+});
+
+test("ignored-fields invoice decodes, keeping the unknown f version raw", () => {
+  const inv = decodeBolt11(byTitle("Same, but including fields"));
+  expect(inv.description).toBe("coffee beans");
+  // The spec's ignorable invoice carries an f field with version 19 (unassigned) — kept raw.
+  expect(inv.fallbackAddresses).toHaveLength(1);
+  expect(inv.fallbackAddresses[0]!.version).toBe(19);
+  expect(inv.fallbackAddresses[0]!.program).toStrictEqual(new Uint8Array(20));
+});
+
+test("fallback fields of every version decode, including v31 spark invoices", () => {
+  const witnessProgram = hexToBytes("751e76e8199196d454941c45d1b3a323f1433bd6");
+  const sparkProgram = hexToBytes("a1b2c3d4e5f6");
+  const inv = decodeBolt11(
+    encodeTestBolt11({
+      secretKey: new Uint8Array(32).fill(66),
+      paymentHash: new Uint8Array(32).fill(1),
+      fallbacks: [
+        { version: 0, program: witnessProgram },
+        { version: 31, program: sparkProgram },
+      ],
+    }),
+  );
+  expect(inv.fallbackAddresses).toHaveLength(2);
+  expect(inv.fallbackAddresses[0]!.version).toBe(0);
+  expect(inv.fallbackAddresses[0]!.program).toStrictEqual(witnessProgram);
+  expect(inv.fallbackAddresses[1]!.version).toBe(31);
+  expect(inv.fallbackAddresses[1]!.program).toStrictEqual(sparkProgram);
 });
 
 test("metadata invoice carries m field", () => {
   const inv = decodeBolt11(byTitle("Please send 0.01 BTC with payment metadata"));
   expect(bytesToHex(inv.metadata!)).toBe("01fafaf0");
-});
-
-test("ignored fields invoice decodes", () => {
-  const inv = decodeBolt11(byTitle("Same, but including fields"));
-  expect(inv.description).toBe("coffee beans");
 });
 
 test("isExpired", () => {
@@ -165,16 +238,43 @@ test("non-canonical high-S signature with n field is rejected but decodes withou
   expect(recovered.payee).toHaveLength(33);
 });
 
-test("wrong-length fixed fields rejected", () => {
-  // The spec invalid set does not contain a wrong-length-p example; craft one by
-  // confirming the skip rule does not apply: swap in a p field of 20 words is
-  // covered by the "Same, but including fields" invoice which has p5 (52-word
-  // expectation) variants — decode must still succeed there.
-  const inv = decodeBolt11(byTitle("Same, but including fields"));
-  expect(inv.paymentHash).toHaveLength(32);
+const SECRET = new Uint8Array(32).fill(66);
+const PAYMENT_HASH = new Uint8Array(32).fill(1);
+const WRONG_LENGTH_P = Array.from({ length: 51 }, () => 0);
+
+test("a wrong-length p field before the correct one is skipped", () => {
+  const inv = decodeBolt11(
+    encodeTestBolt11({
+      secretKey: SECRET,
+      paymentHash: PAYMENT_HASH,
+      leadingFields: [{ tag: 1, data: WRONG_LENGTH_P }],
+    }),
+  );
+  expect(inv.paymentHash).toStrictEqual(PAYMENT_HASH);
 });
 
-test("hex sanity: n field byte length", () => {
-  const key = hexToBytes("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad");
-  expect(key).toHaveLength(33);
+test("an invoice whose only p field has the wrong length is missing its payment hash", () => {
+  expect(() =>
+    decodeBolt11(
+      encodeTestBolt11({
+        secretKey: SECRET,
+        paymentHash: PAYMENT_HASH,
+        paymentHashData: WRONG_LENGTH_P,
+      }),
+    ),
+  ).toThrow("missing payment hash");
+});
+
+test("non-minimal x and c fields are rejected", () => {
+  for (const tag of [6, 24]) {
+    expect(() =>
+      decodeBolt11(
+        encodeTestBolt11({
+          secretKey: SECRET,
+          paymentHash: PAYMENT_HASH,
+          leadingFields: [{ tag, data: [0, 1] }],
+        }),
+      ),
+    ).toThrow("non-minimal data_length");
+  }
 });
