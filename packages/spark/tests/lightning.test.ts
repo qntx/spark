@@ -571,6 +571,32 @@ describe("createLightningInvoice", () => {
       },
       error: "does not match the payee identity",
     },
+    {
+      name: "unrequested v31 spark-invoice fallback",
+      create: { amountSats: 1000 },
+      mutate: (o) => {
+        o.fallbacks = [{ version: 31, program: hexToBytes("a1b2c3d4e5f6") }];
+      },
+      error: "fallback address",
+    },
+    {
+      name: "unrequested v0 on-chain fallback",
+      create: { amountSats: 1000 },
+      mutate: (o) => {
+        o.fallbacks = [
+          { version: 0, program: hexToBytes("751e76e8199196d454941c45d1b3a323f1433bd6") },
+        ];
+      },
+      error: "fallback address",
+    },
+    {
+      name: "v31 fallback alongside a correct requested spark address",
+      create: { amountSats: 1000, includeSparkAddress: true },
+      mutate: (o) => {
+        o.fallbacks = [{ version: 31, program: hexToBytes("a1b2c3d4e5f6") }];
+      },
+      error: "fallback address",
+    },
   ];
 
   test.each(failures)("rejects an invoice with $name and stores nothing", async (failure) => {

@@ -9,6 +9,7 @@ import { bech32 } from "@scure/base";
 const TAG_PAYMENT_HASH = 1;
 const TAG_ROUTE_HINT = 3;
 const TAG_EXPIRY = 6;
+const TAG_FALLBACK = 9;
 const TAG_DESCRIPTION = 13;
 const TAG_PAYMENT_SECRET = 16;
 const TAG_PAYEE = 19;
@@ -93,6 +94,7 @@ export function encodeTestBolt11(options: {
   readonly expirySeconds?: number | undefined;
   readonly minFinalCltvExpiry?: number | undefined;
   readonly routeHints?: ReadonlyArray<ReadonlyArray<TestRouteHintHop>> | undefined;
+  readonly fallbacks?: ReadonlyArray<{ version: number; program: Uint8Array }> | undefined;
   readonly secretKey: Uint8Array;
 }): string {
   const prefix = HRP_PREFIX[options.network ?? "regtest"];
@@ -129,6 +131,9 @@ export function encodeTestBolt11(options: {
       bytes.push(...hop.publicKey, ...hop.shortChannelId, ...new Uint8Array(10));
     }
     field(TAG_ROUTE_HINT, bytesToWords(new Uint8Array(bytes)));
+  }
+  for (const fallback of options.fallbacks ?? []) {
+    field(TAG_FALLBACK, [fallback.version, ...bytesToWords(fallback.program)]);
   }
   const payee = secp256k1.getPublicKey(options.secretKey, true);
   field(TAG_PAYEE, bytesToWords(payee));

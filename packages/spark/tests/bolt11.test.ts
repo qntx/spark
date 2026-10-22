@@ -76,6 +76,26 @@ test("testnet invoice with fallback", () => {
   expect(inv.fallbackAddresses.length).toBeGreaterThan(0);
 });
 
+test("fallback fields of every version decode, including v31 spark invoices", () => {
+  const witnessProgram = hexToBytes("751e76e8199196d454941c45d1b3a323f1433bd6");
+  const sparkProgram = hexToBytes("a1b2c3d4e5f6");
+  const inv = decodeBolt11(
+    encodeTestBolt11({
+      secretKey: new Uint8Array(32).fill(66),
+      paymentHash: new Uint8Array(32).fill(1),
+      fallbacks: [
+        { version: 0, program: witnessProgram },
+        { version: 31, program: sparkProgram },
+      ],
+    }),
+  );
+  expect(inv.fallbackAddresses).toHaveLength(2);
+  expect(inv.fallbackAddresses[0]!.version).toBe(0);
+  expect(inv.fallbackAddresses[0]!.program).toStrictEqual(witnessProgram);
+  expect(inv.fallbackAddresses[1]!.version).toBe(31);
+  expect(inv.fallbackAddresses[1]!.program).toStrictEqual(sparkProgram);
+});
+
 test("route hint invoice", () => {
   const inv = decodeBolt11(byTitle("On mainnet, with fallback address 1Rusty"));
   expect(inv.routeHints.length).toBeGreaterThan(0);
