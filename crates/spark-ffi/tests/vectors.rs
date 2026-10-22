@@ -439,6 +439,18 @@ fn error_cases() -> Vec<Value> {
             "short nonce",
             edited_sign_request(&sign, |job| job.nonce.truncate(63)),
         ),
+        (
+            "invalid nonce scalar",
+            edited_sign_request(&sign, |job| job.nonce[..32].fill(0xFF)),
+        ),
+        (
+            "invalid binding commitment point",
+            edited_sign_request(&sign, |job| {
+                if let Some(commitment) = job.user_commitment.as_mut() {
+                    commitment.binding = invalid_point();
+                }
+            }),
+        ),
     ] {
         let _ = name;
         cases.push(error_case(
@@ -463,6 +475,28 @@ fn error_cases() -> Vec<Value> {
         edited_aggregate_request(&aggregate, |job| job.user_signature_share.truncate(31)),
         edited_aggregate_request(&aggregate, |job| job.user_signature_share = vec![0xFF; 32]),
         edited_aggregate_request(&aggregate, |job| job.user_public_key = invalid_point()),
+        edited_aggregate_request(&aggregate, |job| {
+            job.operators[1] = job.operators[0].clone();
+        }),
+        edited_aggregate_request(&aggregate, |job| {
+            // Identifier::derive(b"user").serialize() — the single-user FROST id.
+            job.operators[0].identifier =
+                hex::decode("687da64d52a16c6fc792c6fc831ec1afa797a91f77549668a6b5421f12c1ac77")
+                    .unwrap();
+        }),
+        edited_aggregate_request(&aggregate, |job| {
+            job.operators[0].signature_share = vec![0xFF; 32];
+        }),
+        edited_aggregate_request(&aggregate, |job| {
+            job.operators[0].public_key = invalid_point();
+        }),
+        edited_aggregate_request(&aggregate, |job| {
+            if let Some(commitment) = job.user_commitment.as_mut() {
+                commitment.binding = invalid_point();
+            }
+        }),
+        edited_aggregate_request(&aggregate, |job| job.verifying_key = invalid_point()),
+        edited_aggregate_request(&aggregate, |job| job.adaptor_public_key = invalid_point()),
     ] {
         cases.push(error_case(
             "frost_aggregate",

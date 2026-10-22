@@ -221,4 +221,15 @@ mod tests {
             Error::InvalidScalar
         );
     }
+
+    #[test]
+    fn debug_redacts_shares() {
+        let split = split_secret_with_proofs(&secret(), 2, 3, &[9u8; 32]).unwrap();
+        let debug = format!("{split:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for share in split.shares() {
+            assert!(!debug.contains(&format!("{share:?}")));
+            assert!(!debug.contains(&hex::encode(share)));
+        }
+    }
 }
