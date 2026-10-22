@@ -428,6 +428,68 @@ describe("createLightningInvoice", () => {
     expect(invoice.expiresAtMs).toBe((1_234_567 + 777) * 1000);
   });
 
+  test("an amountless request accepts an amountless invoice", async () => {
+    const { deps, receiveRequests } = await setup();
+    const invoice = await createLightningInvoice(deps, { amountSats: 0 });
+    expect(required(receiveRequests[0], "receive request").amountSats).toBe(0);
+    expect(invoice.id).toBe("recv-1");
+  });
+
+  test("an explicit zero-amount invoice does not satisfy an amountless request", async () => {
+    const { deps } = await setup((options) => {
+      options.amountMsat = 0n;
+    });
+    await expect(createLightningInvoice(deps, { amountSats: 0 })).rejects.toThrow(
+      "does not match the requested amount",
+    );
+  });
+
+  test("a requested description hash is forwarded and matched to the invoice", async () => {
+    const descriptionHash = new Uint8Array(32).fill(4);
+    const { deps, receiveRequests } = await setup();
+    const invoice = await createLightningInvoice(deps, { amountSats: 1000, descriptionHash });
+    expect(required(receiveRequests[0], "receive request").descriptionHash).toStrictEqual(
+      descriptionHash,
+    );
+    expect(invoice.id).toBe("recv-1");
+  });
+
+  test("an invoice missing the requested description hash is rejected", async () => {
+    const { deps } = await setup((options) => {
+      options.descriptionHash = undefined;
+    });
+    await expect(
+      createLightningInvoice(deps, {
+        amountSats: 1000,
+        descriptionHash: new Uint8Array(32).fill(4),
+      }),
+    ).rejects.toThrow("description hash");
+  });
+
+  test("a route hint outside the spark channel id is ignored", async () => {
+    const { deps } = await setup((options) => {
+      options.routeHints = [
+        [
+          {
+            publicKey: secp256k1.getPublicKey(new Uint8Array(32).fill(7), true),
+            shortChannelId: new Uint8Array(8).fill(9),
+          },
+        ],
+      ];
+    });
+    const invoice = await createLightningInvoice(deps, { amountSats: 1000 });
+    expect(invoice.id).toBe("recv-1");
+  });
+
+  test("unset options are not forwarded to the ssp request", async () => {
+    const { deps, receiveRequests } = await setup();
+    await createLightningInvoice(deps, { amountSats: 1000 });
+    const request = required(receiveRequests[0], "receive request");
+    expect("memo" in request).toBe(false);
+    expect("descriptionHash" in request).toBe(false);
+    expect("includeSparkAddress" in request).toBe(false);
+  });
+
   test("a receiver creates the invoice for another identity", async () => {
     const signer = await testSigner();
     const ownIdentity = await signer.identityPublicKey();

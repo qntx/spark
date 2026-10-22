@@ -48,7 +48,7 @@ export function bytesToWords(bytes: Uint8Array): number[] {
 }
 
 /** 5-bit words → bytes, zero-padding the last partial byte (the decoder's signed form). */
-function wordsToBytesPadded(words: ReadonlyArray<number>): Uint8Array {
+export function wordsToBytesPadded(words: ReadonlyArray<number>): Uint8Array {
   const out = new Uint8Array(Math.ceil((words.length * 5) / 8));
   let acc = 0;
   let bits = 0;
