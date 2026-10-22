@@ -95,6 +95,13 @@ export function encodeTestBolt11(options: {
   readonly minFinalCltvExpiry?: number | undefined;
   readonly routeHints?: ReadonlyArray<ReadonlyArray<TestRouteHintHop>> | undefined;
   readonly fallbacks?: ReadonlyArray<{ version: number; program: Uint8Array }> | undefined;
+  /**
+   * Raw tagged fields emitted right after the timestamp, before the standard fields — for
+   * malformed-field tests (e.g. a wrong-length `p` ahead of the real one).
+   */
+  readonly leadingFields?: ReadonlyArray<{ tag: number; data: ReadonlyArray<number> }> | undefined;
+  /** Word data for the `p` field instead of `paymentHash`, for wrong-length probes. */
+  readonly paymentHashData?: ReadonlyArray<number> | undefined;
   readonly secretKey: Uint8Array;
 }): string {
   const prefix = HRP_PREFIX[options.network ?? "regtest"];
@@ -111,7 +118,11 @@ export function encodeTestBolt11(options: {
     words.push(tag, Math.floor(data.length / 32), data.length % 32, ...data);
   };
 
-  field(TAG_PAYMENT_HASH, bytesToWords(options.paymentHash));
+  for (const leading of options.leadingFields ?? []) {
+    field(leading.tag, leading.data);
+  }
+
+  field(TAG_PAYMENT_HASH, options.paymentHashData ?? bytesToWords(options.paymentHash));
   field(TAG_PAYMENT_SECRET, bytesToWords(options.paymentSecret ?? new Uint8Array(32).fill(2)));
   if (options.descriptionHash === undefined) {
     field(TAG_DESCRIPTION, bytesToWords(new TextEncoder().encode(options.description ?? "test")));
