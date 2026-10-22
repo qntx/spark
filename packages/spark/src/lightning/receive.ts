@@ -30,7 +30,10 @@ export type LightningInvoice = {
 /**
  * The invoice the SSP returns must pay exactly what we asked for — anything else makes the payer
  * settle terms we never agreed to (Breez `validate_received_invoice`). `memo` and `expiry` are
- * advisory: the SSP may shorten or normalize them, so they are not compared.
+ * advisory: the SSP may shorten or normalize them, so they are not compared. ANY fallback address
+ * is rejected outright: we never request an on-chain fallback, and the upstream Spark SDK treats a
+ * version-31 `f` field as an embedded Spark invoice — a malicious SSP could otherwise redirect the
+ * payment past the invoice we signed for.
  */
 function validateReceivedInvoice(
   invoice: Bolt11Invoice,
@@ -60,6 +63,9 @@ function validateReceivedInvoice(
   ) {
     throw new SparkRequestError("ssp invoice description hash does not match the requested hash");
   }
+  if (invoice.fallbackAddresses.length > 0) {
+    throw new SparkRequestError("ssp invoice carries a fallback address");
+  }
 }
 
 /**
@@ -67,7 +73,8 @@ function validateReceivedInvoice(
  * and present only if we asked for one — a payer that finds an address transfers to it directly, so
  * an injected address is paid instead of the payee (Breez `validate_received_spark_address`). EVERY
  * hop under the Spark short channel id is checked: one foreign hop among several would pass a
- * first-match scan just the same.
+ * first-match scan just the same. `f`-field fallbacks are the same redirect through another door;
+ * `validateReceivedInvoice` rejects them all.
  */
 function validateReceivedSparkAddress(
   invoice: Bolt11Invoice,

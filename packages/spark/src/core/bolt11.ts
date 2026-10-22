@@ -20,7 +20,11 @@ export type Bolt11RouteHintHop = {
   readonly cltvExpiryDelta: number;
 };
 
-/** Raw `f` field: witness versions 0–16, 17 = P2PKH, 18 = P2SH. */
+/**
+ * Raw `f` field. Versions 0–16 are segwit witness programs, 17 is P2PKH, 18 is P2SH, 19–30 are
+ * unassigned, and the upstream Spark SDK uses 31 for an embedded Spark invoice
+ * (`parseSparkFallbackAddress`).
+ */
 export type Bolt11FallbackAddress = {
   readonly version: number;
   readonly program: Uint8Array;
@@ -325,10 +329,7 @@ export function decodeBolt11(invoice: string): Bolt11Invoice {
           fail("fallback: missing version");
         }
         const version = field[0] ?? 0;
-        // Unknown versions (19–31) are skipped; 0–16 witness, 17 P2PKH, 18 P2SH.
-        if (version <= 18) {
-          fallbackAddresses.push({ version, program: wordsToBytes(field.slice(1)) });
-        }
+        fallbackAddresses.push({ version, program: wordsToBytes(field.slice(1)) });
         break;
       }
       case TAG_ROUTE_HINT:
