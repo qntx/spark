@@ -54,8 +54,10 @@ First public pre-release. The workspace ships three packages with lockstep versi
 ### Security status
 
 - Private keys never leave `SparkSigner`; the client holds no key material.
+- Lightning receive rejects an SSP invoice carrying any `f` fallback field —
+  on-chain addresses and version-31 embedded Spark invoices could redirect the
+  payer away from the terms we requested.
 - Multiple internal review rounds have hardened the client against malicious
   operators and counterparties — see AUDIT.md and the Security section of the
   README.
 - The SDK has not had a third-party audit and has not been run on mainnet.
->>>>>>> 946854f (docs(changelog): describe 0.1.0)
