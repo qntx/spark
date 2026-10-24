@@ -356,10 +356,21 @@ Ranked by risk:
   decision — `createMemorySparkStore()` loses them on restart by design.
 - Release provenance is partial: only `spark.wasm` is byte-reproducible in
   CI; the pack job that builds each published tarball could still inject
-  code into it (JS bundles are not independently reproducible), though the
-  native iOS/Android artifacts carry build-provenance attestations minted
-  in the publish-only `native-artifact` job on
-  release runs and published packages ship no source maps (I-06).
+  code into it (JS bundles are not independently reproducible). The native
+  iOS/Android artifacts carry build-provenance attestations minted in the
+  `native-artifact` job on release and manual-dispatch runs (#88), and
+  published packages ship no source maps (I-06). 0.1.0 was hand-published
+  from the dispatch-run 40066238525 artifacts, so it carries no npm
+  provenance; the v0.1.0 tag run (40067725524) rebuilt all three packages
+  byte-identical to it. From 0.1.1 packages are published by OIDC with
+  `--provenance`.
+- RUSTSEC-2026-0387 is accepted: crypto-bigint < 0.7.6 has timing
+  variability in operations meant to be constant-time and reaches the wasm
+  and native backends through k256 0.13, which frost-secp256k1-tr requires,
+  so no patched version is reachable until upstream FROST supports k256
+  0.14. Exploitation needs fine-grained timing observation of signing on
+  the user's device. Both workspaces' deny.tomls carry a documented
+  ignore — remove it when frost-secp256k1-tr supports k256 0.14.
 - Dependabot routine version updates for the crypto and wire-format
   dependencies (`@noble/*`, `@scure/*`, `@bufbuild/*`, `@connectrpc/*`, and
   the Rust crypto crates) are ignored entirely — they are bumped by hand
