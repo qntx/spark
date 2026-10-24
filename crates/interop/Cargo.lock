@@ -1973,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "spark-crypto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "frost-core",
