@@ -18,6 +18,11 @@ ignore = [
   # atomic-polyfill via heapless -> postcard -> frost-core (pinned git
   # fork); unmaintained, no safe upgrade path available upstream.
   "RUSTSEC-2023-0089",
+  # crypto-bigint 0.5.5 via k256 0.13 (frost-secp256k1-tr pinned git rev).
+  # Only >=0.7.6 is patched, reachable solely through k256 0.14, but
+  # frost-secp256k1-tr requires k256 ^0.13 — no upgrade path until upstream
+  # FROST releases. Reassess on the next frost-secp256k1-tr release.
+  "RUSTSEC-2026-0387",
 ]
 
 [licenses]
