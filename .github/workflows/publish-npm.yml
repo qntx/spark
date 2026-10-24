@@ -1,7 +1,9 @@
 # Real publish runs on `v*.*.*` tag pushes only (tag the release merge commit
-# by hand; GITHUB_TOKEN tags do not trigger workflows). pull_request and manual
-# workflow_dispatch always run the full pipeline with `npm publish --dry-run` —
-# there is no manual path to a real publish.
+# by hand; GITHUB_TOKEN tags do not trigger workflows). pull_request runs the
+# full pipeline with `npm publish --dry-run`. Manual workflow_dispatch does the
+# same but compiles release-grade, attested natives, so its pack artifacts can
+# serve as the tarballs for a first hand publish — there is still no manual
+# path to a real publish.
 name: Publish
 
 on:
@@ -24,15 +26,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Release builds (tag pushes) disable the shared rust cache — it is
-  # populated by untrusted PR jobs and could smuggle code into published
-  # binaries. Dry-run calls keep the cache. The called workflow gets no OIDC:
-  # provenance is attested by the native-artifact job below, the only job in
-  # the whole pipeline that holds id-token besides the publish jobs.
+  # Release builds (tag pushes and manual dispatch) disable the shared rust
+  # cache — it is populated by untrusted PR jobs and could smuggle code into
+  # published binaries. PR dry-runs keep the cache. The called workflow gets no
+  # OIDC: provenance is attested by the native-artifact job below, the only job
+  # in the whole pipeline that holds id-token besides the publish jobs.
   native:
     uses: ./.github/workflows/native.yml
     with:
-      release: ${{ github.event_name == 'push' }}
+      release: ${{ github.event_name != 'pull_request' }}
     permissions:
       contents: read
 
@@ -87,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Only the tag-push attestation step mints an OIDC token.
+      # The attestation step is the only OIDC consumer; PRs never reach it.
       id-token: write
       attestations: write
     steps:
@@ -104,11 +106,11 @@ jobs:
           name: spark-native-prebuilt
           path: staging
           retention-days: 1
-      # Real publishes only: attest every file packaged into spark-native-prebuilt
-      # (the downloaded xcframework and jniLibs). PR/dispatch dry-runs skip this —
-      # and never touch the OIDC token.
+      # Non-PR builds only: attest every file packaged into
+      # spark-native-prebuilt (the downloaded xcframework and jniLibs).
+      # PR dry-runs skip this — and never touch the OIDC token.
       - name: Attest build provenance
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: staging/**
