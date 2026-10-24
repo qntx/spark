@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.1.1
+
+### Release
+
+- First version published from CI through npm trusted publishing; every
+  package carries npm provenance. 0.1.0 was published by hand (npm requires
+  an existing package before a trusted publisher can be configured) from the
+  pack artifacts of Publish run 40066238525 at `d1bec8b`; its registry
+  tarballs are byte-identical to those artifacts and have no npm provenance,
+  but its native binaries carry GitHub build-provenance attestations
+  (`gh attestation verify <file> --repo qntx/spark`). The v0.1.0 tag run
+  (40067725524) rebuilt all three packages byte-identical to the published
+  0.1.0 tarballs. No library code changes.
+
+### Known issues
+
+- RUSTSEC-2026-0387: crypto-bigint < 0.7.6 has timing variability in
+  operations meant to be constant-time; it reaches the wasm and native
+  backends through k256 0.13, which frost-secp256k1-tr requires, so no
+  patched version is reachable until upstream FROST supports k256 0.14.
+  Exploitation needs fine-grained timing observation of signing on the
+  user's device. Also applies to 0.1.0.
+
 ## 0.1.0
 
 First public pre-release. The workspace ships three packages with lockstep versions:
