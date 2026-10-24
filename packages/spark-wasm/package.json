@@ -1,6 +1,6 @@
 {
   "name": "@qntx/spark-wasm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "spark.wasm SparkCrypto backend — C ABI from crates/spark-ffi, platform-neutral and browser-first",
   "keywords": [
     "bitcoin",
