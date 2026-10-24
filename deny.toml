@@ -16,8 +16,15 @@ feature-depth = 1
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-yanked  = "deny"
-ignore  = []
+yanked = "deny"
+ignore = [
+  # crypto-bigint 0.5.5 via k256 0.13 (frost-secp256k1-tr pinned git rev)
+  # and 0.6.1 via vsss-rs 5's optional bigint dep. Only >=0.7.6 is patched,
+  # reachable solely through k256 0.14, but frost-secp256k1-tr requires
+  # k256 ^0.13 — no upgrade path until upstream FROST releases. Reassess on
+  # the next frost-secp256k1-tr release.
+  "RUSTSEC-2026-0387",
+]
 
 [licenses]
 allow                = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "Unicode-3.0", "Zlib"]
