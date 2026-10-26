@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1
+
 ### Added
 
 - `uuidv7(random, now?)` is exported from `@qntx/spark` so callers can mint the idempotent
