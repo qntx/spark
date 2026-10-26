@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0
+
 ### Added
 
 - Signer-side outflow derivation (G-SV). `createSparkSigner` accepts an optional
