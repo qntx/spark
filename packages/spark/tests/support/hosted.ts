@@ -7,6 +7,7 @@ import { createSparkClient } from "../../src/client/index.ts";
 import { createMemorySparkStore } from "../../src/exit/store.ts";
 import type { LightningSendStatus } from "../../src/lightning/index.ts";
 import { createSparkSigner, sparkAccountKey } from "../../src/signer/index.ts";
+import type { SparkOutflow } from "../../src/signer/index.ts";
 import { loadWasmBackend } from "./backend.ts";
 import { claimPendingUntil } from "./local.ts";
 
@@ -22,6 +23,8 @@ export type HostedWallet = {
   readonly signer: ReturnType<typeof createSparkSigner>;
   readonly store: ReturnType<typeof createMemorySparkStore>;
   readonly client: ReturnType<typeof createSparkClient>;
+  /** Every outflow the signer derived this session, in order of signature. */
+  readonly outflows: SparkOutflow[];
 };
 
 /**
@@ -49,11 +52,15 @@ export async function sendAndClaimIfPositive(
 /** Signer + client + memory store for one account index on the hosted regtest deployment. */
 export async function hostedWallet(seed: Uint8Array, account: number): Promise<HostedWallet> {
   const crypto = await loadWasmBackend();
+  const outflows: SparkOutflow[] = [];
   const signer = createSparkSigner({
     crypto,
     accountKey: sparkAccountKey(seed, "regtest", account),
     network: "regtest",
     random: (length) => randomBytes(length),
+    authorize: async (outflow) => {
+      await Promise.resolve(outflows.push(outflow));
+    },
   });
   const store = createMemorySparkStore();
   const client = createSparkClient({
@@ -62,7 +69,7 @@ export async function hostedWallet(seed: Uint8Array, account: number): Promise<H
     fetch: globalThis.fetch,
     store,
   });
-  return { signer, store, client };
+  return { signer, store, client, outflows };
 }
 
 export const sleep = async (ms: number): Promise<void> =>

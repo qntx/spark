@@ -27,6 +27,34 @@ is kept, and `withdrawals.unilateralExit` on that leaf reports the precise failu
 Key custody: private keys never leave the `SparkSigner` — the client only ever sees protocol
 values (public keys, signatures, ciphertexts).
 
+Outflow verification: `createSparkSigner` accepts an optional
+`authorize?: (outflow: SparkOutflow) => Promise<void>` gate. Before every signature that sends
+value out, the signer independently derives the outflow — it never trusts caller-supplied
+amounts or receivers. Authorization happens at two points, each backed by what the SO enforces:
+
+- `signFrost` enforces an output whitelist on every job's transaction — ephemeral anchors,
+  outputs paying the spent prevout's own script, the signer's identity, the job's own
+  signer-derived leaf key, or a pending transfer's recorded receiver. A target spending a
+  foreign input (connector refund) is an `exit` candidate carrying the connector txid; a
+  single-input target with any other non-whitelisted output is a `lightning` candidate
+  carrying that output script (`lightningSendHtlcScript` reproduces the script for an
+  invoice's payment hash). Candidates in one batch must be consistent — one connector txid or
+  one HTLC script, never mixed — and are authorized before any share is produced, since a
+  signed package can later be paired with any shares the signer issued.
+- `signIdentity` on `transfer-package` signs only when the package's `key_tweak_package` is
+  byte-equal to what `prepareTransfer` sealed this session and every leaf has a recorded refund
+  signature (the amount is the per-key maximum the SO verifies end-to-end). Receivers equal to
+  the bound SSP report `swap` — or nothing when a `signFrost` authorization already covered the
+  transfer's leaves; any other receiver reports `transfer` with per-receiver totals.
+
+`signKeySpend`, `signHtlcTimeout` and the
+`static-deposit-refund`/`watchtower-recovery` statements report `onchain` outputs decoded from
+the transaction being signed plus `inputSats` (the spent prevout total, so callers derive the
+fee); `token-transaction` reports `token` outputs with u128 amounts as
+`bigint`. A throwing `authorize` aborts the signature; records stay for retry. Session records
+are bounded (4,096 signing keys, 256 prepared transfers, oldest evicted) and wiped on
+`dispose()`.
+
 Idempotent retries: `transfers.send`/`sendMany`, `lightning.pay` and
 `withdrawals.cooperativeExit` accept a `transferId` — reuse the same id to retry a call whose
 response may have committed; the same id with different terms fails rather than paying twice.

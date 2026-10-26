@@ -32,6 +32,8 @@ import { openKeys } from "./keys.ts";
 import type { SignerKeys } from "./keys.ts";
 import { createNonceStore } from "./nonces.ts";
 import type { NonceStore } from "./nonces.ts";
+import { createOutflowTracker, onchainOutflow, tokenOutflow } from "./outflow.ts";
+import type { AuthorizeOutflow } from "./outflow.ts";
 import {
   claimStaticDepositPackage,
   prepareClaimPackage,
@@ -90,6 +92,12 @@ export function createSparkSigner(options: {
   readonly threshold?: number;
   /** SSP identity the static-deposit secret is sealed to; defaults to the network's SSP key. */
   readonly sspIdentityPublicKey?: Uint8Array;
+  /**
+   * Optional gate invoked with the signer-derived {@link SparkOutflow} before every signature that
+   * sends value out (transfer packages, onchain spends, token transactions). Throwing aborts the
+   * signature; the records stay so a later authorize can be retried.
+   */
+  readonly authorize?: AuthorizeOutflow;
 }): SparkSigner {
   const { crypto, network, random } = options;
   if (crypto.abiVersion !== SPARK_ABI_VERSION) {
@@ -116,6 +124,18 @@ export function createSparkSigner(options: {
 
   const keys: SignerKeys = openKeys(options.accountKey, crypto);
   const nonces: NonceStore = createNonceStore(crypto, keys.accountPrivate, random);
+  const outflow = createOutflowTracker(sspIdentityPublicKey, network, keys.identityPublicKey);
+  const { authorize } = options;
+
+  /** The signing public key for any key descriptor — resolved here, private copy wiped. */
+  const publicKeyOf = (key: SparkKey): Uint8Array => {
+    const secretKey = keys.resolve(key);
+    try {
+      return secp256k1.getPublicKey(secretKey, true);
+    } finally {
+      secretKey.fill(0);
+    }
+  };
   const statements: StatementContext = {
     identityPoint: keys.identityPoint,
     identityPublicKey: keys.identityPublicKey,
@@ -179,7 +199,40 @@ export function createSparkSigner(options: {
     ensureAlive();
     await ready;
     ensureAlive();
-    return frostSignJobs(crypto, jobs, keys, nonces);
+    const publicKeys = jobs.map((job) => publicKeyOf(job.key));
+    // Whitelist before any share: a signed package can be paired with any shares the signer
+    // ever issued, so HTLC/connector-shaped targets must be authorized before signing (G-SV).
+    // Authorizing before frostSignJobs leaves commitments unconsumed on rejection — a retry
+    // with an approving authorize works; signing failures keep consuming them.
+    const batchOutflow = outflow.evaluateJobs(
+      jobs.map((job, i) => {
+        const publicKey = publicKeys[i];
+        if (publicKey === undefined) {
+          throw new SparkError("signFrost: public key resolution out of range");
+        }
+        return {
+          key: job.key,
+          publicKey,
+          target: job.target,
+          ...(job.exit === undefined ? {} : { exit: job.exit }),
+        };
+      }),
+    );
+    if (batchOutflow !== undefined) {
+      await authorize?.(batchOutflow);
+    }
+    const shares = frostSignJobs(crypto, jobs, keys, nonces);
+    for (const [i, job] of jobs.entries()) {
+      const publicKey = publicKeys[i];
+      if (publicKey === undefined) {
+        throw new SparkError("signFrost: public key resolution out of range");
+      }
+      outflow.recordSign(publicKey, job.target);
+    }
+    if (batchOutflow !== undefined) {
+      outflow.markServiceAuthorized(batchOutflow.leaves.map((leaf) => leaf.publicKey));
+    }
+    return shares;
   };
 
   const aggregateFrost = async (
@@ -195,7 +248,26 @@ export function createSparkSigner(options: {
     ensureAlive();
     await ready;
     ensureAlive();
+    if (statement.kind === "transfer-package") {
+      // Fail closed: the package must be byte-equal to this signer's recorded preparation and
+      // every leaf needs a recorded refund signature; authorize gates the signature itself.
+      // A service (lightning/exit) authorization at signFrost already covered this transfer —
+      // packageOutflow returns undefined then and no second authorize call is made.
+      const transferOutflow = outflow.packageOutflow(statement.transferId, statement.package);
+      if (transferOutflow !== undefined) {
+        await authorize?.(transferOutflow);
+      }
+      const { digest, format } = statementDigest(statement, statements);
+      const signature = signDigest(digest, format, keys.identityPrivateKey, random);
+      outflow.drop(statement.transferId);
+      return signature;
+    }
     const { digest, format } = statementDigest(statement, statements);
+    if (statement.kind === "static-deposit-refund" || statement.kind === "watchtower-recovery") {
+      await authorize?.(onchainOutflow(statement.kind, statement.target));
+    } else if (statement.kind === "token-transaction") {
+      await authorize?.(tokenOutflow(statement.partialTransaction));
+    }
     return signDigest(digest, format, keys.identityPrivateKey, random);
   };
 
@@ -203,6 +275,7 @@ export function createSparkSigner(options: {
     ensureAlive();
     await ready;
     ensureAlive();
+    await authorize?.(onchainOutflow("key-spend", target));
     const secretKey = keys.resolve(key);
     let tweaked: Uint8Array | undefined;
     try {
@@ -218,6 +291,22 @@ export function createSparkSigner(options: {
     ensureAlive();
     await ready;
     ensureAlive();
+    await authorize?.(
+      onchainOutflow("htlc-timeout", {
+        transaction: request.transaction,
+        inputIndex: request.inputIndex,
+        prevouts: [
+          {
+            script: lightningHtlcOutputScript(
+              request.paymentHash,
+              request.hashLockPublicKey,
+              keys.identityPublicKey,
+            ),
+            amount: request.prevoutAmountSats,
+          },
+        ],
+      }),
+    );
     const tx = parseTransaction(request.transaction);
     if (tx.inputsLength !== 1 || request.inputIndex !== 0) {
       throw new SparkInputError("htlc timeout: only the single-input sender sweep is supported");
@@ -261,7 +350,20 @@ export function createSparkSigner(options: {
     ensureAlive();
     await ready;
     ensureAlive();
-    return prepareTransferPackage(request, packages);
+    const prepared = prepareTransferPackage(request, packages);
+    const leafPublicKeys = keys.publicKeys(request.leaves.map((leaf) => leaf.key));
+    outflow.recordPrepare(
+      request.transferId,
+      request.leaves.map((leaf, i) => {
+        const publicKey = leafPublicKeys[i];
+        if (publicKey === undefined) {
+          throw new SparkError("prepareTransfer: public key resolution out of range");
+        }
+        return { ...leaf, publicKey };
+      }),
+      prepared.operatorPackages,
+    );
+    return prepared;
   };
 
   const prepareClaim = async (request: PrepareClaimRequest): Promise<PreparedClaim> => {
@@ -294,6 +396,7 @@ export function createSparkSigner(options: {
     disposed = true;
     nonces.wipe();
     keys.wipe();
+    outflow.wipe();
   };
 
   return {

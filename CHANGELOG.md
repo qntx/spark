@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+
+- Signer-side outflow derivation: `createSparkSigner` accepts an optional
+  `authorize?: (outflow: SparkOutflow) => Promise<void>` gate called before every
+  signature that sends value out. `signFrost` enforces an output whitelist on
+  every job's transaction and authorizes `exit` (connector refunds, with the
+  connector txid) and `lightning` (HTLC-shaped refunds, with the output script
+  `lightningSendHtlcScript` reproduces) before producing shares; all other
+  outputs must pay an anchor, the spent prevout's script, the signer's identity,
+  a signer-derived leaf key, or a pending transfer's recorded receiver.
+  `transfer-package` signatures fail closed unless the package's
+  `key_tweak_package` is byte-equal to this session's recorded `prepareTransfer`
+  output and every leaf has a recorded refund signature; receivers decide
+  `transfer` (per-receiver totals), `swap` (all receivers the bound SSP), or no
+  further authorization when `signFrost` already covered the leaves. `signKeySpend`,
+  `signHtlcTimeout`, `static-deposit-refund`/`watchtower-recovery` report
+  `onchain` outputs decoded from the signed transaction, `token-transaction`
+  reports `token` outputs with u128 amounts as `bigint`. Breaking for
+  `transfer-package` signers that did not call `prepareTransfer`/`signFrost` on
+  the same instance first, and for `signFrost` callers whose targets pay
+  non-whitelisted outputs.
+
 ## 0.1.1
 
 ### Release

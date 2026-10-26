@@ -82,6 +82,11 @@ export type UserSigningSpec = {
   readonly commitments: RequestedSigningCommitments;
   /** 33-byte adaptor point, when the job's signature must verify under an adaptor (leaves swap). */
   readonly adaptorPublicKey?: Uint8Array;
+  /** Connector-refund proof pair — see `FrostSignJob.exit`. */
+  readonly exit?: {
+    readonly connectorTx: Uint8Array;
+    readonly exitTx: Uint8Array;
+  };
 };
 
 function operatorCommitments(
@@ -126,6 +131,7 @@ export async function signUserJobs(
           ...(spec.adaptorPublicKey === undefined
             ? {}
             : { adaptorPublicKey: spec.adaptorPublicKey }),
+          ...(spec.exit === undefined ? {} : { exit: spec.exit }),
         };
       }),
     );

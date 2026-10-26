@@ -133,6 +133,21 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       );
       await expect(clientA.balance()).resolves.toBe(balanceA0 - amounts.first - amounts.second);
 
+      // G-SV: the signer derived a transfer outflow with per-receiver totals.
+      const sent = walletA.outflows.find((o) => o.kind === "transfer");
+      expect(sent?.kind).toBe("transfer");
+      // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing guard
+      if (sent === undefined || sent.kind !== "transfer") {
+        throw new Error(`expected transfer outflow`);
+      }
+      expect(sent.transferId).toBe(multi.id);
+      expect(sent.totalSats).toBe(amounts.first + amounts.second);
+      const perReceiver = new Map(
+        sent.receivers.map((r) => [Buffer.from(r.identityPublicKey).toString("hex"), r.amountSats]),
+      );
+      expect(perReceiver.get(Buffer.from(identityB).toString("hex"))).toBe(amounts.first);
+      expect(perReceiver.get(Buffer.from(identityC).toString("hex"))).toBe(amounts.second);
+
       const claimedB = await clientB.transfers.claim(await pendingTransfer(clientB, multi.id));
       console.log("B claimed:", denominations(claimedB));
       expect(totalSats(claimedB)).toBe(amounts.first);
