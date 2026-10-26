@@ -520,11 +520,19 @@ export function createOutflowTracker(
       throw new SparkInputError("transfer package: SSP and non-SSP receivers in one transfer");
     }
     if (sspCount > 0) {
-      const covered = prepared.leaves.some((leaf) =>
+      const authorized = prepared.leaves.filter((leaf) =>
         serviceAuthorized.has(bytesToHex(leaf.publicKey)),
-      );
-      // HTLC/connector shares were already authorized at signFrost — no second charging.
-      return covered ? undefined : { kind: "swap", transferId, totalSats };
+      ).length;
+      if (authorized === prepared.leaves.length) {
+        // Every leaf's HTLC/connector shares were already authorized at signFrost.
+        return undefined;
+      }
+      if (authorized !== 0) {
+        throw new SparkInputError(
+          "transfer package: SSP transfer mixes service-authorized and unauthorized leaves",
+        );
+      }
+      return { kind: "swap", transferId, totalSats };
     }
     const receivers = new Map<string, { identityPublicKey: Uint8Array; amountSats: number }>();
     for (const [i, leaf] of prepared.leaves.entries()) {
