@@ -32,20 +32,22 @@ Outflow verification: `createSparkSigner` accepts an optional
 value out, the signer independently derives the outflow — it never trusts caller-supplied
 amounts or receivers. Authorization happens at two points, each backed by what the SO enforces:
 
-- `signFrost` enforces an output whitelist on every job's transaction — ephemeral anchors,
-  outputs paying the spent prevout's own script, the signer's identity, the job's own
-  signer-derived leaf key, or a pending transfer's recorded receiver. A target spending a
-  foreign input (connector refund) is an `exit` candidate carrying the connector txid; a
-  single-input target with any other non-whitelisted output is a `lightning` candidate
-  carrying that output script (`lightningSendHtlcScript` reproduces the script for an
-  invoice's payment hash). Candidates in one batch must be consistent — one connector txid or
-  one HTLC script, never mixed — and are authorized before any share is produced, since a
-  signed package can later be paired with any shares the signer issued.
+- `signFrost` checks every job before producing any share. A target spending a foreign input
+  (connector refund) is an `exit` candidate: the job must carry `exit: { connectorTx, exitTx }`,
+  the signer checks that the connector spends `exitTx` and matches the foreign input, and the
+  outflow reports the payout's `exitOutputs`. Every other output must be an ephemeral anchor, the
+  spent prevout's own script, the signer's identity, a pending transfer's recorded receiver, or
+  — for `leaf`/`static-deposit` keys only — the job's own key. A single-input target with any
+  other output is a `lightning` candidate carrying that output script (`lightningSendHtlcScript`
+  reproduces it for an invoice's payment hash); a multi-input one is rejected, as is a batch
+  mixing candidates. Candidates are authorized before any share is produced, since a signed
+  package can later be paired with any shares the signer issued.
 - `signIdentity` on `transfer-package` signs only when the package's `key_tweak_package` is
   byte-equal to what `prepareTransfer` sealed this session and every leaf has a recorded refund
   signature (the amount is the per-key maximum the SO verifies end-to-end). Receivers equal to
-  the bound SSP report `swap` — or nothing when a `signFrost` authorization already covered the
-  transfer's leaves; any other receiver reports `transfer` with per-receiver totals.
+  the bound SSP report `swap` — or nothing when `signFrost` already authorized every leaf (a
+  partially authorized SSP transfer is rejected); any other receiver reports `transfer` with
+  per-receiver totals.
 
 `signKeySpend`, `signHtlcTimeout` and the
 `static-deposit-refund`/`watchtower-recovery` statements report `onchain` outputs decoded from

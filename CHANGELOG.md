@@ -4,25 +4,45 @@
 
 ### Added
 
-- Signer-side outflow derivation: `createSparkSigner` accepts an optional
-  `authorize?: (outflow: SparkOutflow) => Promise<void>` gate called before every
-  signature that sends value out. `signFrost` enforces an output whitelist on
-  every job's transaction and authorizes `exit` (connector refunds, with the
-  connector txid) and `lightning` (HTLC-shaped refunds, with the output script
-  `lightningSendHtlcScript` reproduces) before producing shares; all other
-  outputs must pay an anchor, the spent prevout's script, the signer's identity,
-  a signer-derived leaf key, or a pending transfer's recorded receiver.
-  `transfer-package` signatures fail closed unless the package's
-  `key_tweak_package` is byte-equal to this session's recorded `prepareTransfer`
-  output and every leaf has a recorded refund signature; receivers decide
-  `transfer` (per-receiver totals), `swap` (all receivers the bound SSP), or no
-  further authorization when `signFrost` already covered the leaves. `signKeySpend`,
-  `signHtlcTimeout`, `static-deposit-refund`/`watchtower-recovery` report
-  `onchain` outputs decoded from the signed transaction, `token-transaction`
-  reports `token` outputs with u128 amounts as `bigint`. Breaking for
-  `transfer-package` signers that did not call `prepareTransfer`/`signFrost` on
-  the same instance first, and for `signFrost` callers whose targets pay
-  non-whitelisted outputs.
+- Signer-side outflow derivation (G-SV). `createSparkSigner` accepts an optional
+  `authorize?: (outflow: SparkOutflow) => Promise<void>` gate, called with an
+  outflow the signer derives itself before every signature that sends value
+  out; a throw aborts the signature without consuming nonce commitments.
+  `SparkOutflow` variants: `transfer`, `lightning`, `exit`, `swap`, `onchain`,
+  `token`.
+  - `signFrost` checks every job before producing any share. A multi-input
+    target spending a foreign prevout script is a connector refund (`exit`
+    candidate): the job must carry `exit: { connectorTx, exitTx }`, the
+    connector txid must equal the foreign input, the connector's input 0 must
+    spend `exitTx`, and the outflow reports `exitOutputs` (every output of the
+    coop-exit payout). Every other output must be an ephemeral anchor, the
+    spent prevout's own script, a P2TR to the signer's identity, a P2TR to a
+    pending prepared transfer's receiver, or (for `leaf`/`static-deposit` keys
+    only) a P2TR to the job's own key; a single-input target outside that
+    list is a `lightning` candidate reporting the output script, a
+    multi-input one is rejected, and batches mixing candidates are rejected.
+  - `transfer-package` identity signatures require a `key_tweak_package`
+    byte-equal to this signer's `prepareTransfer` output and a recorded
+    refund signature for every leaf. Receivers decide `transfer`
+    (per-receiver totals) or `swap` (all receivers the bound SSP); SSP
+    transfers whose leaves were all authorized at `signFrost` need no second
+    authorization, and partially authorized ones are rejected.
+  - `signKeySpend`, `signHtlcTimeout` and the `static-deposit-refund` /
+    `watchtower-recovery` statements report `onchain` outputs plus
+    `inputSats`; `token-transaction` reports `token` outputs with u128
+    amounts as `bigint`.
+- `lightningSendHtlcScript`, `decodeBolt11`, `sparkNetworkConfig`,
+  `addressToScript` and `EPHEMERAL_ANCHOR_SCRIPT` are exported from
+  `@qntx/spark/signer` for `authorize` implementations; `addressToScript` and
+  `EPHEMERAL_ANCHOR_SCRIPT` are also exported from `@qntx/spark`.
+
+### Breaking
+
+- `transfer-package` signatures fail unless `prepareTransfer` and the refund
+  `signFrost` ran on the same signer instance first.
+- `signFrost` rejects targets with outputs outside the whitelist above, and
+  connector refunds without their `exit` transaction pair; custom clients
+  building cooperative exits must pass the pair.
 
 ## 0.1.1
 
