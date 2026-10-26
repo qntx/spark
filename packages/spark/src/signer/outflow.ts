@@ -463,7 +463,19 @@ export function createOutflowTracker(
         p2trScriptFromPublicKey(leaf.receiverIdentityPublicKey, network),
       );
     }
-    transfers.set(transferId, { leaves, operatorPackages });
+    // Copy every byte array the host could transfer out of process — a detached buffer in the
+    // recorded request would read as length-0 at package time and reject a valid signature.
+    transfers.set(transferId, {
+      leaves: leaves.map((leaf) => ({
+        ...leaf,
+        key: { ...leaf.key },
+        publicKey: new Uint8Array(leaf.publicKey),
+        receiverIdentityPublicKey: new Uint8Array(leaf.receiverIdentityPublicKey),
+      })),
+      operatorPackages: Object.fromEntries(
+        Object.entries(operatorPackages).map(([id, pkg]) => [id, new Uint8Array(pkg)]),
+      ),
+    });
   };
 
   const packageOutflow: OutflowTracker["packageOutflow"] = (transferId, packageBytes) => {
