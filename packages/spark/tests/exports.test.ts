@@ -101,12 +101,14 @@ function names(mod: object): string[] {
 
 test("root runtime exports are exactly the core surface", () => {
   expect(names(root)).toStrictEqual([
+    "EPHEMERAL_ANCHOR_SCRIPT",
     "MIN_STATIC_REFUND_FEE_SATS",
     "SparkCryptoError",
     "SparkError",
     "SparkInputError",
     "SparkRequestError",
     "SparkTokenBroadcastError",
+    "addressToScript",
     "buildCpfpChild",
     "createMemorySparkStore",
     "createSatsInvoice",
@@ -163,10 +165,14 @@ test("server runtime exports are exactly the lightning address server surface", 
 
 test("signer runtime exports are exactly the signer factory surface", () => {
   expect(names(signer)).toStrictEqual([
+    "EPHEMERAL_ANCHOR_SCRIPT",
+    "addressToScript",
     "createLnurlAuthSigner",
     "createSparkSigner",
+    "decodeBolt11",
     "lightningSendHtlcScript",
     "lnurlAuthRootKey",
     "sparkAccountKey",
+    "sparkNetworkConfig",
   ]);
 });
