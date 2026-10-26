@@ -2015,6 +2015,48 @@ describe("outflow derivation", () => {
     signer.dispose();
   });
 
+  test("fails closed: SSP package mixing authorized and plain leaves rejects", async () => {
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      sspIdentityPublicKey: ssp,
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const transferId = "550e8400-e29b-41d4-a716-446655440050";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+        { leafId: LEAF_B, key: { type: "leaf", leafId: LEAF_B }, receiverIdentityPublicKey: ssp },
+      ],
+    });
+    // LEAF_A signs an HTLC-shaped refund (unknown output script) → service-authorized.
+    const htlcLike = p2trScriptFromPublicKey(
+      Point.BASE.multiply(0xdeadbeefn).toBytes(true),
+      "regtest",
+    );
+    await signRefund(
+      signer,
+      { type: "leaf", leafId: LEAF_A },
+      { leafAmount: 7000, outputScripts: [htlcLike] },
+    );
+    expect(outflowAs(outflows[0]!, "lightning").leaves[0]!.amountSats).toBe(7000);
+    // LEAF_B signs a plain refund paying the SSP receiver → whitelisted, no authorization.
+    await signRefund(signer, { type: "leaf", leafId: LEAF_B }, { leafAmount: 3000, receiver: ssp });
+    // Mixing one authorized and one unauthorized leaf in the same package must not skip
+    // authorization — reject instead of silently classifying as covered.
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId,
+        package: packageBytes(prepared.operatorPackages),
+      }),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
   test("fails closed: SSP and non-SSP receivers in one transfer reject", async () => {
     const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
     const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
