@@ -24,3 +24,7 @@ export type {
 } from "./types.ts";
 export type { SigningTarget } from "./types.ts";
 export type { SparkNetwork } from "../core/network.ts";
+export { decodeBolt11 } from "../core/bolt11.ts";
+export { sparkNetworkConfig } from "../core/network.ts";
+export { EPHEMERAL_ANCHOR_SCRIPT } from "../core/bitcoin/script.ts";
+export { addressToScript } from "../core/bitcoin/transactions.ts";
