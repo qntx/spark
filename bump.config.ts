@@ -19,6 +19,8 @@ const config: ReturnType<typeof defineConfig> = defineConfig({
     "packages/spark-wasm/package.json",
     "packages/spark-native/package.json",
     "Cargo.toml",
+    // crates/interop pins spark-crypto by exact version; a minor bump leaves the caret range.
+    "crates/interop/Cargo.toml",
   ],
   // crates/interop is its own workspace, so its lockfile needs a separate
   // `cargo update`. A string `execute` is not run through a shell, so the
