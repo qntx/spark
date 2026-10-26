@@ -14,6 +14,7 @@ export {
   encodeTokenIdentifier,
   isExpired,
   verifySparkAddressSignature,
+  uuidv7,
 } from "./core/index.ts";
 export type {
   SparkNetwork,

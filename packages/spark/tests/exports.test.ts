@@ -123,6 +123,7 @@ test("root runtime exports are exactly the core surface", () => {
     "isExpired",
     "parseSparkInvoice",
     "sparkNetworkConfig",
+    "uuidv7",
     "verifySparkAddressSignature",
   ]);
 });

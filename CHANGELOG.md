@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- `uuidv7(random, now?)` is exported from `@qntx/spark` so callers can mint the idempotent
+  `transferId` that `transfers.send`/`sendMany`, `lightning.pay` and
+  `withdrawals.cooperativeExit` accept for safe retries.
+
 ## 0.2.0
 
 ### Added

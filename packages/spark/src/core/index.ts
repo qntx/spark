@@ -3,6 +3,7 @@ export { encodeSparkAddress, decodeSparkAddress, verifySparkAddressSignature } f
 export { encodeTokenIdentifier, decodeTokenIdentifier } from "./token-identifier.ts";
 export type { SparkTokenIdentifierData } from "./token-identifier.ts";
 export { decodeBolt11, isExpired } from "./bolt11.ts";
+export { uuidv7 } from "./uuid.ts";
 export {
   LIGHTNING_ADDRESS_MAX_DESCRIPTION_LENGTH,
   LIGHTNING_ADDRESS_USERNAME_PATTERN,
