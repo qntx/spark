@@ -16,8 +16,10 @@ import {
   LIGHTNING_HTLC_SEQUENCE,
   lightningHtlcOutputScript,
 } from "../src/core/bitcoin/htlc.ts";
+import { EPHEMERAL_ANCHOR_SCRIPT, p2trScriptFromPublicKey } from "../src/core/bitcoin/script.ts";
 import type { SigningTarget } from "../src/core/bitcoin/sighash.ts";
 import { taprootKeySpendSighash, taprootScriptSpendSighash } from "../src/core/bitcoin/sighash.ts";
+import { txIdInputBytes } from "../src/core/bitcoin/transactions.ts";
 import {
   authnChallengeDigest,
   claimPackageDigest,
@@ -25,7 +27,6 @@ import {
   sendLeafSigningDigest,
   sspChallengeDigest,
   staticDepositStatementDigest,
-  transferPackageDigest,
   watchtowerRecoveryStatementDigest,
 } from "../src/core/hashing/index.ts";
 import { hashPartialTokenTransaction } from "../src/core/hashing/token.ts";
@@ -45,8 +46,12 @@ import {
 } from "../src/proto/gen/spark_pb.ts";
 import { PartialTokenTransactionSchema } from "../src/proto/gen/spark_token_pb.ts";
 import { ProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
-import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
-import type { SparkOperator, SparkSigner } from "../src/signer/index.ts";
+import {
+  createSparkSigner,
+  lightningSendHtlcScript,
+  sparkAccountKey,
+} from "../src/signer/index.ts";
+import type { SparkKey, SparkOperator, SparkOutflow, SparkSigner } from "../src/signer/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
 import { seededRandom } from "./support/fakes.ts";
 import {
@@ -89,19 +94,22 @@ const transactions = JSON.parse(
   }>;
 };
 
-const sighashVector = transactions.multiInputSighash[0]!;
-const TARGET: SigningTarget = {
-  transaction: hexToBytes(sighashVector.tx),
-  inputIndex: sighashVector.inputIndex,
-  prevouts: sighashVector.prevOutScripts.map((script, i) => ({
-    script: hexToBytes(script),
-    amount: sighashVector.prevOutValues[i]!,
-  })),
-};
-
 const TRANSFER_ID = "550e8400-e29b-41d4-a716-446655440000";
 const { Fn } = secp256k1.Point;
 const { Point } = secp256k1;
+
+// Minimal whitelisted target: single input, P2A-anchor output — keeps FROST mechanics tests
+// out of the exit/lightning whitelist path. The shares' sighash verifies against this target.
+const targetTx = new Transaction({ allowUnknownOutputs: true });
+targetTx.addInput({ txid: new Uint8Array(32).fill(3), index: 0 });
+targetTx.addOutput({ script: EPHEMERAL_ANCHOR_SCRIPT, amount: 0n });
+const TARGET: SigningTarget = {
+  transaction: targetTx.toBytes(),
+  inputIndex: 0,
+  prevouts: [
+    { script: p2trScriptFromPublicKey(Point.BASE.toBytes(true), "regtest"), amount: 1000 },
+  ],
+};
 
 let cryptoPromise: Promise<SparkCrypto> | undefined;
 const backend = async (): Promise<SparkCrypto> => {
@@ -117,6 +125,7 @@ async function signerFor(
     readonly operators?: ReadonlyArray<SparkOperator>;
     readonly threshold?: number;
     readonly sspIdentityPublicKey?: Uint8Array;
+    readonly authorize?: (outflow: SparkOutflow) => Promise<void>;
   },
 ): Promise<SparkSigner> {
   const accountKey = sparkAccountKey(hexToBytes(seedHex), "regtest", account);
@@ -374,24 +383,16 @@ describe("signIdentity", () => {
     expect(() => sspChallengeDigest(base64.encode(soChallenge), identity)).toThrow(SparkInputError);
   });
 
-  test("transfer-package signs the V2 package digest; other variants rejected", async () => {
+  test("transfer-package fails closed without a recorded prepareTransfer", async () => {
     const signer = await signerFor(derivation.cases[0]!.seed_hex);
-    const identity = await signer.identityPublicKey();
     const pkg = create(TransferPackageSchema, {
       keyTweakPackage: { operator: new Uint8Array([1, 2, 3]) },
       hashVariant: HashVariant.V2,
     });
     const bytes = toBinary(TransferPackageSchema, pkg);
-    const signature = await signer.signIdentity({
-      kind: "transfer-package",
-      transferId: TRANSFER_ID,
-      package: bytes,
-    });
-    expectDerSignature(
-      signature,
-      transferPackageDigest(TRANSFER_ID, fromBinary(TransferPackageSchema, bytes)),
-      identity,
-    );
+    await expect(
+      signer.signIdentity({ kind: "transfer-package", transferId: TRANSFER_ID, package: bytes }),
+    ).rejects.toThrow(SparkInputError);
     const legacy = toBinary(
       TransferPackageSchema,
       create(TransferPackageSchema, { hashVariant: HashVariant.UNSPECIFIED }),
@@ -1380,5 +1381,869 @@ describe("signer lifecycle", () => {
         random: seededRandom(new Uint8Array(32)),
       }),
     ).toThrow(SparkInputError);
+  });
+});
+
+describe("outflow derivation", () => {
+  const outflowAs = <K extends SparkOutflow["kind"]>(
+    outflow: SparkOutflow,
+    kind: K,
+  ): Extract<SparkOutflow, { readonly kind: K }> => {
+    if (outflow.kind !== kind) {
+      throw new Error(`expected ${kind} outflow, got ${outflow.kind}`);
+    }
+    return outflow as Extract<SparkOutflow, { readonly kind: K }>;
+  };
+  const p2trScript = (publicKey: Uint8Array): Uint8Array =>
+    concatBytes(Uint8Array.of(0x51, 0x20), publicKey.subarray(1));
+
+  function refundTarget(options: {
+    readonly leafAmount: number;
+    readonly outputScripts: ReadonlyArray<Uint8Array>;
+    readonly connectorTxid?: Uint8Array;
+    readonly sameScriptInputs?: number;
+  }): SigningTarget {
+    const tx = new Transaction({ allowUnknownOutputs: true });
+    tx.addInput({ txid: new Uint8Array(32).fill(3), index: 0 });
+    if (options.connectorTxid !== undefined) {
+      tx.addInput({ txid: options.connectorTxid, index: 7 });
+    }
+    const spentScript = p2trScript(Point.BASE.toBytes(true));
+    const prevouts = [{ script: spentScript, amount: options.leafAmount }];
+    if (options.connectorTxid !== undefined) {
+      prevouts.push({ script: p2trScript(Point.BASE.multiply(2n).toBytes(true)), amount: 0 });
+    }
+    // Extra inputs spending the SAME script — a multi-UTXO root, not a connector.
+    for (let i = 0; i < (options.sameScriptInputs ?? 0); i++) {
+      tx.addInput({ txid: new Uint8Array(32).fill(20 + i), index: i });
+      prevouts.push({ script: spentScript, amount: 1000 });
+    }
+    for (const [i, script] of options.outputScripts.entries()) {
+      tx.addOutput({ script, amount: BigInt((i + 1) * 500) });
+    }
+    return { transaction: tx.toBytes(), inputIndex: 0, prevouts };
+  }
+
+  async function signRefund(
+    signer: SparkSigner,
+    key: SparkKey,
+    options: {
+      readonly leafAmount: number;
+      readonly receiver?: Uint8Array;
+      readonly outputScripts?: ReadonlyArray<Uint8Array>;
+      readonly connectorTxid?: Uint8Array;
+      readonly exit?: { readonly connectorTx: Uint8Array; readonly exitTx: Uint8Array };
+    },
+  ): Promise<void> {
+    const [commitment] = await signer.newCommitments(1);
+    const { operators, verifyingKey } = frostGroup(
+      0x5ea5n,
+      [11111n, 44444n],
+      [
+        [22222n, 33333n],
+        [55555n, 66666n],
+      ],
+    );
+    const fixtures = operatorSetup(operators);
+    const receiver = options.receiver ?? Point.BASE.toBytes(true);
+    const target = refundTarget({
+      leafAmount: options.leafAmount,
+      outputScripts: options.outputScripts ?? [p2trScriptFromPublicKey(receiver, "regtest")],
+      ...(options.connectorTxid === undefined ? {} : { connectorTxid: options.connectorTxid }),
+    });
+    const shares = await signer.signFrost([
+      {
+        key,
+        target,
+        verifyingKey,
+        commitment: commitment!,
+        operatorCommitments: fixtures.map((f) => ({
+          identifier: f.identifier,
+          commitment: f.commitment,
+        })),
+        ...(options.exit === undefined ? {} : { exit: options.exit }),
+      },
+    ]);
+    expect(shares).toHaveLength(1);
+  }
+
+  /** One signFrost batch over several refund specs — batch-level rules apply to the whole call. */
+  async function signRefundBatch(
+    signer: SparkSigner,
+    specs: ReadonlyArray<{
+      readonly key: SparkKey;
+      readonly leafAmount: number;
+      readonly receiver?: Uint8Array;
+      readonly outputScripts?: ReadonlyArray<Uint8Array>;
+      readonly connectorTxid?: Uint8Array;
+      readonly sameScriptInputs?: number;
+      readonly target?: SigningTarget;
+      readonly exit?: { readonly connectorTx: Uint8Array; readonly exitTx: Uint8Array };
+    }>,
+  ): Promise<ReadonlyArray<Uint8Array>> {
+    const commitments = await signer.newCommitments(specs.length);
+    const { operators, verifyingKey } = frostGroup(
+      0x5ea5n,
+      [11111n, 44444n],
+      [
+        [22222n, 33333n],
+        [55555n, 66666n],
+      ],
+    );
+    const fixtures = operatorSetup(operators);
+    return signer.signFrost(
+      specs.map((spec, i) => ({
+        key: spec.key,
+        target:
+          spec.target ??
+          refundTarget({
+            leafAmount: spec.leafAmount,
+            outputScripts: spec.outputScripts ?? [
+              p2trScriptFromPublicKey(spec.receiver ?? Point.BASE.toBytes(true), "regtest"),
+            ],
+            ...(spec.connectorTxid === undefined ? {} : { connectorTxid: spec.connectorTxid }),
+            ...(spec.sameScriptInputs === undefined
+              ? {}
+              : { sameScriptInputs: spec.sameScriptInputs }),
+          }),
+        verifyingKey,
+        commitment: commitments[i]!,
+        operatorCommitments: fixtures.map((f) => ({
+          identifier: f.identifier,
+          commitment: f.commitment,
+        })),
+        ...(spec.exit === undefined ? {} : { exit: spec.exit }),
+      })),
+    );
+  }
+
+  /** A fabricated connector/exit pair: exitTx pays a destination; connectorTx input 0 spends it. */
+  function exitPair(payoutScript?: Uint8Array): {
+    connectorTx: Uint8Array;
+    exitTx: Uint8Array;
+    connectorTxid: Uint8Array;
+  } {
+    const exitTx = new Transaction({ allowUnknownOutputs: true });
+    exitTx.addInput({ txid: new Uint8Array(32).fill(0xaa), index: 0 });
+    exitTx.addOutput({
+      script:
+        payoutScript ?? p2trScriptFromPublicKey(Point.BASE.multiply(3n).toBytes(true), "regtest"),
+      amount: 15_000n,
+    });
+    const exitTxBytes = exitTx.toBytes();
+    const connectorTx = new Transaction({ allowUnknownOutputs: true });
+    connectorTx.addInput({ txid: txIdInputBytes(exitTxBytes), index: 0 });
+    connectorTx.addOutput({
+      script: p2trScriptFromPublicKey(Point.BASE.multiply(2n).toBytes(true), "regtest"),
+      amount: 330n,
+    });
+    connectorTx.addOutput({ script: EPHEMERAL_ANCHOR_SCRIPT, amount: 0n });
+    const connectorTxBytes = connectorTx.toBytes();
+    return {
+      connectorTx: connectorTxBytes,
+      exitTx: exitTxBytes,
+      connectorTxid: txIdInputBytes(connectorTxBytes),
+    };
+  }
+
+  function packageBytes(operatorPackages: Record<string, Uint8Array>): Uint8Array {
+    return toBinary(
+      TransferPackageSchema,
+      create(TransferPackageSchema, {
+        keyTweakPackage: operatorPackages,
+        hashVariant: HashVariant.V2,
+      }),
+    );
+  }
+
+  const LEAF_A = "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2a";
+  const LEAF_B = "01905f9b-5b77-7c00-9f60-1c2a2e0a1b2b";
+
+  test("transfer: single and multi-receiver totals", async () => {
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const receiverA = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    const receiverB = Point.BASE.multiply(0xb22ce22ce22cen).toBytes(true);
+    const transferId = "550e8400-e29b-41d4-a716-446655440001";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        {
+          leafId: LEAF_A,
+          key: { type: "leaf", leafId: LEAF_A },
+          receiverIdentityPublicKey: receiverA,
+        },
+        {
+          leafId: LEAF_B,
+          key: { type: "leaf", leafId: LEAF_B },
+          receiverIdentityPublicKey: receiverB,
+        },
+      ],
+    });
+    await signRefund(
+      signer,
+      { type: "leaf", leafId: LEAF_A },
+      { leafAmount: 1000, receiver: receiverA },
+    );
+    await signRefund(
+      signer,
+      { type: "leaf", leafId: LEAF_B },
+      { leafAmount: 2000, receiver: receiverB },
+    );
+    const signature = await signer.signIdentity({
+      kind: "transfer-package",
+      transferId,
+      package: packageBytes(prepared.operatorPackages),
+    });
+    expect(signature[0]).toBe(0x30);
+    expect(outflows).toHaveLength(1);
+    const outflow = outflowAs(outflows[0]!, "transfer");
+    expect(outflow.totalSats).toBe(3000);
+    expect(outflow.receivers).toHaveLength(2);
+    expect(outflow.receivers[0]).toStrictEqual({
+      identityPublicKey: receiverA,
+      amountSats: 1000,
+    });
+    expect(outflow.receivers[1]).toStrictEqual({
+      identityPublicKey: receiverB,
+      amountSats: 2000,
+    });
+    signer.dispose();
+  });
+
+  test("lightning: reports the HTLC script lightningSendHtlcScript reproduces", async () => {
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      sspIdentityPublicKey: ssp,
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const identity = await signer.identityPublicKey();
+    const paymentHash = new Uint8Array(32).fill(9);
+    const htlcScript = lightningSendHtlcScript({
+      paymentHash,
+      sspIdentityPublicKey: ssp,
+      identityPublicKey: identity,
+    });
+    const transferId = "550e8400-e29b-41d4-a716-446655440002";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+      ],
+    });
+    await signRefund(
+      signer,
+      { type: "leaf", leafId: LEAF_A },
+      { leafAmount: 42_000, outputScripts: [htlcScript] },
+    );
+    const outflow = outflowAs(outflows[0]!, "lightning");
+    expect(outflow.totalSats).toBe(42_000);
+    expect(bytesToHex(outflow.htlcOutputScript)).toBe(bytesToHex(htlcScript));
+    expect(outflow.leaves).toHaveLength(1);
+    expect(outflow.leaves[0]!.amountSats).toBe(42_000);
+    // The HTLC shares were authorized at signFrost: signing the package charges nothing again.
+    await signer.signIdentity({
+      kind: "transfer-package",
+      transferId,
+      package: packageBytes(prepared.operatorPackages),
+    });
+    expect(outflows).toHaveLength(1);
+    signer.dispose();
+  });
+
+  test("exit: two-input connector refund reports the connector txid", async () => {
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      sspIdentityPublicKey: ssp,
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const transferId = "550e8400-e29b-41d4-a716-446655440003";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+      ],
+    });
+    const pair = exitPair();
+    await signRefund(
+      signer,
+      { type: "leaf", leafId: LEAF_A },
+      { leafAmount: 7000, outputScripts: [], connectorTxid: pair.connectorTxid, exit: pair },
+    );
+    const outflow = outflowAs(outflows[0]!, "exit");
+    expect(outflow.totalSats).toBe(7000);
+    expect(bytesToHex(outflow.connectorTxid)).toBe(bytesToHex(pair.connectorTxid));
+    expect(outflow.exitOutputs).toHaveLength(1);
+    expect(outflow.exitOutputs[0]!.amountSats).toBe(15_000);
+    await signer.signIdentity({
+      kind: "transfer-package",
+      transferId,
+      package: packageBytes(prepared.operatorPackages),
+    });
+    expect(outflows).toHaveLength(1);
+    signer.dispose();
+  });
+
+  test("swap: leaves returning to the bound SSP identity classify as swap", async () => {
+    const outflows: SparkOutflow[] = [];
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      sspIdentityPublicKey: ssp,
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const transferId = "550e8400-e29b-41d4-a716-446655440004";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+      ],
+    });
+    await signRefund(signer, { type: "leaf", leafId: LEAF_A }, { leafAmount: 5000, receiver: ssp });
+    await signer.signIdentity({
+      kind: "transfer-package",
+      transferId,
+      package: packageBytes(prepared.operatorPackages),
+    });
+    expect(outflowAs(outflows[0]!, "swap").totalSats).toBe(5000);
+    signer.dispose();
+  });
+
+  test("forged small refund then honest refund: the maximum prevout wins", async () => {
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const receiver = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    const transferId = "550e8400-e29b-41d4-a716-446655440005";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        {
+          leafId: LEAF_A,
+          key: { type: "leaf", leafId: LEAF_A },
+          receiverIdentityPublicKey: receiver,
+        },
+      ],
+    });
+    await signRefund(signer, { type: "leaf", leafId: LEAF_A }, { leafAmount: 100, receiver });
+    await signRefund(signer, { type: "leaf", leafId: LEAF_A }, { leafAmount: 9000, receiver });
+    await signer.signIdentity({
+      kind: "transfer-package",
+      transferId,
+      package: packageBytes(prepared.operatorPackages),
+    });
+    expect(outflowAs(outflows[0]!, "transfer").totalSats).toBe(9000);
+    signer.dispose();
+  });
+
+  test("fails closed: no recorded signFrost, mismatched or forged packages, mixed shapes", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const receiver = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    const receiverB = Point.BASE.multiply(0xb22ce22ce22cen).toBytes(true);
+    const transferId = "550e8400-e29b-41d4-a716-446655440006";
+
+    // No signFrost record for the leaf's key → reject before any signature.
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        {
+          leafId: LEAF_A,
+          key: { type: "leaf", leafId: LEAF_A },
+          receiverIdentityPublicKey: receiver,
+        },
+      ],
+    });
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId,
+        package: packageBytes(prepared.operatorPackages),
+      }),
+    ).rejects.toThrow(SparkInputError);
+
+    // With the refund recorded, tampered packages still reject: flipped byte and missing key.
+    await signRefund(signer, { type: "leaf", leafId: LEAF_A }, { leafAmount: 1000, receiver });
+    const flipped = { ...prepared.operatorPackages };
+    const first = Object.keys(flipped)[0]!;
+    flipped[first] = Uint8Array.from(flipped[first]!, (v) => v ^ 0xff);
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId,
+        package: packageBytes(flipped),
+      }),
+    ).rejects.toThrow(SparkInputError);
+    const { [first]: _dropped, ...missing } = prepared.operatorPackages;
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId,
+        package: packageBytes(missing),
+      }),
+    ).rejects.toThrow(SparkInputError);
+
+    // Mixed shapes across leaves: one connector refund, one plain → reject.
+    const mixedId = "550e8400-e29b-41d4-a716-446655440007";
+    await signer.prepareTransfer({
+      transferId: mixedId,
+      leaves: [
+        {
+          leafId: LEAF_A,
+          key: { type: "leaf", leafId: LEAF_A },
+          receiverIdentityPublicKey: receiver,
+        },
+        {
+          leafId: LEAF_B,
+          key: { type: "leaf", leafId: LEAF_B },
+          receiverIdentityPublicKey: receiverB,
+        },
+      ],
+    });
+    const htlcScript = lightningSendHtlcScript({
+      paymentHash: new Uint8Array(32).fill(9),
+      sspIdentityPublicKey: receiverB,
+      identityPublicKey: await signer.identityPublicKey(),
+    });
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 1000,
+          outputScripts: [],
+          connectorTxid: new Uint8Array(32).fill(7),
+        },
+        { key: { type: "leaf", leafId: LEAF_B }, leafAmount: 2000, outputScripts: [htlcScript] },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("fails closed: two different HTLC refund scripts reject", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex);
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const identity = await signer.identityPublicKey();
+    const scriptA = lightningSendHtlcScript({
+      paymentHash: new Uint8Array(32).fill(1),
+      sspIdentityPublicKey: ssp,
+      identityPublicKey: identity,
+    });
+    const scriptB = lightningSendHtlcScript({
+      paymentHash: new Uint8Array(32).fill(2),
+      sspIdentityPublicKey: ssp,
+      identityPublicKey: identity,
+    });
+    const transferId = "550e8400-e29b-41d4-a716-446655440008";
+    await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+        { leafId: LEAF_B, key: { type: "leaf", leafId: LEAF_B }, receiverIdentityPublicKey: ssp },
+      ],
+    });
+    await expect(
+      signRefundBatch(signer, [
+        { key: { type: "leaf", leafId: LEAF_A }, leafAmount: 1000, outputScripts: [scriptA] },
+        { key: { type: "leaf", leafId: LEAF_B }, leafAmount: 2000, outputScripts: [scriptB] },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("HTLC batch reaches authorize; a throwing authorize signs nothing and retry works", async () => {
+    let calls = 0;
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        calls += 1;
+        // oxlint-disable-next-line vitest/no-conditional-in-test -- the deny-then-allow retry path
+        if (calls === 1) {
+          throw new Error("denied");
+        }
+        await Promise.resolve(o);
+      },
+    });
+    const identity = await signer.identityPublicKey();
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const htlcScript = lightningSendHtlcScript({
+      paymentHash: new Uint8Array(32).fill(9),
+      sspIdentityPublicKey: ssp,
+      identityPublicKey: identity,
+    });
+    await signer.prepareTransfer({
+      transferId: "550e8400-e29b-41d4-a716-44665544000a",
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+      ],
+    });
+    // authorize throws BEFORE frostSignJobs — no shares, commitments unconsumed, retry works.
+    await expect(
+      signRefundBatch(signer, [
+        { key: { type: "leaf", leafId: LEAF_A }, leafAmount: 5000, outputScripts: [htlcScript] },
+      ]),
+    ).rejects.toThrow("denied");
+    const shares = await signRefundBatch(signer, [
+      { key: { type: "leaf", leafId: LEAF_A }, leafAmount: 5000, outputScripts: [htlcScript] },
+    ]);
+    expect(shares).toHaveLength(1);
+    expect(calls).toBe(2);
+    signer.dispose();
+  });
+
+  test("a non-anchor output to p2tr(random key) on a leaf destined elsewhere reports lightning", async () => {
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const receiver = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    await signer.prepareTransfer({
+      transferId: "550e8400-e29b-41d4-a716-44665544000b",
+      leaves: [
+        {
+          leafId: LEAF_A,
+          key: { type: "leaf", leafId: LEAF_A },
+          receiverIdentityPublicKey: receiver,
+        },
+      ],
+    });
+    // The output pays a stranger's key — the whitelist rejects it; policy (authorize) decides.
+    await signRefundBatch(signer, [
+      {
+        key: { type: "leaf", leafId: LEAF_A },
+        leafAmount: 3000,
+        outputScripts: [p2trScriptFromPublicKey(Point.BASE.multiply(99n).toBytes(true), "regtest")],
+      },
+    ]);
+    const outflow = outflowAs(outflows[0]!, "lightning");
+    expect(outflow.totalSats).toBe(3000);
+    signer.dispose();
+  });
+
+  test("fails closed: exit jobs must bind a connector/exit pair", async () => {
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      sspIdentityPublicKey: ssp,
+    });
+    const pair = exitPair();
+    // Missing pair on a connector-shaped job.
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 1000,
+          outputScripts: [],
+          connectorTxid: pair.connectorTxid,
+        },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    // A pair on a plain single-input job.
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 1000,
+          receiver: ssp,
+          exit: pair,
+        },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    // connectorTx whose txid is not the foreign input's.
+    const otherPair = exitPair();
+    otherPair.connectorTxid.set(Uint8Array.of(0xff), 0);
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 1000,
+          outputScripts: [],
+          connectorTxid: new Uint8Array(32).fill(0xee),
+          exit: { connectorTx: pair.connectorTx, exitTx: pair.exitTx },
+        },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    // connectorTx that does not spend the claimed exitTx.
+    const strayExitTx = new Transaction({ allowUnknownOutputs: true });
+    strayExitTx.addInput({ txid: new Uint8Array(32).fill(0xbb), index: 0 });
+    strayExitTx.addOutput({
+      script: p2trScriptFromPublicKey(Point.BASE.multiply(3n).toBytes(true), "regtest"),
+      amount: 9000n,
+    });
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 1000,
+          outputScripts: [],
+          connectorTxid: pair.connectorTxid,
+          exit: { connectorTx: pair.connectorTx, exitTx: strayExitTx.toBytes() },
+        },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    // Two different pairs in one batch.
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 1000,
+          outputScripts: [],
+          connectorTxid: pair.connectorTxid,
+          exit: pair,
+        },
+        {
+          key: { type: "leaf", leafId: LEAF_B },
+          leafAmount: 2000,
+          outputScripts: [],
+          connectorTxid: pair.connectorTxid,
+          exit: { connectorTx: pair.connectorTx, exitTx: strayExitTx.toBytes() },
+        },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("fails closed: SSP and non-SSP receivers in one transfer reject", async () => {
+    const ssp = Point.BASE.multiply(0x555777n).toBytes(true);
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      sspIdentityPublicKey: ssp,
+    });
+    const receiver = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    const transferId = "550e8400-e29b-41d4-a716-44665544000c";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        { leafId: LEAF_A, key: { type: "leaf", leafId: LEAF_A }, receiverIdentityPublicKey: ssp },
+        {
+          leafId: LEAF_B,
+          key: { type: "leaf", leafId: LEAF_B },
+          receiverIdentityPublicKey: receiver,
+        },
+      ],
+    });
+    await signRefund(signer, { type: "leaf", leafId: LEAF_A }, { leafAmount: 1000, receiver: ssp });
+    await signRefund(signer, { type: "leaf", leafId: LEAF_B }, { leafAmount: 2000, receiver });
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId,
+        package: packageBytes(prepared.operatorPackages),
+      }),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("a received-key job paying P2TR(that key) is not whitelisted — it is a lightning candidate", async () => {
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const crypto = await backend();
+    const secret = 0x77aa55n;
+    const ciphertext = crypto.eciesEncrypt(
+      await signer.identityPublicKey(),
+      be32(secret),
+      new Uint8Array(32).fill(1),
+    );
+    const receivedPublicKey = Point.BASE.multiply(secret).toBytes(true);
+    await signRefundBatch(signer, [
+      {
+        key: { type: "received", ciphertext },
+        leafAmount: 4000,
+        outputScripts: [p2trScriptFromPublicKey(receivedPublicKey, "regtest")],
+      },
+    ]);
+    const outflow = outflowAs(outflows[0]!, "lightning");
+    expect(outflow.leaves).toHaveLength(1);
+    expect(outflow.totalSats).toBe(4000);
+    signer.dispose();
+  });
+
+  test("multi-UTXO root: same-script inputs paying the leaf key sign without authorize", async () => {
+    let authorized = 0;
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        authorized += 1;
+        await Promise.resolve(o);
+      },
+    });
+    const leafPublicKey = await signer.publicKeys([{ type: "leaf", leafId: LEAF_A }]);
+    const shares = await signRefundBatch(signer, [
+      {
+        key: { type: "leaf", leafId: LEAF_A },
+        leafAmount: 5000,
+        sameScriptInputs: 2,
+        outputScripts: [p2trScriptFromPublicKey(leafPublicKey[0]!, "regtest")],
+      },
+    ]);
+    expect(shares).toHaveLength(1);
+    expect(authorized).toBe(0);
+    signer.dispose();
+  });
+
+  test("fails closed: multi-input same-script tx with a foreign output rejects", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1);
+    await expect(
+      signRefundBatch(signer, [
+        {
+          key: { type: "leaf", leafId: LEAF_A },
+          leafAmount: 5000,
+          sameScriptInputs: 1,
+          outputScripts: [
+            p2trScriptFromPublicKey(Point.BASE.multiply(99n).toBytes(true), "regtest"),
+          ],
+        },
+      ]),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  });
+
+  test("a throwing authorize stops the signature; the record survives for retry", async () => {
+    let gate = false;
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+        // oxlint-disable-next-line vitest/no-conditional-in-test -- the deny-then-allow retry path
+        if (!gate) {
+          throw new Error("denied");
+        }
+      },
+    });
+    const receiver = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    const transferId = "550e8400-e29b-41d4-a716-446655440009";
+    const prepared = await signer.prepareTransfer({
+      transferId,
+      leaves: [
+        {
+          leafId: LEAF_A,
+          key: { type: "leaf", leafId: LEAF_A },
+          receiverIdentityPublicKey: receiver,
+        },
+      ],
+    });
+    await signRefund(signer, { type: "leaf", leafId: LEAF_A }, { leafAmount: 1000, receiver });
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId,
+        package: packageBytes(prepared.operatorPackages),
+      }),
+    ).rejects.toThrow("denied");
+    // Retry with the gate open: the same recorded preparation signs.
+    gate = true;
+    const signature = await signer.signIdentity({
+      kind: "transfer-package",
+      transferId,
+      package: packageBytes(prepared.operatorPackages),
+    });
+    expect(signature[0]).toBe(0x30);
+    expect(outflows).toHaveLength(2);
+    signer.dispose();
+  });
+
+  test("transfer record eviction: the oldest of >256 prepared transfers rejects", async () => {
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      operators: [testOperator(0, 0x0b0b0bn), testOperator(1, 0x0c0c0cn)],
+      threshold: 2,
+    });
+    const receiver = Point.BASE.multiply(0xa11ce11ce11cen).toBytes(true);
+    const firstId = "550e8400-e29b-41d4-a716-446655440010";
+    for (let i = 0; i < 257; i++) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- sequential fills the LRU in order
+      await signer.prepareTransfer({
+        // oxlint-disable-next-line vitest/no-conditional-in-test -- bounded loop fills the LRU
+        transferId: i === 0 ? firstId : `550e8400-e29b-41d4-a716-${String(i).padStart(12, "0")}`,
+        leaves: [
+          {
+            leafId: LEAF_A,
+            key: { type: "leaf", leafId: LEAF_A },
+            receiverIdentityPublicKey: receiver,
+          },
+        ],
+      });
+    }
+    await expect(
+      signer.signIdentity({
+        kind: "transfer-package",
+        transferId: firstId,
+        package: packageBytes({ [testOperator(0, 0x0b0b0bn).identifier]: new Uint8Array(1) }),
+      }),
+    ).rejects.toThrow(SparkInputError);
+    signer.dispose();
+  }, 60_000);
+
+  test("onchain and token outflows decode from the signed payload", async () => {
+    const outflows: SparkOutflow[] = [];
+    const signer = await signerFor(derivation.cases[0]!.seed_hex, 0, 1, {
+      authorize: async (o) => {
+        await Promise.resolve(outflows.push(o));
+      },
+    });
+    const identity = await signer.identityPublicKey();
+
+    await signer.signKeySpend({ type: "static-deposit", index: 0 }, TARGET);
+    const onchain = outflowAs(outflows[0]!, "onchain");
+    expect(onchain.source).toBe("key-spend");
+    {
+      const tx = Transaction.fromRaw(TARGET.transaction, { allowUnknownOutputs: true });
+      let expected = 0;
+      for (let i = 0; i < tx.outputsLength; i++) {
+        // oxlint-disable-next-line vitest/no-conditional-in-test -- sum every output's amount
+        expected += Number(tx.getOutput(i).amount ?? 0n);
+      }
+      expect(onchain.totalSats).toBe(expected);
+      expect(onchain.outputs).toHaveLength(tx.outputsLength);
+    }
+
+    const hugeAmount = 2n ** 53n + 12345n;
+    const amountBytes = new Uint8Array(16);
+    new DataView(amountBytes.buffer).setBigUint64(8, hugeAmount, false);
+    const partial = create(PartialTokenTransactionSchema, {
+      version: 3,
+      tokenInputs: {
+        case: "transferInput",
+        value: {
+          outputsToSpend: [
+            {
+              prevTokenTransactionHash: new Uint8Array(32).fill(0xab),
+              prevTokenTransactionVout: 0,
+            },
+          ],
+        },
+      },
+      partialTokenOutputs: [
+        {
+          ownerPublicKey: identity,
+          tokenIdentifier: new Uint8Array(32).fill(0xcd),
+          tokenAmount: amountBytes,
+          withdrawBondSats: 0n,
+          withdrawRelativeBlockLocktime: 0n,
+        },
+      ],
+    });
+    await signer.signIdentity({
+      kind: "token-transaction",
+      partialTransaction: toBinary(PartialTokenTransactionSchema, partial),
+    });
+    const token = outflowAs(outflows[1]!, "token");
+    expect(token.outputs).toHaveLength(1);
+    expect(token.outputs[0]!.amount).toBe(hugeAmount);
+    expect(token.outputs[0]!.tokenIdentifier).toStrictEqual(new Uint8Array(32).fill(0xcd));
+    signer.dispose();
   });
 });

@@ -58,6 +58,7 @@ export function refundJobGroups<T extends RefundJobLeaf>(
   ) => {
     refunds: RefundTxTrio;
     extraPrevout?: { readonly script: Uint8Array; readonly amount: number };
+    exit?: { readonly connectorTx: Uint8Array; readonly exitTx: Uint8Array };
   },
   signingCommitments: ReadonlyArray<RequestedSigningCommitments>,
   context: string,
@@ -77,7 +78,7 @@ export function refundJobGroups<T extends RefundJobLeaf>(
   const directFromCpfp: RefundJobSpec[] = [];
   for (const [i, entry] of leaves.entries()) {
     const nodeOutput = prevout(entry.leaf.nodeTx, 0, `${context} leaf ${entry.leaf.id} node tx`);
-    const { refunds, extraPrevout } = buildRefunds(
+    const { refunds, extraPrevout, exit } = buildRefunds(
       entry,
       refundTxSequence(entry.refundTx, context),
     );
@@ -102,6 +103,7 @@ export function refundJobGroups<T extends RefundJobLeaf>(
         prevouts: extraPrevout === undefined ? [nodeOutput] : [nodeOutput, extraPrevout],
       },
       commitments,
+      ...(exit === undefined ? {} : { exit }),
     });
     if (refunds.directRefund !== undefined) {
       const directOutput = prevout(
@@ -120,6 +122,7 @@ export function refundJobGroups<T extends RefundJobLeaf>(
           prevouts: extraPrevout === undefined ? [directOutput] : [directOutput, extraPrevout],
         },
         commitments: directCommitment,
+        ...(exit === undefined ? {} : { exit }),
       });
     }
     directFromCpfp.push({
@@ -133,6 +136,7 @@ export function refundJobGroups<T extends RefundJobLeaf>(
         prevouts: extraPrevout === undefined ? [nodeOutput] : [nodeOutput, extraPrevout],
       },
       commitments: directFromCpfpCommitment,
+      ...(exit === undefined ? {} : { exit }),
     });
   }
   return { cpfp, direct, directFromCpfp };

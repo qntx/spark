@@ -112,6 +112,11 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest leaf op
     expect(sorted(denominations(leavesC2))).toStrictEqual(sorted(expected1.leaves));
     await expect(clientC.balance()).resolves.toBe(balanceC0);
 
+    // G-SV: leaf swaps back to the SSP classify as swap, one per optimizeLeaves call.
+    const swaps = walletC.outflows.filter((o) => o.kind === "swap");
+    expect(swaps.length).toBeGreaterThanOrEqual(expected0.swaps + expected1.swaps - 1);
+    console.log("C outflows:", walletC.outflows.map((o) => o.kind).join(","));
+
     // One-off + recurring cleanup: everything above the float returns to the funder.
     const returned = Math.max(0, balanceC0 - PAYER_FLOAT_SATS);
     await sendAndClaimIfPositive(

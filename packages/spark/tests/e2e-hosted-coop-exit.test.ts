@@ -1,4 +1,4 @@
-import { randomBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import { describe, expect, test } from "vite-plus/test";
 
 import { p2trAddressFromPublicKey } from "../src/core/bitcoin/index.ts";
@@ -98,6 +98,21 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest coopera
     console.log("final status:", status);
     expect(status).not.toBe("FAILED");
 
+    // G-SV: the signer classified the cooperative exit from its connector refund.
+    const exited = walletA.outflows.find((o) => o.kind === "exit");
+    expect(exited?.kind).toBe("exit");
+    // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing guard
+    if (exited === undefined || exited.kind !== "exit") {
+      throw new Error(`expected exit outflow`);
+    }
+    console.log(
+      "A outflow: exit",
+      exited.totalSats,
+      "sats, connector",
+      bytesToHex(exited.connectorTxid),
+      "outputs",
+      exited.exitOutputs.length,
+    );
     const balanceA1 = await clientA.balance();
     console.log("A balance after:", balanceA1);
     // The 3000 sats leave the wallet only once the SSP claims the inbound transfer, which

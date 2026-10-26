@@ -165,6 +165,7 @@ test("signer runtime exports are exactly the signer factory surface", () => {
   expect(names(signer)).toStrictEqual([
     "createLnurlAuthSigner",
     "createSparkSigner",
+    "lightningSendHtlcScript",
     "lnurlAuthRootKey",
     "sparkAccountKey",
   ]);

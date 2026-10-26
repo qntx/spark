@@ -54,6 +54,16 @@ export type FrostSignJob = {
   readonly operatorCommitments: ReadonlyArray<OperatorCommitment>;
   /** Optional 33-byte adaptor point; omit or leave empty for plain signatures. */
   readonly adaptorPublicKey?: Uint8Array;
+  /**
+   * For connector (cooperative-exit) refunds only: the raw connector transaction plus the
+   * SSP-provided coop-exit payout transaction it spends — binds the signed refund shares to a
+   * disclosed exit destination. Required on jobs spending a foreign connector input; rejected on
+   * any other job.
+   */
+  readonly exit?: {
+    readonly connectorTx: Uint8Array;
+    readonly exitTx: Uint8Array;
+  };
 };
 
 /** Aggregation of the user's share (obtained from {@link SparkSigner.signFrost}) with the SOs'. */

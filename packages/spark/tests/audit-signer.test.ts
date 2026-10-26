@@ -3,8 +3,10 @@ import { resolve } from "node:path";
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { Transaction } from "@scure/btc-signer";
 import { describe, expect, test } from "vite-plus/test";
 
+import { EPHEMERAL_ANCHOR_SCRIPT, p2trScriptFromPublicKey } from "../src/core/bitcoin/script.ts";
 import type { SigningTarget } from "../src/core/bitcoin/sighash.ts";
 import type { SparkCrypto } from "../src/crypto/index.ts";
 import { SparkInputError } from "../src/errors/index.ts";
@@ -26,25 +28,20 @@ const derivation = JSON.parse(
   readFileSync(resolve(import.meta.dirname, "../../../vectors/derivation.json"), "utf8"),
 ) as { cases: Array<{ seed_hex: string }> };
 
-const transactions = JSON.parse(
-  readFileSync(resolve(import.meta.dirname, "../../../vectors/transactions.json"), "utf8"),
-) as {
-  multiInputSighash: Array<{
-    inputIndex: number;
-    prevOutScripts: string[];
-    prevOutValues: number[];
-    tx: string;
-  }>;
-};
-
-const sighashVector = transactions.multiInputSighash[0]!;
 const TARGET: SigningTarget = {
-  transaction: hexToBytes(sighashVector.tx),
-  inputIndex: sighashVector.inputIndex,
-  prevouts: sighashVector.prevOutScripts.map((script, i) => ({
-    script: hexToBytes(script),
-    amount: sighashVector.prevOutValues[i]!,
-  })),
+  transaction: (() => {
+    const tx = new Transaction({ allowUnknownOutputs: true });
+    tx.addInput({ txid: new Uint8Array(32).fill(3), index: 0 });
+    tx.addOutput({ script: EPHEMERAL_ANCHOR_SCRIPT, amount: 0n });
+    return tx.toBytes();
+  })(),
+  inputIndex: 0,
+  prevouts: [
+    {
+      script: p2trScriptFromPublicKey(secp256k1.Point.BASE.toBytes(true), "regtest"),
+      amount: 1000,
+    },
+  ],
 };
 
 const VALID_IDENTIFIER = bytesToHex(be32(1n));

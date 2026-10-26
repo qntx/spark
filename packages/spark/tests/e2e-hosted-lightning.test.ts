@@ -1,8 +1,11 @@
 import { equalBytes } from "@noble/curves/utils.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { describe, expect, test } from "vite-plus/test";
 
 import { decodeSparkAddress } from "../src/core/address.ts";
 import { decodeBolt11 } from "../src/core/bolt11.ts";
+import { sparkNetworkConfig } from "../src/core/network.ts";
+import { lightningSendHtlcScript } from "../src/signer/index.ts";
 import { hostedSeed, hostedWallet, sendStatusUntil } from "./support/hosted.ts";
 import { claimPendingUntil } from "./support/local.ts";
 
@@ -66,6 +69,22 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     expect(claimed1.length).toBeGreaterThan(0);
     console.log("B claimed", claimed1.length, "leaves");
     await expect(clientB.balance()).resolves.toBeGreaterThanOrEqual(balanceB0 + 1000);
+
+    // G-SV: the payer's signer classified the payment as lightning and reported the HTLC
+    // output script — the wallet can bind it to the invoice's payment hash.
+    const paid = walletA.outflows.find((o) => o.kind === "lightning");
+    expect(paid?.kind).toBe("lightning");
+    // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing guard
+    if (paid === undefined || paid.kind !== "lightning") {
+      throw new Error(`expected lightning outflow`);
+    }
+    const expected = lightningSendHtlcScript({
+      paymentHash: invoice1.paymentHash,
+      sspIdentityPublicKey: sparkNetworkConfig("regtest").ssp.identityPublicKey,
+      identityPublicKey: await clientA.identityPublicKey(),
+    });
+    expect(bytesToHex(paid.htlcOutputScript)).toBe(bytesToHex(expected));
+    console.log("A outflow: lightning", paid.totalSats, "sats");
 
     // Amountless invoice: A picks 500 sats.
     const invoice2 = await clientB.lightning.createInvoice({

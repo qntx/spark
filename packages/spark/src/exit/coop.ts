@@ -556,7 +556,16 @@ export async function cooperativeExit(
                   prevout0(entry.leaf.directTx, `leaf ${entry.leaf.id} direct node tx`),
                 ),
         };
-        return { refunds, extraPrevout: connectorPrevout };
+        return {
+          refunds,
+          extraPrevout: connectorPrevout,
+          // Bind the signed connector refunds to the disclosed exit: the raw connector tx and
+          // the coop-exit payout tx it spends (its txid is `coopExitTxid`).
+          exit: {
+            connectorTx: request.rawConnectorTransaction,
+            exitTx: request.rawCoopExitTransaction,
+          },
+        };
       },
     });
 
