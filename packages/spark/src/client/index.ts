@@ -114,8 +114,16 @@ export type SparkClient = {
       }>;
       readonly transferId?: string;
     }) => Promise<SparkTransfer>;
-    /** Verifies and claims a pending transfer addressed to this identity; returns the new leaves. */
-    readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;
+    /**
+     * Claims the transfer `transferId` once it becomes claimable and returns the new leaves —
+     * re-querying the coordinator between retries the way upstream `TransferService.claimTransfer`
+     * does (five attempts, 1/2/4/8 s). `[]` means this identity's receiver leg already completed. A
+     * terminal status (`EXPIRED`, `RETURNED`, …) throws immediately; `signal` aborts the waits.
+     */
+    readonly claim: (
+      transferId: string,
+      options?: { readonly signal?: AbortSignal },
+    ) => Promise<ReadonlyArray<SparkLeaf>>;
     /**
      * Claims every pending incoming transfer; returns the new leaves plus one failure entry per
      * transfer that could not be claimed — a single poisoned transfer does not abort the rest. A

@@ -66,6 +66,17 @@ export const CLAIMABLE_TRANSFER_STATUSES: ReadonlyArray<string> = [
   "RECEIVER_REFUND_SIGNED",
 ];
 
+/**
+ * Whole-transfer statuses where the sender leg has not finished: the transfer will become claimable
+ * (or terminal) later, so a receiver claim must wait and re-query rather than fail.
+ */
+export const TRANSIENT_TRANSFER_STATUSES: ReadonlyArray<string> = [
+  "SENDER_INITIATED",
+  "SENDER_KEY_TWEAK_PENDING",
+  "SENDER_INITIATED_COORDINATOR",
+  "APPLYING_SENDER_KEY_TWEAK",
+];
+
 function millis(timestamp: Timestamp | undefined): number | undefined {
   if (timestamp === undefined) {
     return undefined;

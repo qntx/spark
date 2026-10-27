@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- **BREAKING** — `client.transfers.claim` now takes a transfer id instead of a
+  `SparkTransfer`: `claim(transferId, { signal? })` re-queries the transfer on
+  every attempt and waits through the pre-tweak transient statuses the way
+  upstream `TransferService.claimTransfer` does (five attempts, 1/2/4/8 s). It
+  claims as soon as the row turns claimable, returns `[]` when this identity's
+  receiver leg already completed, throws immediately on a terminal status, and
+  throws `SparkRequestError` (`deadline_exceeded`) when the transfer never
+  becomes claimable. `claimPending` is unchanged.
+
 ## 0.2.1
 
 ### Added

@@ -1,5 +1,5 @@
-export { claimTransfer } from "./claim.ts";
-export { CLAIMABLE_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
+export { claimByTransferId, claimTransfer } from "./claim.ts";
+export { CLAIMABLE_TRANSFER_STATUSES, mapTransfer, TRANSIENT_TRANSFER_STATUSES } from "./model.ts";
 export type {
   SparkTransfer,
   SparkTransferLeaf,

@@ -59,12 +59,7 @@ import { MAX_JOBS } from "../src/signer/backend.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
-import {
-  assertCommittedTransfer,
-  mapTransfer,
-  sendTransfer,
-  swapLeaves,
-} from "../src/transfer/index.ts";
+import { assertCommittedTransfer, sendTransfer, swapLeaves } from "../src/transfer/index.ts";
 import type { SparkTransfer } from "../src/transfer/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { batchedPublicKeys, SIGNER_BATCH_LIMIT, signUserJobs } from "../src/tree/signing.ts";
@@ -843,6 +838,7 @@ describe("transfers.claim", () => {
       receiver,
       {
         query_nodes: nodesQuery(() => served),
+        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
         get_signing_commitments: () =>
           create(GetSigningCommitmentsResponseSchema, {
             signingCommitments: commitmentGroup(3),
@@ -881,7 +877,7 @@ describe("transfers.claim", () => {
       },
       store,
     );
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed[0]?.id).toBe(LEAF_ID);
     await expect(store.exitChains()).resolves.toHaveLength(0);
     receiver.dispose();
@@ -894,8 +890,10 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
       corruptSig: true,
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "sender signature verification failed",
     );
     receiver.dispose();
@@ -908,8 +906,10 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
       leafOwnerKey: secp256k1.getPublicKey(new Uint8Array(32).fill(99), true),
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "secret_cipher does not decrypt",
     );
     receiver.dispose();
@@ -924,6 +924,7 @@ describe("transfers.claim", () => {
     });
     const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       query_nodes: nodesQuery(() => served),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -943,7 +944,7 @@ describe("transfers.claim", () => {
         });
       },
     });
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
   });
@@ -957,6 +958,7 @@ describe("transfers.claim", () => {
     });
     const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       query_nodes: nodesQuery(() => served),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -976,7 +978,7 @@ describe("transfers.claim", () => {
         });
       },
     });
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
   });
@@ -989,8 +991,10 @@ describe("transfers.claim", () => {
       schnorrSig: true,
       corruptSig: true,
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "sender signature verification failed",
     );
     receiver.dispose();
@@ -1003,13 +1007,14 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
     });
     const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         }),
       claim_transfer: () => create(ClaimTransferResponseSchema, {}),
     });
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "coordinator returned no transfer",
     );
     receiver.dispose();
@@ -1029,8 +1034,10 @@ describe("transfers.claim", () => {
         { id: "r-third", identityPublicKey: thirdIdentity },
       ],
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "not a receiver of this multi-receiver transfer",
     );
     receiver.dispose();
@@ -1049,8 +1056,10 @@ describe("transfers.claim", () => {
         { id: "r-other", identityPublicKey: otherIdentity },
       ],
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "no leaves assigned to this receiver edge",
     );
     receiver.dispose();
@@ -1068,10 +1077,10 @@ describe("transfers.claim", () => {
       network: Network.REGTEST,
       leaves: [],
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(empty))).rejects.toThrow(
-      "transfer has no leaves",
-    );
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [empty] }),
+    });
+    await expect(client.transfers.claim(empty.id)).rejects.toThrow("transfer has no leaves");
     receiver.dispose();
   });
 
@@ -1083,6 +1092,7 @@ describe("transfers.claim", () => {
         create(GetSigningCommitmentsResponseSchema, {
           signingCommitments: commitmentGroup(3),
         }),
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       claim_transfer: async (req: ClaimTransferRequest) => {
         const leaves = await claimedLeaves(receiver, [required(pending.leaves[0], "pending leaf")]);
         served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
@@ -1106,7 +1116,7 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
     });
     const client = makeClient(receiver, legacyClaimFakes(pending, receiver));
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
   });
@@ -1119,7 +1129,7 @@ describe("transfers.claim", () => {
       legacySignature: "der",
     });
     const client = makeClient(receiver, legacyClaimFakes(pending, receiver));
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
   });
@@ -1131,8 +1141,10 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
       legacySignature: "malformed",
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "sender signature verification failed",
     );
     receiver.dispose();
@@ -1143,10 +1155,12 @@ describe("transfers.claim", () => {
     const pending = await pendingTransfer({
       receiverSigner: receiver,
       receivedSecret: new Uint8Array(32).fill(88),
-      status: TransferStatus.SENDER_INITIATED,
+      status: TransferStatus.EXPIRED,
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow("not claimable");
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow("not claimable");
     receiver.dispose();
   });
 
@@ -1233,17 +1247,23 @@ describe("transfers.claim", () => {
       receivedSecret: new Uint8Array(32).fill(88),
       receiverIdentityPublicKey: otherIdentity,
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(foreign))).rejects.toThrow(
-      "not addressed to this identity",
-    );
-
     const anonymous = await pendingTransfer({
       receiverSigner: receiver,
       receivedSecret: new Uint8Array(32).fill(88),
       receiverIdentityPublicKey: new Uint8Array(),
     });
-    await expect(client.transfers.claim(mapTransfer(anonymous))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: (req) => {
+        const ids = (req as { transferIds: string[] }).transferIds;
+        return create(QueryTransfersResponseSchema, {
+          transfers: [foreign, anonymous].filter((x) => ids.includes(x.id)),
+        });
+      },
+    });
+    await expect(client.transfers.claim(foreign.id)).rejects.toThrow(
+      "not addressed to this identity",
+    );
+    await expect(client.transfers.claim(anonymous.id)).rejects.toThrow(
       "not addressed to this identity",
     );
     receiver.dispose();
@@ -1261,6 +1281,7 @@ describe("transfers.claim", () => {
     });
     const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       query_nodes: nodesQuery(() => served),
       get_signing_commitments: () =>
         create(GetSigningCommitmentsResponseSchema, {
@@ -1280,7 +1301,7 @@ describe("transfers.claim", () => {
         });
       },
     });
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed[0]?.id).toBe(LEAF_ID);
     receiver.dispose();
   });
@@ -1310,6 +1331,7 @@ describe("transfers.claim", () => {
     let claimReq: ClaimTransferRequest | undefined;
     const served: TreeNode[] = [];
     const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       query_nodes: nodesQuery(() => served),
       get_signing_commitments: (req) => {
         commitmentsReq = req;
@@ -1334,7 +1356,7 @@ describe("transfers.claim", () => {
       },
     });
 
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
     expect(required(commitmentsReq, "get_signing_commitments request").nodeIdCount).toBe(1);
     const pkg = required(
@@ -1367,55 +1389,60 @@ describe("transfers.claim", () => {
         claim_transfer: () => {
           throw new ConnectError("leaf already claimed", Code.AlreadyExists);
         },
-        query_transfers_by_id: () =>
-          create(QueryTransfersResponseSchema, { transfers: [completed] }),
+        query_transfers_by_id: byIdQueue([[pending], [completed]]),
       });
-      const claimed = await client.transfers.claim(mapTransfer(pending));
+      const claimed = await client.transfers.claim(pending.id);
       expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
       receiver.dispose();
     });
 
-    test("rethrows when the leg is not complete", async () => {
+    test("times out when the leg never completes", async () => {
       const receiver = await testSigner();
       const pending = await pendingTransfer({
         receiverSigner: receiver,
         receivedSecret: new Uint8Array(32).fill(88),
       });
-      const client = makeClient(receiver, {
-        get_signing_commitments: () =>
-          create(GetSigningCommitmentsResponseSchema, {
-            signingCommitments: commitmentGroup(3),
-          }),
-        claim_transfer: () => {
-          throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+      const client = makeTestClient({
+        signer: receiver,
+        sleep: async () => Promise.resolve(),
+        spark: {
+          get_signing_commitments: () =>
+            create(GetSigningCommitmentsResponseSchema, {
+              signingCommitments: commitmentGroup(3),
+            }),
+          claim_transfer: () => {
+            throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+          },
+          query_transfers_by_id: () =>
+            create(QueryTransfersResponseSchema, { transfers: [pending] }),
         },
-        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       });
-      await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
-        "leaf already claimed",
-      );
+      const claimed = client.transfers.claim(pending.id);
+      await expect(claimed).rejects.toThrow("did not become claimable");
       receiver.dispose();
     });
 
-    test("rethrows when the transfer is not found", async () => {
+    test("times out when the transfer never appears", async () => {
       const receiver = await testSigner();
       const pending = await pendingTransfer({
         receiverSigner: receiver,
         receivedSecret: new Uint8Array(32).fill(88),
       });
-      const client = makeClient(receiver, {
-        get_signing_commitments: () =>
-          create(GetSigningCommitmentsResponseSchema, {
-            signingCommitments: commitmentGroup(3),
-          }),
-        claim_transfer: () => {
-          throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+      const client = makeTestClient({
+        signer: receiver,
+        sleep: async () => Promise.resolve(),
+        spark: {
+          get_signing_commitments: () =>
+            create(GetSigningCommitmentsResponseSchema, {
+              signingCommitments: commitmentGroup(3),
+            }),
+          claim_transfer: () => {
+            throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+          },
+          query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [] }),
         },
-        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [] }),
       });
-      await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
-        "leaf already claimed",
-      );
+      await expect(client.transfers.claim(pending.id)).rejects.toThrow("did not become claimable");
       receiver.dispose();
     });
 
@@ -1482,9 +1509,161 @@ describe("transfers.claim", () => {
         claim_transfer: () => {
           throw new ConnectError("leaf already claimed", Code.AlreadyExists);
         },
-        query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [updated] }),
+        query_transfers_by_id: byIdQueue([[pending], [updated]]),
       });
-      const claimed = await client.transfers.claim(mapTransfer(pending));
+      const claimed = await client.transfers.claim(pending.id);
+      expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
+      receiver.dispose();
+    });
+  });
+
+  describe("claim retry by id", () => {
+    test("waits through transient queries and claims once the transfer turns claimable", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+      });
+      const transient = create(TransferSchema, {
+        ...pending,
+        status: TransferStatus.SENDER_KEY_TWEAK_PENDING,
+      });
+      const served: TreeNode[] = [];
+      const client = makeTestClient({
+        signer: receiver,
+        sleep: async () => Promise.resolve(),
+        spark: {
+          query_nodes: nodesQuery(() => served),
+          get_signing_commitments: () =>
+            create(GetSigningCommitmentsResponseSchema, {
+              signingCommitments: commitmentGroup(3),
+            }),
+          query_transfers_by_id: byIdQueue([[], [transient], [pending]]),
+          claim_transfer: async (req: ClaimTransferRequest) => {
+            const leaves = await claimedLeaves(receiver, [
+              required(pending.leaves[0], "pending leaf"),
+            ]);
+            served.push(...leaves.map((leaf) => required(leaf.leaf, "leaf")));
+            return create(ClaimTransferResponseSchema, {
+              transfer: create(TransferSchema, {
+                id: req.transferId,
+                status: TransferStatus.COMPLETED,
+                type: TransferType.TRANSFER,
+                network: Network.REGTEST,
+                leaves,
+              }),
+            });
+          },
+        },
+      });
+      const claimed = await client.transfers.claim(pending.id);
+      expect(claimed[0]?.id).toBe(LEAF_ID);
+      receiver.dispose();
+    });
+
+    test("returns [] when the receiver leg already completed", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+      });
+      const completed = create(TransferSchema, {
+        ...pending,
+        status: TransferStatus.COMPLETED,
+      });
+      let claimCalls = 0;
+      const client = makeTestClient({
+        signer: receiver,
+        sleep: async () => Promise.resolve(),
+        spark: {
+          query_transfers_by_id: () =>
+            create(QueryTransfersResponseSchema, { transfers: [completed] }),
+          claim_transfer: () => {
+            claimCalls += 1;
+            return create(ClaimTransferResponseSchema);
+          },
+        },
+      });
+      await expect(client.transfers.claim(pending.id)).resolves.toStrictEqual([]);
+      expect(claimCalls).toBe(0);
+      receiver.dispose();
+    });
+
+    test("throws on a terminal status without retrying", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+        status: TransferStatus.EXPIRED,
+      });
+      let queries = 0;
+      const client = makeTestClient({
+        signer: receiver,
+        sleep: async () => Promise.resolve(),
+        spark: {
+          query_transfers_by_id: () => {
+            queries += 1;
+            return create(QueryTransfersResponseSchema, { transfers: [pending] });
+          },
+        },
+      });
+      await expect(client.transfers.claim(pending.id)).rejects.toThrow("not claimable");
+      expect(queries).toBe(1);
+      receiver.dispose();
+    });
+
+    test("aborts a retry wait promptly", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+        status: TransferStatus.SENDER_KEY_TWEAK_PENDING,
+      });
+      const controller = new AbortController();
+      const client = makeTestClient({
+        signer: receiver,
+        spark: {
+          query_transfers_by_id: () =>
+            create(QueryTransfersResponseSchema, { transfers: [pending] }),
+        },
+      });
+      const claimed = client.transfers.claim(pending.id, { signal: controller.signal });
+      setTimeout(() => {
+        controller.abort();
+      }, 50);
+      await expect(claimed).rejects.toThrow("claim aborted");
+      receiver.dispose();
+    });
+
+    test("recovers a concurrent claim through the already_exists re-query", async () => {
+      const receiver = await testSigner();
+      const pending = await pendingTransfer({
+        receiverSigner: receiver,
+        receivedSecret: new Uint8Array(32).fill(88),
+      });
+      const completed = create(TransferSchema, {
+        ...pending,
+        status: TransferStatus.COMPLETED,
+        leaves: await claimedLeaves(receiver, pending.leaves),
+      });
+      const client = makeTestClient({
+        signer: receiver,
+        sleep: async () => Promise.resolve(),
+        spark: {
+          get_signing_commitments: () =>
+            create(GetSigningCommitmentsResponseSchema, {
+              signingCommitments: commitmentGroup(3),
+            }),
+          claim_transfer: () => {
+            throw new ConnectError("leaf already claimed", Code.AlreadyExists);
+          },
+          query_nodes: nodesQuery(() =>
+            completed.leaves.map((leaf) => required(leaf.leaf, "leaf")),
+          ),
+          query_transfers_by_id: byIdQueue([[pending], [completed]]),
+        },
+      });
+      const claimed = await client.transfers.claim(pending.id);
       expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
       receiver.dispose();
     });
@@ -1503,8 +1682,10 @@ describe("transfers.claim", () => {
         { id: "r-b", identityPublicKey: secp256k1.getPublicKey(OTHER_IDENTITY_SECRET, true) },
       ],
     });
-    const client = makeClient(receiver, {});
-    await expect(client.transfers.claim(mapTransfer(pending))).rejects.toThrow(
+    const client = makeClient(receiver, {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
+    });
+    await expect(client.transfers.claim(pending.id)).rejects.toThrow(
       "not a receiver of this multi-receiver transfer",
     );
     receiver.dispose();
@@ -1591,6 +1772,7 @@ describe("transfers.claim", () => {
     };
 
     const impl: SparkImpl = {
+      query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
       query_nodes: (req) => {
         const request = req as QueryNodesRequest;
         if (request.source.case === "nodeIds") {
@@ -1627,7 +1809,6 @@ describe("transfers.claim", () => {
           }),
         });
       },
-      query_transfers_by_id: () => create(QueryTransfersResponseSchema),
     };
     return { pending, node1, inner, store, impl };
   }
@@ -1642,7 +1823,7 @@ describe("transfers.claim", () => {
 
     const [leavesResult, claimedResult] = await Promise.all([
       client.leaves(),
-      client.transfers.claim(mapTransfer(pending)),
+      client.transfers.claim(pending.id),
     ]);
     expect(claimedResult.map((leaf) => leaf.id)).toContain(LEAF_ID);
     // Whichever ran first, the claimed leaf's chain must still be there: a sync that queried

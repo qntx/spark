@@ -13,7 +13,7 @@ import type { ClaimTransferResponse, SparkService, TransferLeaf } from "../proto
 import { malformedLeafTx, mapTreeNode, ownsLeaf } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { batchedPublicKeys, batchedReceivedPublicKeys } from "../tree/signing.ts";
-import { CLAIMABLE_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
+import { CLAIMABLE_TRANSFER_STATUSES, TRANSIENT_TRANSFER_STATUSES, mapTransfer } from "./model.ts";
 import type { SparkTransfer, SparkTransferLeaf, TransferCoordinator } from "./model.ts";
 import { queryTransfersByIds } from "./query.ts";
 import { refundJobGroups, signRefundJobs } from "./refunds.ts";
@@ -329,4 +329,94 @@ export async function claimTransfer(
     throw new SparkError("claimTransfer: coordinator returned no transfer");
   }
   return verifyClaimedLeaves(receiverLeaves(response.transfer.leaves, receiverId));
+}
+
+/** Upstream `DEFAULT_RETRY_CONFIG`: five attempts, 1 s base, doubling — 1/2/4/8 s between tries. */
+const CLAIM_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000] as const;
+
+/** Resolves after `ms` — injected so tests control the pace — or rejects promptly on abort. */
+async function abortableWait(
+  ms: number,
+  sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) {
+    await sleep(ms);
+    return;
+  }
+  if (signal.aborted) {
+    throw new SparkRequestError("claim aborted", { code: "canceled" });
+  }
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      reject(new SparkRequestError("claim aborted", { code: "canceled" }));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    await Promise.race([sleep(ms), aborted]);
+  } finally {
+    if (onAbort !== undefined) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+/**
+ * Receiver claim by transfer id (upstream `TransferService.claimTransfer` with `withRetry` and
+ * re-query). Every attempt re-queries the transfer: a receiver-leg-complete row returns `[]`, a
+ * claimable one is claimed through the caller's `claim` (which serializes the claim plus its chain
+ * store under the client leaf lock), a still-transient status waits and retries, and a terminal or
+ * unrecognized status fails immediately — retrying `EXPIRED`/`RETURNED` can only burn the budget. A
+ * transfer absent from the coordinator's index is treated as transient: the receive event can land
+ * seconds before the SSP marks the transfer claimable.
+ */
+export async function claimByTransferId(
+  options: TransferCoordinator & {
+    readonly transferId: string;
+    readonly sleep: (ms: number) => Promise<void>;
+    readonly signal?: AbortSignal | undefined;
+    readonly claim: (transfer: SparkTransfer) => Promise<ReadonlyArray<SparkLeaf>>;
+  },
+): Promise<ReadonlyArray<SparkLeaf>> {
+  const { spark, signer, network, transferId, sleep, signal, claim } = options;
+  const self = await signer.identityPublicKey();
+  for (let attempt = 0; ; attempt += 1) {
+    if (signal?.aborted === true) {
+      throw new SparkRequestError("claim aborted", { code: "canceled" });
+    }
+    // oxlint-disable-next-line no-await-in-loop -- each attempt re-queries in order
+    const [row] = await queryTransfersByIds({ spark, transferIds: [transferId], network });
+    const transfer = row === undefined ? undefined : mapTransfer(row);
+    if (transfer !== undefined) {
+      if (isReceiverLegComplete(transfer, self)) {
+        return [];
+      }
+      if (CLAIMABLE_TRANSFER_STATUSES.includes(transfer.status)) {
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- attempts are sequential by design
+          return await claim(transfer);
+        } catch (error) {
+          if (!(error instanceof SparkRequestError) || error.code !== "already_exists") {
+            throw error;
+          }
+          // A concurrent claim won: the next pass re-queries and either returns the receiver's
+          // leaves once its leg completes or retries (upstream `onError` → retry).
+        }
+      } else if (!TRANSIENT_TRANSFER_STATUSES.includes(transfer.status)) {
+        throw new SparkInputError(
+          `claim: transfer ${transferId} status ${transfer.status} is not claimable`,
+        );
+      }
+    }
+    const delay = CLAIM_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) {
+      throw new SparkRequestError(`claim: transfer ${transferId} did not become claimable`, {
+        code: "deadline_exceeded",
+      });
+    }
+    // oxlint-disable-next-line no-await-in-loop -- the wait bounds the retry pace
+    await abortableWait(delay, sleep, signal);
+  }
 }
