@@ -4,9 +4,6 @@
 // hosted regtest deployment, the poll loop settles it and publishes the kind-9735 receipt.
 
 import { randomBytes } from "node:crypto";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { describe, expect, test } from "vite-plus/test";
 
@@ -27,6 +24,7 @@ import {
 import { claimPendingUntil, required } from "../../../packages/spark/tests/support/local.ts";
 import { startLnurlServer } from "../src/main.ts";
 import { ZAP_RECEIPT_KIND } from "../src/zap.ts";
+import { createTestSql } from "./support/pglite.ts";
 
 const CLAIM_DEADLINE_MS = 180_000;
 const SETTLE_DEADLINE_MS = 180_000;
@@ -77,19 +75,19 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lnurl-s
     const relay = network.relay(RELAY_URL);
     const pool = new Pool({ websocketImplementation: network.websocketImplementation });
 
-    const dbDir = mkdtempSync(join(tmpdir(), "lnurl-server-e2e-"));
+    const { sql } = await createTestSql();
     const served = await startLnurlServer(
       {
         LNURL_DOMAIN: domain,
         LNURL_NETWORK: "regtest",
         LNURL_SPARK_SEED: bytesToHex(seed),
         LNURL_SPARK_ACCOUNT: "3",
-        LNURL_DB_PATH: join(dbDir, "lnurl.db"),
+        LNURL_DATABASE_URL: "postgres://unused:unused@localhost:0/unused", // seams.sql wins
         LNURL_PORT: "0",
         LNURL_POLL_INTERVAL_MS: "2000",
         LNURL_ZAP_SECRET_KEY: zapSecretHex,
       },
-      { pool },
+      { pool, sql },
     );
     const base = `http://127.0.0.1:${served.port}`;
 

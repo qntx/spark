@@ -19,7 +19,6 @@ import {
   validateSignedEvent,
   verifyEvent,
 } from "@qntx/nostr/core";
-import type { LightningAddressInvoice } from "@qntx/spark/server";
 
 import type { LnurlStore } from "./store.ts";
 
@@ -270,27 +269,29 @@ export function buildZapReceipt(options: {
 }
 
 /**
- * One publish round: queues receipts for the newly settled zap invoices, then publishes every
- * stored receipt under the attempt cap to its relays. A receipt that no relay accepts keeps its
- * failure recorded and is retried on the next round. Never throws — outcomes go to `log`.
+ * One publish round: builds receipts for settled zap invoices missing one (the store's
+ * unbuilt-receipt query covers the settle→build crash gap), then publishes every stored receipt
+ * under the attempt cap to its relays. A receipt that no relay accepts keeps its failure recorded
+ * and is retried on the next round. Never throws — outcomes go to `log`.
  */
 export async function publishZapReceipts(options: {
   readonly store: LnurlStore;
   readonly keys: Keys;
   readonly pool: Pool;
-  readonly settled: ReadonlyArray<LightningAddressInvoice>;
   readonly publishTimeoutMs?: number;
-  /** Receipts published per round; default {@link ZAP_RECEIPT_BATCH}. */
+  /** Receipts built and published per round; default {@link ZAP_RECEIPT_BATCH}. */
   readonly batch?: number;
   readonly now?: number;
   readonly log?: (message: string) => void;
 }): Promise<void> {
-  const { store, keys, pool, settled } = options;
+  const { store, keys, pool } = options;
   const log = options.log ?? (() => undefined);
   const now = options.now ?? Date.now();
+  const batch = options.batch ?? ZAP_RECEIPT_BATCH;
 
+  const unbuilt = await store.unbuiltZapReceipts(batch);
   await Promise.all(
-    settled.map(async (invoice) => {
+    unbuilt.map(async (invoice) => {
       if (invoice.zapRequest === undefined || invoice.preimageHex === undefined) {
         return;
       }
@@ -313,10 +314,7 @@ export async function publishZapReceipts(options: {
     }),
   );
 
-  const pending = await store.pendingZapReceipts(
-    ZAP_RECEIPT_MAX_ATTEMPTS,
-    options.batch ?? ZAP_RECEIPT_BATCH,
-  );
+  const pending = await store.pendingZapReceipts(ZAP_RECEIPT_MAX_ATTEMPTS, batch);
   for (let start = 0; start < pending.length; start += ZAP_PUBLISH_CHUNK) {
     const chunk = pending.slice(start, start + ZAP_PUBLISH_CHUNK);
     // oxlint-disable-next-line no-await-in-loop -- chunks are sequential to bound concurrency

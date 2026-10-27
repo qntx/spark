@@ -6,7 +6,7 @@ const REQUIRED = {
   LNURL_DOMAIN: "example.com",
   LNURL_NETWORK: "regtest",
   LNURL_SPARK_SEED: "ab".repeat(64),
-  LNURL_DB_PATH: ":memory:",
+  LNURL_DATABASE_URL: "postgres://test:test@localhost:5432/test",
 } as const;
 
 describe("loadConfig", () => {

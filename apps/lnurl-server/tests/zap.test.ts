@@ -17,6 +17,7 @@ import {
   publishZapReceipts,
   validateZapRequest,
 } from "../src/zap.ts";
+import { createTestSql } from "./support/pglite.ts";
 
 const RECEIPT_KEYS = Keys.generate();
 const ZAPPER = Keys.generate();
@@ -310,59 +311,59 @@ describe("publishZapReceipts", () => {
   }
 
   test("queues receipts for settled zap invoices and publishes them", async () => {
-    const store = createLnurlStore(":memory:");
+    const { sql } = await createTestSql();
+    const store = await createLnurlStore(sql);
     const { pool, calls } = poolOf([{ url: RELAY, status: "ok", message: "" }]);
+    // Settled invoices in the store — the publish round builds their receipts on its own.
+    await store.putInvoice(settledInvoice());
+    await store.putInvoice(settledInvoice({ paymentHash: "ff".repeat(32), zapRequest: undefined }));
     await publishZapReceipts({
       store,
       keys: RECEIPT_KEYS,
       pool,
-      settled: [
-        settledInvoice(),
-        settledInvoice({ paymentHash: "ff".repeat(32), zapRequest: undefined }),
-      ],
       now: NOW,
     });
     expect(calls).toStrictEqual([[RELAY]]);
     const record = await store.zapReceipt("ab".repeat(32));
     expect(record?.published).toBe(true);
     await expect(store.zapReceipt("ff".repeat(32))).resolves.toBeUndefined();
-    store.close();
   });
 
   test("a failed publish is retried on the next round, then capped", async () => {
-    const store = createLnurlStore(":memory:");
+    const { sql } = await createTestSql();
+    const store = await createLnurlStore(sql);
     const { pool } = poolOf([{ url: RELAY, status: "rejected", message: "blocked" }]);
     const invoice = settledInvoice();
-    await publishZapReceipts({ store, keys: RECEIPT_KEYS, pool, settled: [invoice], now: NOW });
+    await store.putInvoice(invoice);
+    await publishZapReceipts({ store, keys: RECEIPT_KEYS, pool, now: NOW });
     let record = await store.zapReceipt(invoice.paymentHash);
     expect(record?.published).toBe(false);
     expect(record?.attempts).toBe(1);
 
-    // Next round: no newly settled invoices, the stored receipt retries.
-    await publishZapReceipts({ store, keys: RECEIPT_KEYS, pool, settled: [], now: NOW });
+    // Next round: the stored receipt retries — its invoice is already receipted.
+    await publishZapReceipts({ store, keys: RECEIPT_KEYS, pool, now: NOW });
     record = await store.zapReceipt(invoice.paymentHash);
     expect(record?.attempts).toBe(2);
-    store.close();
   });
 
   test("a throwing publish records the failure", async () => {
-    const store = createLnurlStore(":memory:");
+    const { sql } = await createTestSql();
+    const store = await createLnurlStore(sql);
     const pool = {
       publish: async () => {
         await Promise.resolve();
         throw new Error("ws down");
       },
     } as unknown as Pool;
+    await store.putInvoice(settledInvoice());
     await publishZapReceipts({
       store,
       keys: RECEIPT_KEYS,
       pool,
-      settled: [settledInvoice()],
       now: NOW,
     });
     const record = await store.zapReceipt("ab".repeat(32));
     expect(record?.attempts).toBe(1);
     expect(record?.lastError).toContain("ws down");
-    store.close();
   });
 });

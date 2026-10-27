@@ -1,8 +1,9 @@
 # @qntx/lnurl-server
 
 Reference Lightning Address service built on `@qntx/spark/server`: LUD-06/12/16/21 endpoints,
-Breez-style signed registration, and optional NIP-57 zap receipts. Runs on Node.js >= 24
-(`node:sqlite`, unflagged).
+Breez-style signed registration, and optional NIP-57 zap receipts. Runs on Node.js >= 24 with
+PostgreSQL storage — safe to run multiple instances against one database (see
+[Multi-instance](#multi-instance)).
 
 ## Run
 
@@ -10,7 +11,7 @@ Breez-style signed registration, and optional NIP-57 zap receipts. Runs on Node.
 LNURL_DOMAIN=example.com \
 LNURL_NETWORK=regtest \
 LNURL_SPARK_SEED=<64-byte hex seed> \
-LNURL_DB_PATH=./lnurl.db \
+LNURL_DATABASE_URL=postgres://user:pass@host:5432/lnurl \
 LNURL_ZAP_SECRET_KEY=<32-byte hex> \
 bun run start
 ```
@@ -26,7 +27,7 @@ invoices, so it needs no balance.
 | `LNURL_NETWORK`                       | (required)   | `mainnet` or `regtest`                                                    |
 | `LNURL_SPARK_SEED`                    | (required)   | 64-byte hex; the invoice-issuing wallet seed                              |
 | `LNURL_SPARK_ACCOUNT`                 | SDK default  | Account index (mainnet 1, regtest 0)                                      |
-| `LNURL_DB_PATH`                       | (required)   | SQLite database path                                                      |
+| `LNURL_DATABASE_URL`                  | (required)   | PostgreSQL connection string                                              |
 | `LNURL_PORT`                          | `8080`       | `0` binds an ephemeral port                                               |
 | `LNURL_MIN_SENDABLE_MSAT`             | `1000`       | LUD-06 minimum                                                            |
 | `LNURL_MAX_SENDABLE_MSAT`             | `100000000`  | LUD-06 maximum                                                            |
@@ -42,19 +43,26 @@ invoices, so it needs no balance.
 | `LNURL_ZAP_RECEIPT_BATCH`             | `50`         | Zap receipts fetched for publishing per round                             |
 | `LNURL_ZAP_SECRET_KEY`                | (unset)      | 32-byte hex; set enables NIP-57 zaps                                      |
 
-Secrets are never logged or echoed in errors.
+`LNURL_SPARK_SEED`, `LNURL_ZAP_SECRET_KEY` and `LNURL_DATABASE_URL` also accept the Docker
+secrets convention: set `<NAME>_FILE` to a path whose contents become the value. Setting both
+forms is an error; secrets are never logged or echoed in error messages.
+
+Logs are one JSON object per line (`level`, `msg`, fixed fields). Payer IPs, invoices,
+preimages, zap request contents and secrets never appear; payer IP and payment records never
+share a line.
 
 ## Routes
 
-| Method | Path                        | Handler                                         |
-| ------ | --------------------------- | ----------------------------------------------- |
-| POST   | `/lnurlpay/:pubkey`         | Register a lightning address (signed statement) |
-| DELETE | `/lnurlpay/:pubkey`         | Unregister (signed statement)                   |
-| GET    | `/.well-known/lnurlp/:name` | LUD-06/LUD-16 pay request                       |
-| GET    | `/lnurlp/:name`             | Same pay request                                |
-| GET    | `/lnurlp/:name/invoice`     | LUD-06 callback (`amount`, `comment`, `nostr`)  |
-| GET    | `/lnurlp/verify/:hash`      | LUD-21 settlement status + preimage             |
-| GET    | `/health`                   | Liveness                                        |
+| Method | Path                        | Handler                                              |
+| ------ | --------------------------- | ---------------------------------------------------- |
+| POST   | `/lnurlpay/:pubkey`         | Register a lightning address (signed statement)      |
+| DELETE | `/lnurlpay/:pubkey`         | Unregister (signed statement)                        |
+| GET    | `/.well-known/lnurlp/:name` | LUD-06/LUD-16 pay request                            |
+| GET    | `/lnurlp/:name`             | Same pay request                                     |
+| GET    | `/lnurlp/:name/invoice`     | LUD-06 callback (`amount`, `comment`, `nostr`)       |
+| GET    | `/lnurlp/verify/:hash`      | LUD-21 settlement status + preimage                  |
+| GET    | `/health`                   | Liveness                                             |
+| GET    | `/ready`                    | Readiness: `SELECT 1` probe, 503 when the DB is down |
 
 With `LNURL_ZAP_SECRET_KEY` set the pay request advertises `allowsNostr`/`nostrPubkey` (LUD-06
 zaps extension): `nostr` invoice parameters are validated per NIP-57 appendix D, and every
@@ -87,10 +95,39 @@ on the register route at your reverse proxy.
 ## Layout
 
 - `src/config.ts` — environment parsing, fail fast, no secret echoing
-- `src/store.ts` — `node:sqlite` `LightningAddressStore` + `zap_receipts`
+- `src/store.ts` — PostgreSQL `LightningAddressStore` + `zap_receipts` over the `Sql` port
+- `src/pg.ts` — `pg.Pool` adapter for the `Sql` port
 - `src/zap.ts` — NIP-57 request validation, receipt build/sign/publish
 - `src/http.ts` — Hono routes over the framework-agnostic server handlers
 - `src/main.ts` — composition root (wasm backend, signer, client, poll loop, signals)
+
+## Multi-instance
+
+Every write is claim-based, so several replicas can share one database without a leader:
+
+- `pendingInvoices` and `pendingZapReceipts` claim their batch with `SELECT … FOR UPDATE
+  SKIP LOCKED` inside a transaction — concurrent settle loops split work without overlap.
+- Zap-receipt claims carry a `claimed_until_ms` lease; a crashed instance's rows become
+  claimable again once the lease lapses, and a receipt is never published twice inside one
+  lease.
+- `settleInvoice` updates only while `preimage_hex IS NULL` — exactly one settler gets the
+  record and builds the receipt.
+- Registration locks the name and pubkey rows `FOR UPDATE`; two registrations of the same
+  name from different keys resolve to exactly one winner.
+
+## Container image
+
+`Dockerfile` builds a distroless image from the repo root (`node_modules` holds production
+deps only):
+
+```bash
+docker build -f apps/lnurl-server/Dockerfile -t lnurl-server .
+docker run -p 8080:8080   -e LNURL_DOMAIN=example.com -e LNURL_NETWORK=mainnet   -e LNURL_SPARK_SEED_FILE=/run/secrets/seed   -e LNURL_DATABASE_URL_FILE=/run/secrets/database_url   lnurl-server
+```
+
+The workflow `.github/workflows/lnurl-server-image.yml` smoke-tests the image against
+`postgres:17` on pull requests and publishes multi-arch images with SBOM/provenance
+attestations and cosign keyless signatures on `v*` tags.
 
 ## Development
 

@@ -1,7 +1,17 @@
 // Environment → typed config. Fails fast on anything missing or malformed and never echoes a
 // secret value into an error message.
 
+import { readFileSync } from "node:fs";
+
 import type { SparkNetwork } from "@qntx/spark";
+
+function requiredSecret(env: Record<string, string | undefined>, name: string): string {
+  const value = secret(env, name);
+  if (value === undefined) {
+    throw new Error(`missing required environment variable ${name} (or ${name}_FILE)`);
+  }
+  return value;
+}
 
 export type LnurlServerConfig = {
   readonly domain: string;
@@ -9,7 +19,7 @@ export type LnurlServerConfig = {
   readonly seed: Uint8Array;
   /** Undefined follows the SDK default for the network (mainnet 1, regtest 0). */
   readonly account?: number;
-  readonly dbPath: string;
+  readonly databaseUrl: string;
   readonly port: number;
   readonly minSendableMsat: number;
   readonly maxSendableMsat: number;
@@ -41,6 +51,21 @@ function required(env: Record<string, string | undefined>, name: string): string
     throw new Error(`missing required environment variable ${name}`);
   }
   return value;
+}
+
+/** Docker-secrets convention: `<NAME>_FILE` holds a path whose contents become the value. */
+function secret(env: Record<string, string | undefined>, name: string): string | undefined {
+  const inline = env[name];
+  const file = env[`${name}_FILE`];
+  const hasInline = inline !== undefined && inline !== "";
+  const hasFile = file !== undefined && file !== "";
+  if (hasInline && hasFile) {
+    throw new Error(`set only one of ${name} and ${name}_FILE`);
+  }
+  if (hasFile) {
+    return readFileSync(file, "utf8").trim();
+  }
+  return hasInline ? inline : undefined;
 }
 
 function intOption(
@@ -78,8 +103,8 @@ export function loadConfig(env: Record<string, string | undefined>): LnurlServer
   if (network !== "mainnet" && network !== "regtest") {
     throw new Error(`LNURL_NETWORK must be "mainnet" or "regtest", got ${JSON.stringify(network)}`);
   }
-  const seed = hexBytes("LNURL_SPARK_SEED", required(env, "LNURL_SPARK_SEED"), 64);
-  const zapValue = env["LNURL_ZAP_SECRET_KEY"];
+  const seed = hexBytes("LNURL_SPARK_SEED", requiredSecret(env, "LNURL_SPARK_SEED"), 64);
+  const zapValue = secret(env, "LNURL_ZAP_SECRET_KEY");
   const accountValue = env["LNURL_SPARK_ACCOUNT"];
   return {
     domain,
@@ -88,7 +113,7 @@ export function loadConfig(env: Record<string, string | undefined>): LnurlServer
     ...(accountValue === undefined || accountValue === ""
       ? {}
       : { account: intOption(env, "LNURL_SPARK_ACCOUNT", 0) }),
-    dbPath: required(env, "LNURL_DB_PATH"),
+    databaseUrl: requiredSecret(env, "LNURL_DATABASE_URL"),
     port: intOption(env, "LNURL_PORT", 8080),
     minSendableMsat: intOption(env, "LNURL_MIN_SENDABLE_MSAT", 1000, 1),
     maxSendableMsat: intOption(env, "LNURL_MAX_SENDABLE_MSAT", 100_000_000, 1),
