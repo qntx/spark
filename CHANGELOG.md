@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 ### Changed
 
 - **BREAKING** — `client.transfers.claim` now takes a transfer id instead of a
