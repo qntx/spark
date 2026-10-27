@@ -1,11 +1,12 @@
 // Entrypoint: loads the wasm crypto backend, builds the Spark signer/client (the server wallet
-// only ever creates invoices), wires the Lightning Address server over the sqlite store, serves
+// only ever creates invoices), wires the Lightning Address server over the postgres store, serves
 // the HTTP routes, and runs the settlement + zap-receipt poll loop until SIGINT/SIGTERM.
 
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { serve } from "@hono/node-server";
+import { Pool as PgPool } from "pg";
 
 import { Keys, Pool } from "@qntx/nostr";
 import { createMemorySparkStore, createSparkClient } from "@qntx/spark";
@@ -15,8 +16,10 @@ import { createSparkSigner, sparkAccountKey } from "@qntx/spark/signer";
 
 import { loadConfig } from "./config.ts";
 import { createLnurlApp } from "./http.ts";
+import { createPgSql } from "./pg.ts";
 import { abortableSleep } from "./sleep.ts";
 import { createLnurlStore } from "./store.ts";
+import type { Sql } from "./store.ts";
 import {
   ZAP_RECEIPT_MAX_ATTEMPTS,
   ZAP_RECEIPT_RETENTION_MS,
@@ -24,8 +27,13 @@ import {
   validateZapRequest,
 } from "./zap.ts";
 
-const log = (message: string): void => {
-  process.stdout.write(`[lnurl-server] ${message}\n`);
+/**
+ * One JSON object per line — level, msg and a fixed field set. No IPs, invoices, preimages, zap
+ * request contents or secrets ever appear in a field; payer IP and payment records never share a
+ * line.
+ */
+const log = (message: string, fields: Record<string, unknown> = {}): void => {
+  process.stdout.write(`${JSON.stringify({ level: "info", msg: message, ...fields })}\n`);
 };
 
 export type RunningServer = {
@@ -36,6 +44,8 @@ export type RunningServer = {
 export type ServerSeams = {
   /** Test seam: an externally constructed nostr pool (e.g. backed by a fake relay network). */
   readonly pool?: Pool;
+  /** Test seam: an injected store backend (PGlite in tests); the pg pool is then skipped. */
+  readonly sql?: Sql;
 };
 
 export async function startLnurlServer(
@@ -58,10 +68,18 @@ export async function startLnurlServer(
     store: createMemorySparkStore(),
   });
 
-  const store = createLnurlStore(config.dbPath);
+  let dbPool: PgPool | undefined;
+  const sql =
+    seams.sql ?? createPgSql((dbPool = new PgPool({ connectionString: config.databaseUrl })));
+  // An idle-client error (e.g. the database dropping connections) must not kill the process —
+  // readiness degrades to 503 and the settle loop logs its own round failures.
+  dbPool?.on("error", (error) => {
+    log("postgres pool error", { level: "error", error: error.message });
+  });
+  const store = await createLnurlStore(sql);
   const zapKeys =
     config.zapSecretKey === undefined ? undefined : Keys.fromSecretKey(config.zapSecretKey);
-  const pool = zapKeys === undefined ? undefined : (seams.pool ?? new Pool());
+  const nostrPool = zapKeys === undefined ? undefined : (seams.pool ?? new Pool());
 
   const server = createLightningAddressServer({
     client,
@@ -86,7 +104,18 @@ export async function startLnurlServer(
         }),
   });
 
-  const app = createLnurlApp(server);
+  const app = createLnurlApp(server, {
+    ready: async () => {
+      // Bounded liveness of the dependency: an unreachable database reports 503.
+      const probe = sql.query(`SELECT 1`);
+      await Promise.race([
+        probe,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("database probe timed out")), 2000);
+        }),
+      ]);
+    },
+  });
   // Port 0 binds an ephemeral port; the callback reports the address actually bound.
   let http: ReturnType<typeof serve>;
   const bound = new Promise<number>((resolve) => {
@@ -108,14 +137,13 @@ export async function startLnurlServer(
       }
       try {
         // oxlint-disable-next-line no-await-in-loop -- settle rounds must never overlap
-        const settled = await server.settlePending();
-        if (zapKeys !== undefined && pool !== undefined) {
+        await server.settlePending();
+        if (zapKeys !== undefined && nostrPool !== undefined) {
           // oxlint-disable-next-line no-await-in-loop -- receipts publish within the round
           await publishZapReceipts({
             store,
             keys: zapKeys,
-            pool,
-            settled,
+            pool: nostrPool,
             batch: config.zapReceiptBatch,
             log,
           });
@@ -132,7 +160,10 @@ export async function startLnurlServer(
           }
         }
       } catch (error) {
-        log(`settle round failed: ${String(error)}`);
+        log("settle round failed", {
+          level: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       // oxlint-disable-next-line no-await-in-loop -- the interval between rounds is deliberate
       await abortableSleep(config.pollIntervalMs, stop.signal);
@@ -144,9 +175,9 @@ export async function startLnurlServer(
     stop.abort();
     http.close();
     await loop;
-    pool?.close();
-    store.close();
+    nostrPool?.close();
     client.close();
+    await dbPool?.end(); // the connection pool closes last (owned pools only)
     log("stopped");
   };
 

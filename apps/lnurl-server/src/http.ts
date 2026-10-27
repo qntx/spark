@@ -46,7 +46,10 @@ function invoiceParams(c: Context): {
   };
 }
 
-export function createLnurlApp(server: LightningAddressServer): Hono {
+export function createLnurlApp(
+  server: LightningAddressServer,
+  readiness?: { readonly ready: () => Promise<void> },
+): Hono {
   const app = new Hono();
 
   app.use("*", cors({ origin: "*", allowMethods: ["GET", "POST", "DELETE", "OPTIONS"] }));
@@ -93,6 +96,17 @@ export function createLnurlApp(server: LightningAddressServer): Hono {
   );
 
   app.get("/health", (c) => c.body(null, 200));
+  // Readiness probes the store: an unreachable dependency reports 503, a healthy one 200.
+  if (readiness !== undefined) {
+    app.get("/ready", async (c) => {
+      try {
+        await readiness.ready();
+        return c.body(null, 200);
+      } catch {
+        return c.body(null, 503);
+      }
+    });
+  }
 
   return app;
 }

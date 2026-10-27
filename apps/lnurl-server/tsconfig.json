@@ -15,6 +15,7 @@
   "include": [
     "src",
     "tests",
+    "scripts",
     "vite.config.ts",
     // Ambient declarations the path-mapped spark-wasm sources need in the program.
     "../../packages/spark-wasm/src/wasm-modules.d.ts",
