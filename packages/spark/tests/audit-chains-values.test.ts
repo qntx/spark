@@ -39,11 +39,16 @@ import {
   TreeNodeSchema,
   TreeNodeStatus,
 } from "../src/proto/gen/spark_pb.ts";
-import type { QueryNodesRequest, TransferLeaf, TreeNode } from "../src/proto/gen/spark_pb.ts";
+import type {
+  QueryNodesRequest,
+  Transfer,
+  TransferLeaf,
+  TreeNode,
+} from "../src/proto/gen/spark_pb.ts";
 import { createSparkSigner, sparkAccountKey } from "../src/signer/index.ts";
 import type { SparkSigner } from "../src/signer/index.ts";
 import type { SspClient, SspSwapRequest } from "../src/ssp/index.ts";
-import { mapTransfer, swapLeaves } from "../src/transfer/index.ts";
+import { swapLeaves } from "../src/transfer/index.ts";
 import { malformedLeafTx, mapTreeNode } from "../src/tree/index.ts";
 import type { SparkLeaf } from "../src/tree/index.ts";
 import { loadWasmBackend } from "./support/backend.ts";
@@ -723,6 +728,7 @@ function makeClaimClient(
   signer: SparkSigner,
   leafFor: (identifier: string) => TreeNode | undefined,
   claimed: TransferLeaf,
+  pending: Transfer,
 ) {
   const allFor = (identifier: string): Array<[string, TreeNode]> => {
     const leaf = leafFor(identifier);
@@ -767,6 +773,7 @@ function makeClaimClient(
       create(GetSigningCommitmentsResponseSchema, {
         signingCommitments: commitmentGroup(3),
       }),
+    query_transfers_by_id: () => create(QueryTransfersResponseSchema, { transfers: [pending] }),
     claim_transfer: (req: { transferId: string }) =>
       create(ClaimTransferResponseSchema, {
         transfer: create(TransferSchema, {
@@ -846,6 +853,7 @@ describe("H-01: caller rows on the claim path get no exemption", () => {
         return claimedLeaf;
       },
       claimed,
+      pending,
     );
     return { client, store, signer, pending, newKey: required(newKey, "leaf key"), identity };
   }
@@ -855,7 +863,7 @@ describe("H-01: caller rows on the claim path get no exemption", () => {
     const { client, store, signer, pending } = await claimFixture(state);
 
     // The claim itself succeeds — the rejection only withholds the unverified chain.
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
     await expect(store.exitChains()).resolves.toStrictEqual([]);
 
@@ -875,7 +883,7 @@ describe("H-01: caller rows on the claim path get no exemption", () => {
     const state: { dropOn?: string } = { dropOn: lagging };
     const { client, store, signer, pending } = await claimFixture(state);
 
-    const claimed = await client.transfers.claim(mapTransfer(pending));
+    const claimed = await client.transfers.claim(pending.id);
     expect(claimed.map((leaf) => leaf.id)).toStrictEqual([LEAF_ID]);
     await expect(store.exitChains()).resolves.toStrictEqual([]);
 

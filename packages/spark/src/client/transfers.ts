@@ -1,11 +1,13 @@
 import { equalBytes } from "@noble/curves/utils.js";
 
+import { defaultSleep } from "../core/time.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
 import { TransferType } from "../proto/gen/spark_pb.ts";
 import {
   assertCommittedTransfer,
   assertLiveTransfer,
+  claimByTransferId,
   claimTransfer,
   CLAIMABLE_TRANSFER_STATUSES,
   queryAllTransfers,
@@ -201,11 +203,18 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
         })),
         ...(sendOptions.transferId === undefined ? {} : { transferId: sendOptions.transferId }),
       }),
-    claim: async (transfer) =>
-      context.leafLock.run(async () => {
-        const claimed = await claimTransfer({ ...context.transferCoordinator, transfer });
-        await context.storeChainsFor(claimed);
-        return claimed;
+    claim: async (transferId, claimOptions) =>
+      claimByTransferId({
+        ...context.transferCoordinator,
+        transferId,
+        sleep: context.sleep ?? defaultSleep,
+        ...(claimOptions?.signal === undefined ? {} : { signal: claimOptions.signal }),
+        claim: async (transfer) =>
+          context.leafLock.run(async () => {
+            const claimed = await claimTransfer({ ...context.transferCoordinator, transfer });
+            await context.storeChainsFor(claimed);
+            return claimed;
+          }),
       }),
     claimPending: async () => {
       const pending = await queryPendingTransfers({

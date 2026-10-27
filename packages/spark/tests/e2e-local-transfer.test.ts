@@ -111,7 +111,7 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO transfer flow"
     console.log("A sent transfer:", transfer.id, "status:", transfer.status);
 
     const [pendingTransfer] = await pendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
-    const claimedByB = await clientB.transfers.claim(requiredTransfer(pendingTransfer));
+    const claimedByB = await clientB.transfers.claim(requiredTransfer(pendingTransfer).id);
     expect(claimedByB.length).toBeGreaterThan(0);
     console.log("B claimed leaves:", claimedByB.map((l) => `${l.id}=${l.valueSats}`).join(", "));
     await expect(clientB.balance()).resolves.toBe(100_000);
@@ -119,7 +119,7 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO transfer flow"
 
     // A second claim of the same transfer hits the SO's already_exists path and
     // recovers the same leaves instead of failing.
-    const recovered = await clientB.transfers.claim(requiredTransfer(pendingTransfer));
+    const recovered = await clientB.transfers.claim(requiredTransfer(pendingTransfer).id);
     expect(recovered.map((l) => l.id).toSorted()).toStrictEqual(
       claimedByB.map((l) => l.id).toSorted(),
     );
@@ -213,10 +213,10 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO multi-receiver
     await expect(clientA.balance()).resolves.toBe(0);
 
     const [pendingB] = await pendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
-    const claimedByB = await clientB.transfers.claim(requiredTransfer(pendingB));
+    const claimedByB = await clientB.transfers.claim(requiredTransfer(pendingB).id);
     expect(claimedByB.map((leaf) => leaf.valueSats)).toStrictEqual([100_000]);
     const [pendingC] = await pendingUntil(clientC, Date.now() + CLAIM_DEADLINE_MS);
-    const claimedByC = await clientC.transfers.claim(requiredTransfer(pendingC));
+    const claimedByC = await clientC.transfers.claim(requiredTransfer(pendingC).id);
     expect(claimedByC.map((leaf) => leaf.valueSats)).toStrictEqual([50_000]);
     await expect(clientB.balance()).resolves.toBe(100_000);
     await expect(clientC.balance()).resolves.toBe(50_000);

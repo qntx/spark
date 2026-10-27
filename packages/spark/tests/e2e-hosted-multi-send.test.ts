@@ -148,10 +148,12 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       expect(perReceiver.get(Buffer.from(identityB).toString("hex"))).toBe(amounts.first);
       expect(perReceiver.get(Buffer.from(identityC).toString("hex"))).toBe(amounts.second);
 
-      const claimedB = await clientB.transfers.claim(await pendingTransfer(clientB, multi.id));
+      const pendingB = await pendingTransfer(clientB, multi.id);
+      const claimedB = await clientB.transfers.claim(pendingB.id);
       console.log("B claimed:", denominations(claimedB));
       expect(totalSats(claimedB)).toBe(amounts.first);
-      const claimedC = await clientC.transfers.claim(await pendingTransfer(clientC, multi.id));
+      const pendingC = await pendingTransfer(clientC, multi.id);
+      const claimedC = await clientC.transfers.claim(pendingC.id);
       console.log("C claimed:", denominations(claimedC));
       expect(totalSats(claimedC)).toBe(amounts.second);
 
@@ -187,7 +189,8 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")(
       await expect(clientA.balance()).resolves.toBe(balanceAfterFirst);
       console.log("retried send:", first.id, "resolved once at", balanceAfterFirst, "sats");
 
-      const returnedB = await clientB.transfers.claim(await pendingTransfer(clientB, first.id));
+      const pendingReturn = await pendingTransfer(clientB, first.id);
+      const returnedB = await clientB.transfers.claim(pendingReturn.id);
       expect(totalSats(returnedB)).toBe(555);
       const finalBack = await clientB.transfers.send({ receiver: identityA, amountSats: 555 });
       console.log("B returned retry amount:", finalBack.id);

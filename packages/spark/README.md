@@ -66,7 +66,7 @@ and amount; that retry either returns the committed transaction's hash or broadc
 those inputs once. Retrying without it would select different outputs and pay twice.
 
 Offline receive: once a transfer commits, the sender cannot cancel it and its expiry does not
-return it — `transfers.claim`/`claimPending` can pick it up at any later time.
+return it — `transfers.claim(transferId)`/`claimPending` can pick it up at any later time.
 
 Unilateral exit: each pre-signed transaction carries a hard deadline — once its parent confirms
 and its relative timelock passes, it must confirm within 50 blocks; otherwise the operators'

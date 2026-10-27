@@ -2,6 +2,7 @@ import { equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { describe, expect, test } from "vite-plus/test";
 
+import type { SparkClient } from "../src/client/index.ts";
 import { decodeSparkAddress } from "../src/core/address.ts";
 import { decodeBolt11 } from "../src/core/bolt11.ts";
 import { sparkNetworkConfig } from "../src/core/network.ts";
@@ -12,6 +13,16 @@ import { claimPendingUntil } from "./support/local.ts";
 const CLAIM_DEADLINE_MS = 180_000;
 const SEND_DEADLINE_MS = 180_000;
 const FUNDED_ADDRESS = "sparkrt1pgssy2j63j3kmdzg54wavqs2z7yljfmk7j5adt5p4046lk5dzp7qjn3mz0ecyh";
+
+/** First incoming transfer id from the client's event stream; rejects if the stream ends. */
+async function nextIncomingTransferId(client: SparkClient): Promise<string> {
+  for await (const event of client.events()) {
+    if (event.type === "transfer" && event.direction === "incoming") {
+      return event.transferId;
+    }
+  }
+  throw new Error("events stream ended before an incoming transfer arrived");
+}
 
 describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightning", () => {
   test("B invoices A twice over lightning; B returns the balance over spark", async (ctx) => {
@@ -41,6 +52,9 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
       memo: "hosted e2e fixed",
     });
     console.log("B invoice:", invoice1.id, decodeBolt11(invoice1.invoice).network, "amount 1000");
+    // B subscribes before A pays: the incoming-transfer event hands claim() the transfer id
+    // and the retry waits out the claimable window — no manual delay, no pending-list scan.
+    const incoming = nextIncomingTransferId(clientB);
     const paid1 = await clientA.lightning.pay({
       invoice: invoice1.invoice,
       maxFeeSats: 200,
@@ -65,7 +79,7 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     expect(settled1.outcome).toBe("succeeded");
     console.log("preimage surfaced:", settled1.preimage !== undefined);
 
-    const claimed1 = await claimPendingUntil(clientB, Date.now() + CLAIM_DEADLINE_MS);
+    const claimed1 = await clientB.transfers.claim(await incoming);
     expect(claimed1.length).toBeGreaterThan(0);
     console.log("B claimed", claimed1.length, "leaves");
     await expect(clientB.balance()).resolves.toBeGreaterThanOrEqual(balanceB0 + 1000);
