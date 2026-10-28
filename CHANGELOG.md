@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0
+
 ### Changed
 
 - **BREAKING:** the invoice-payload type `SparkPayment` is renamed `SparkInvoicePayment`; the
