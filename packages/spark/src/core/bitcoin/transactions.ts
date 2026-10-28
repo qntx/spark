@@ -127,19 +127,16 @@ function prevOutAt(tx: Transaction, vout: number): { script: Uint8Array; amountS
 }
 
 /**
- * Decodes a Bitcoin address to its output script under any network — matching upstream
- * `Address::from_str(..).assume_checked()`, which never checks that the address's network matches
- * the operating network.
+ * Decodes a Bitcoin address to its output script under `network` — bech32 HRP and base58 version
+ * bytes must match. An address that only decodes under the other network is an input error, not a
+ * silent retry: a coop-exit or sweep to a foreign-network address would burn sats.
  */
-export function addressToScript(address: string): Uint8Array {
-  for (const net of [btcNetwork("mainnet"), btcNetwork("regtest")]) {
-    try {
-      return OutScript.encode(Address(net).decode(address));
-    } catch {
-      // try the other network parameters
-    }
+export function bitcoinAddressScript(address: string, network: SparkNetwork): Uint8Array {
+  try {
+    return OutScript.encode(Address(btcNetwork(network)).decode(address));
+  } catch (error) {
+    throw new SparkInputError(`address: not a ${network} Bitcoin address`, { cause: error });
   }
-  throw new SparkInputError("address: not a decodable Bitcoin address");
 }
 
 /**
@@ -181,13 +178,14 @@ export function constructNodeTxPair(
   parentTx: Uint8Array,
   vout: number,
   address: string,
+  network: SparkNetwork,
   sequence: number,
   directSequence: number,
   feeSats: number,
 ): NodeTxPair {
   checkIfValidSequence(sequence);
   checkIfValidSequence(directSequence);
-  const outputScript = addressToScript(address);
+  const outputScript = bitcoinAddressScript(address, network);
   return {
     cpfp: buildSingleOutputTx(parentTx, vout, outputScript, sequence, false, feeSats, true),
     direct: buildSingleOutputTx(parentTx, vout, outputScript, directSequence, true, feeSats, false),
@@ -259,6 +257,7 @@ export function createNodeTxs(params: NodeTxsParams): NodeTxPair {
     params.parentTx,
     params.vout,
     address,
+    params.network,
     params.sequence,
     directSequence,
     DEFAULT_FEE_SATS,

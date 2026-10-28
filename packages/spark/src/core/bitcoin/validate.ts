@@ -1,11 +1,9 @@
 import { equalBytes } from "@noble/curves/utils.js";
-import { Address, OutScript } from "@scure/btc-signer";
 
 import { SparkInputError } from "../../errors/index.ts";
 import type { SparkNetwork } from "../network.ts";
-import { btcNetwork } from "./script.ts";
 import { parseTransaction } from "./sighash.ts";
-import { txId } from "./transactions.ts";
+import { bitcoinAddressScript, txId } from "./transactions.ts";
 
 // Cooperative-exit validation, ported from
 // sdks/js/packages/spark-sdk/src/utils/bitcoin.ts (buildonspark/spark@0b3a32a).
@@ -74,7 +72,7 @@ export function validateCoopExitPayoutTransaction(params: CoopExitPayoutValidati
 
 function p2trAddressScript(address: string, network: SparkNetwork): Uint8Array {
   try {
-    return OutScript.encode(Address(btcNetwork(network)).decode(address));
+    return bitcoinAddressScript(address, network);
   } catch (error) {
     throw new SparkInputError("expectedPayoutAddress: could not decode the withdrawal address", {
       cause: error,

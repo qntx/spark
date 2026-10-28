@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Address, OutScript, Transaction } from "@scure/btc-signer";
 import { expect, test } from "vite-plus/test";
@@ -34,6 +35,7 @@ import {
 } from "../src/core/bitcoin/sequence.ts";
 import { taprootKeySpendSighash, taprootScriptSpendSighash } from "../src/core/bitcoin/sighash.ts";
 import {
+  bitcoinAddressScript,
   constructNodeTxPair,
   constructRefundTxTrio,
   createConnectorRefundTxs,
@@ -202,6 +204,8 @@ test.each(vectors.nodeTxPairs)("constructNodeTxPair $name", (c) => {
     hexToBytes(c.parentTx),
     c.vout,
     c.address,
+    // oxlint-disable-next-line vitest/no-conditional-in-test -- the vector carries both networks
+    c.address.startsWith("bcrt1") ? "regtest" : "mainnet",
     c.sequence,
     c.directSequence,
     c.feeSats,
@@ -733,4 +737,69 @@ test("script-spend sighash rejects a negative inputIndex", () => {
       new Uint8Array(34).fill(0x51),
     ),
   ).toThrow("inputIndex: must be a non-negative integer");
+});
+
+// -- network-strict address decoding ----------------------------------------------
+
+const ADDRESS_SCRIPTS: ReadonlyArray<[string, string]> = [
+  ["P2PKH", `76a914${"11".repeat(20)}88ac`],
+  ["P2SH", `a914${"22".repeat(20)}87`],
+  ["P2WPKH", `0014${"33".repeat(20)}`],
+  ["P2WSH", `0020${"44".repeat(32)}`],
+];
+
+const P2TR_KEY = secp256k1.getPublicKey(new Uint8Array(32).fill(0x11), true);
+
+test.each(ADDRESS_SCRIPTS)("bitcoinAddressScript decodes %s under both networks", (_kind, hex) => {
+  const script = hexToBytes(hex);
+  for (const network of ["mainnet", "regtest"] as const) {
+    const address = Address(btcNetwork(network)).encode(OutScript.decode(script));
+    expect(bitcoinAddressScript(address, network)).toStrictEqual(script);
+  }
+});
+
+test.each(ADDRESS_SCRIPTS)(
+  "bitcoinAddressScript rejects a %s address on the wrong network",
+  (_kind, hex) => {
+    const script = OutScript.decode(hexToBytes(hex));
+    const mainnetAddress = Address(btcNetwork("mainnet")).encode(script);
+    const regtestAddress = Address(btcNetwork("regtest")).encode(script);
+    expect(() => bitcoinAddressScript(mainnetAddress, "regtest")).toThrow(SparkInputError);
+    expect(() => bitcoinAddressScript(regtestAddress, "mainnet")).toThrow(SparkInputError);
+  },
+);
+
+test("bitcoinAddressScript decodes a P2TR address under both networks", () => {
+  for (const network of ["mainnet", "regtest"] as const) {
+    const address = p2trAddressFromPublicKey(P2TR_KEY, network);
+    // Round-trip: the decoded script re-encodes to the same address under the same network.
+    expect(
+      Address(btcNetwork(network)).encode(OutScript.decode(bitcoinAddressScript(address, network))),
+    ).toBe(address);
+  }
+  expect(() =>
+    bitcoinAddressScript(p2trAddressFromPublicKey(P2TR_KEY, "mainnet"), "regtest"),
+  ).toThrow(SparkInputError);
+  expect(() =>
+    bitcoinAddressScript(p2trAddressFromPublicKey(P2TR_KEY, "regtest"), "mainnet"),
+  ).toThrow(SparkInputError);
+});
+
+test("bitcoinAddressScript rejects a bad checksum", () => {
+  const address = Address(btcNetwork("mainnet")).encode(
+    OutScript.decode(hexToBytes(`0014${"33".repeat(20)}`)),
+  );
+  // oxlint-disable-next-line vitest/no-conditional-in-test -- mutate the last char deterministically
+  const broken = `${address.slice(0, -1)}${address.endsWith("4") ? "x" : "4"}`;
+  expect(() => bitcoinAddressScript(broken, "mainnet")).toThrow(SparkInputError);
+});
+
+test("bitcoinAddressScript rejects mixed case but accepts all-uppercase bech32", () => {
+  const address = Address(btcNetwork("mainnet")).encode(
+    OutScript.decode(hexToBytes(`0014${"33".repeat(20)}`)),
+  );
+  expect(() => bitcoinAddressScript(`BC1${address.slice(3)}`, "mainnet")).toThrow(SparkInputError);
+  expect(bitcoinAddressScript(address.toUpperCase(), "mainnet")).toStrictEqual(
+    hexToBytes(`0014${"33".repeat(20)}`),
+  );
 });

@@ -3,11 +3,9 @@ import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import type { Client } from "@connectrpc/connect";
 import { equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { Address, OutScript } from "@scure/btc-signer";
 
 import { u64ToSats } from "../core/assert.ts";
 import {
-  btcNetwork,
   createConnectorRefundTxs,
   parseTransaction,
   taprootKeySpendSighash,
@@ -16,6 +14,7 @@ import {
   validateCoopExitPayoutTransaction,
 } from "../core/bitcoin/index.ts";
 import type { RefundTxTrio } from "../core/bitcoin/index.ts";
+import { bitcoinAddressScript } from "../core/bitcoin/transactions.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
 import { defaultSleep } from "../core/time.ts";
 import { uuidv7 } from "../core/uuid.ts";
@@ -114,7 +113,7 @@ export type CooperativeExitStatus = SspCoopExitStatus;
 /** `address` must decode under this client's network before any signer or SSP work runs. */
 function checkWithdrawalAddress(address: string, network: SparkNetwork): void {
   try {
-    Address(btcNetwork(network)).decode(address);
+    bitcoinAddressScript(address, network);
   } catch (error) {
     throw new SparkInputError(`coop exit: invalid withdrawal address for ${network}`, {
       cause: error,
@@ -143,7 +142,7 @@ function payoutSatsForAddress(
   address: string,
   network: SparkNetwork,
 ): number {
-  const expectedScript = OutScript.encode(Address(btcNetwork(network)).decode(address));
+  const expectedScript = bitcoinAddressScript(address, network);
   const tx = parseTransaction(rawCoopExitTransaction);
   for (let i = 0; i < tx.outputsLength; i++) {
     const output = tx.getOutput(i);
