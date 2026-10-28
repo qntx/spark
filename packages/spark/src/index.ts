@@ -75,4 +75,4 @@ export type {
 } from "./tokens/model.ts";
 
 export { EPHEMERAL_ANCHOR_SCRIPT } from "./core/bitcoin/script.ts";
-export { addressToScript } from "./core/bitcoin/transactions.ts";
+export { bitcoinAddressScript } from "./core/bitcoin/transactions.ts";

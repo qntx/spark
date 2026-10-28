@@ -10,7 +10,7 @@ import { describe, expect, test } from "vite-plus/test";
 
 import { u64ToSats } from "../src/core/assert.ts";
 import {
-  addressToScript,
+  bitcoinAddressScript,
   createInitialTimelockRefundTxs,
   createMultiInputRootTx,
   p2trAddressFromPublicKey,
@@ -189,9 +189,9 @@ function depositTxTo(
 ): Uint8Array {
   const tx = new Transaction({ allowUnknownOutputs: true });
   tx.addInput({ txid: new Uint8Array(32).fill(inputFill), index: 0, sequence: 0 });
-  tx.addOutput({ script: addressToScript(address), amount: sats });
+  tx.addOutput({ script: bitcoinAddressScript(address, "regtest"), amount: sats });
   for (const extra of extraOutputs) {
-    tx.addOutput({ script: addressToScript(extra), amount: sats });
+    tx.addOutput({ script: bitcoinAddressScript(extra, "regtest"), amount: sats });
   }
   return tx.toBytes(true);
 }

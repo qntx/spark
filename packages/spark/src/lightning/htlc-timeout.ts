@@ -8,7 +8,8 @@ import {
   lightningHtlcOutputScript,
 } from "../core/bitcoin/htlc.ts";
 import { parseTransaction } from "../core/bitcoin/sighash.ts";
-import { addressToScript } from "../core/bitcoin/transactions.ts";
+import { bitcoinAddressScript } from "../core/bitcoin/transactions.ts";
+import type { SparkNetwork } from "../core/network.ts";
 import { SparkInputError } from "../errors/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 
@@ -32,6 +33,8 @@ export async function sweepHtlcTimeout(
     readonly signer: SparkSigner;
     /** 33-byte compressed SSP identity key — the hash-lock leaf key the send committed to. */
     readonly sspIdentityPublicKey: Uint8Array;
+    /** The network `destinationAddress` must decode under — checked before any signing. */
+    readonly network: SparkNetwork;
   },
   options: {
     /** The committed refund transaction carrying the HTLC output. */
@@ -46,7 +49,7 @@ export async function sweepHtlcTimeout(
   if (!Number.isFinite(options.feeRateSatPerVbyte) || options.feeRateSatPerVbyte <= 0) {
     throw new SparkInputError("feeRateSatPerVbyte: must be a positive finite number");
   }
-  const destinationScript = addressToScript(options.destinationAddress);
+  const destinationScript = bitcoinAddressScript(options.destinationAddress, deps.network);
   const htlc = parseTransaction(options.htlcTx);
   if (
     !Number.isSafeInteger(options.vout) ||

@@ -55,6 +55,7 @@ export function createLightning(context: ClientContext): SparkClient["lightning"
         {
           signer: context.signer,
           sspIdentityPublicKey: context.config.ssp.identityPublicKey,
+          network: context.network,
         },
         options,
       ),

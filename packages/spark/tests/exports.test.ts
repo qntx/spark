@@ -108,7 +108,7 @@ test("root runtime exports are exactly the core surface", () => {
     "SparkInputError",
     "SparkRequestError",
     "SparkTokenBroadcastError",
-    "addressToScript",
+    "bitcoinAddressScript",
     "buildCpfpChild",
     "createMemorySparkStore",
     "createSatsInvoice",
@@ -167,7 +167,7 @@ test("server runtime exports are exactly the lightning address server surface", 
 test("signer runtime exports are exactly the signer factory surface", () => {
   expect(names(signer)).toStrictEqual([
     "EPHEMERAL_ANCHOR_SCRIPT",
-    "addressToScript",
+    "bitcoinAddressScript",
     "createLnurlAuthSigner",
     "createSparkSigner",
     "decodeBolt11",

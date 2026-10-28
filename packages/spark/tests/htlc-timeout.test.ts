@@ -72,7 +72,7 @@ describe("sweepHtlcTimeout", () => {
     };
     const tx = htlcTx(identity, 100_000n);
     const signed = await sweepHtlcTimeout(
-      { signer: wrapped, sspIdentityPublicKey: SSP_IDENTITY },
+      { signer: wrapped, sspIdentityPublicKey: SSP_IDENTITY, network: "regtest" },
       baseOptions(identity, { htlcTx: tx }),
     );
 
@@ -98,7 +98,7 @@ describe("sweepHtlcTimeout", () => {
     const identity = await signer.identityPublicKey();
     await expect(
       sweepHtlcTimeout(
-        { signer, sspIdentityPublicKey: SSP_IDENTITY },
+        { signer, sspIdentityPublicKey: SSP_IDENTITY, network: "regtest" },
         baseOptions(identity, { feeRateSatPerVbyte: 0 }),
       ),
     ).rejects.toThrow("feeRateSatPerVbyte: must be a positive finite number");
@@ -110,7 +110,7 @@ describe("sweepHtlcTimeout", () => {
     const identity = await signer.identityPublicKey();
     await expect(
       sweepHtlcTimeout(
-        { signer, sspIdentityPublicKey: SSP_IDENTITY },
+        { signer, sspIdentityPublicKey: SSP_IDENTITY, network: "regtest" },
         baseOptions(identity, { vout: 5 }),
       ),
     ).rejects.toThrow("vout: out of range");
@@ -122,7 +122,7 @@ describe("sweepHtlcTimeout", () => {
     const identity = await signer.identityPublicKey();
     await expect(
       sweepHtlcTimeout(
-        { signer, sspIdentityPublicKey: SSP_IDENTITY },
+        { signer, sspIdentityPublicKey: SSP_IDENTITY, network: "regtest" },
         baseOptions(identity, { htlcTx: parentTx(100_000n) }),
       ),
     ).rejects.toThrow("does not match the Lightning HTLC script");
@@ -134,7 +134,7 @@ describe("sweepHtlcTimeout", () => {
     const identity = await signer.identityPublicKey();
     await expect(
       sweepHtlcTimeout(
-        { signer, sspIdentityPublicKey: SSP_IDENTITY },
+        { signer, sspIdentityPublicKey: SSP_IDENTITY, network: "regtest" },
         baseOptions(identity, { htlcTx: htlcTx(identity, 400n), feeRateSatPerVbyte: 10 }),
       ),
     ).rejects.toThrow("below the");

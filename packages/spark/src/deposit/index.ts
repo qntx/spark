@@ -19,6 +19,7 @@ import {
   verifyFinalizedTaprootSignature,
   xOnlyPublicKey,
 } from "../core/bitcoin/index.ts";
+import { bitcoinAddressScript } from "../core/bitcoin/transactions.ts";
 import { proofOfPossessionDigest } from "../core/hashing/statements.ts";
 import { sparkNetworkProto } from "../core/network.ts";
 import type { SparkNetwork, SparkOperatorConfig } from "../core/network.ts";
@@ -74,7 +75,7 @@ export function depositScript(verifyingKey: Uint8Array, network: SparkNetwork): 
 /** Output script of a coordinator-supplied address, decoded under our network only. */
 export function depositAddressScript(address: string, network: SparkNetwork): Uint8Array {
   try {
-    return OutScript.encode(BitcoinAddress(btcNetwork(network)).decode(address));
+    return bitcoinAddressScript(address, network);
   } catch (error) {
     throw new SparkError("deposit: address does not decode under our network", { cause: error });
   }
