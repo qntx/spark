@@ -274,6 +274,7 @@ function unstubbedSsp(): SspClient {
   return {
     swapFeeEstimate: reject,
     requestSwap: reject,
+    transfers: async () => Promise.resolve([]),
     requestLightningReceive: reject,
     requestLightningSend: reject,
     lightningSendFeeEstimate: reject,

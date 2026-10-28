@@ -2139,6 +2139,7 @@ describe("transfers.swap", () => {
         }
         return Promise.resolve(response);
       },
+      transfers: async () => Promise.resolve([]),
       requestLightningReceive: async () =>
         Promise.reject(new SparkRequestError("ssp: requestLightningReceive not stubbed")),
       requestLightningSend: async () =>

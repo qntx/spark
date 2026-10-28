@@ -84,6 +84,33 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     console.log("B claimed", claimed1.length, "leaves");
     await expect(clientB.balance()).resolves.toBeGreaterThanOrEqual(balanceB0 + 1000);
 
+    // E1-e-1: history — B's receive is a completed lightning entry matching the invoice's
+    // payment hash; A's send is a lightning entry carrying the SSP-reported fee.
+    const hashHex = bytesToHex(invoice1.paymentHash);
+    const historyB = await clientB.transfers.history({ limit: 10 });
+    const historyA = await clientA.transfers.history({ limit: 10 });
+    const receiveEntry = historyB.payments.find(
+      // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing find predicate
+      ({ details }) => details?.kind === "lightning" && details.paymentHash === hashHex,
+    );
+    expect(receiveEntry).toMatchObject({
+      direction: "receive",
+      method: "lightning",
+      status: "completed",
+    });
+    const sendEntry = historyA.payments.find(
+      // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing find predicate
+      ({ details }) => details?.kind === "lightning" && details.paymentHash === hashHex,
+    );
+    expect(sendEntry).toMatchObject({
+      direction: "send",
+      method: "lightning",
+      status: "completed",
+      feeSats: paid1.feeSats,
+      amountSats: paid1.amountSats,
+    });
+    console.log("history: receive", receiveEntry?.status, "send fee", sendEntry?.feeSats);
+
     // G-SV: the payer's signer classified the payment as lightning and reported the HTLC
     // output script — the wallet can bind it to the invoice's payment hash.
     const paid = walletA.outflows.find((o) => o.kind === "lightning");
@@ -152,6 +179,18 @@ describe.skipIf(process.env["SPARK_E2E_HOSTED"] !== "1")("hosted regtest lightni
     console.log("A balance final:", balanceAFinal);
     // A is out the two lightning fees; the invoiced amounts came back with B's return.
     expect(balanceAFinal).toBe(balanceA0 - paid1.feeSats - paid2.feeSats);
+
+    // Paging: limit 1 yields a nextOffset, and the next page is a different payment.
+    const page1 = await clientA.transfers.history({ limit: 1 });
+    expect(page1.payments).toHaveLength(1);
+    expect(page1.nextOffset).toBe(1);
+    const page2 = await clientA.transfers.history({
+      limit: 1,
+      // oxlint-disable-next-line vitest/no-conditional-in-test -- asserted toBe(1) above
+      offset: page1.nextOffset ?? 0,
+    });
+    expect(page2.payments).toHaveLength(1);
+    expect(page2.payments[0]!.id).not.toBe(page1.payments[0]!.id);
 
     clientA.close();
     clientB.close();

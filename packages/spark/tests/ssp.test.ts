@@ -5,6 +5,7 @@ import { base64 } from "@scure/base";
 import { expect, test } from "vite-plus/test";
 
 import { sspChallengeDigest } from "../src/core/hashing/index.ts";
+import { SparkInputError, SparkRequestError } from "../src/errors/index.ts";
 import { ProtectedChallengeSchema } from "../src/proto/gen/ssp_authn_pb.ts";
 import { createSspClient } from "../src/ssp/index.ts";
 import { createTestSigner } from "./support/test-signer.ts";
@@ -89,6 +90,7 @@ function fakeSsp(handlers: {
   } | null;
   claimDeposit?: { transferId?: string | null };
   userRequest?: unknown;
+  transfers?: unknown;
 }) {
   const requests: CapturedRequest[] = [];
   const challenge = handlers.challenge ?? protectedChallengeFor(SIGNER_PUBLIC_KEY);
@@ -302,6 +304,8 @@ function fakeSsp(handlers: {
       }
       case "UserRequest":
         return json({ user_request: handlers.userRequest ?? null });
+      case "Transfers":
+        return json({ transfers: handlers.transfers ?? [] });
       default:
         return new Response("not found", { status: 404 });
     }
@@ -377,6 +381,8 @@ function coopExitRequestJson(req: {
   rawCoopExitTransaction?: string;
   coopExitTxid?: string;
   rawConnectorTransaction?: string;
+  feeValue?: number;
+  l1FeeValue?: number;
   transferId?: string | null;
 }): Record<string, unknown> {
   return {
@@ -385,6 +391,16 @@ function coopExitRequestJson(req: {
     coop_exit_request_created_at: "2025-01-01T00:00:00Z",
     coop_exit_request_updated_at: "2025-01-01T00:00:00Z",
     coop_exit_request_network: "REGTEST",
+    coop_exit_request_fee: {
+      __typename: "CurrencyAmount",
+      currency_amount_original_value: req.feeValue ?? 400,
+      currency_amount_original_unit: "SATOSHI",
+    },
+    coop_exit_request_l1_broadcast_fee: {
+      __typename: "CurrencyAmount",
+      currency_amount_original_value: req.l1FeeValue ?? 100,
+      currency_amount_original_unit: "SATOSHI",
+    },
     coop_exit_request_status: req.status ?? "TX_SIGNED",
     coop_exit_request_raw_connector_transaction: req.rawConnectorTransaction ?? "aabb".repeat(10),
     coop_exit_request_raw_coop_exit_transaction: req.rawCoopExitTransaction ?? "ccdd".repeat(10),
@@ -1035,4 +1051,111 @@ test("claimStaticDeposit tolerates a null transfer id", async () => {
       quoteSignature: "cd".repeat(70),
     }),
   ).resolves.toStrictEqual({});
+});
+
+const TXID = "ab".repeat(32);
+
+test("ssp transfers returns [] for an empty id list without a request", async () => {
+  const { fetchImpl, requests } = fakeSsp({});
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(client.transfers([])).resolves.toStrictEqual([]);
+  expect(requests).toHaveLength(0);
+});
+
+test("ssp transfers rejects more than 100 ids", async () => {
+  const { fetchImpl } = fakeSsp({});
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(
+    client.transfers(Array.from({ length: 101 }, (_, i) => `t${i}`)),
+  ).rejects.toBeInstanceOf(SparkInputError);
+});
+
+const ITEM = (userRequest: unknown) => ({
+  transfer_spark_id: "tr-1",
+  transfer_user_request: userRequest,
+});
+
+test("ssp transfers parses every user_request typename into its union kind", async () => {
+  const { fetchImpl } = fakeSsp({
+    transfers: [
+      ITEM(lightningSendRequestJson({ feeValue: 11, preimage: "cd".repeat(32) })),
+      ITEM({
+        __typename: "LightningReceiveRequest",
+        lightning_receive_request_id: "recv-1",
+        lightning_receive_request_invoice: {
+          __typename: "Invoice",
+          invoice_encoded_invoice: "lnbcrt1ptest",
+        },
+        lightning_receive_request_status: "LIGHTNING_PAYMENT_SUCCEEDED",
+        lightning_receive_request_transfer: null,
+        lightning_receive_request_payment_preimage: null,
+      }),
+      ITEM(coopExitRequestJson({ status: "SUCCEEDED", coopExitTxid: TXID })),
+      ITEM({
+        __typename: "ClaimStaticDeposit",
+        claim_static_deposit_id: "dep-1",
+        claim_static_deposit_deposit_amount: {
+          __typename: "CurrencyAmount",
+          currency_amount_original_value: 5100,
+          currency_amount_original_unit: "SATOSHI",
+        },
+        claim_static_deposit_credit_amount: {
+          __typename: "CurrencyAmount",
+          currency_amount_original_value: 5000,
+          currency_amount_original_unit: "SATOSHI",
+        },
+        claim_static_deposit_max_fee: {
+          __typename: "CurrencyAmount",
+          currency_amount_original_value: 100,
+          currency_amount_original_unit: "SATOSHI",
+        },
+        claim_static_deposit_status: "TRANSFER_COMPLETED",
+        claim_static_deposit_transaction_id: TXID,
+        claim_static_deposit_output_index: 1,
+        claim_static_deposit_transfer_spark_id: "tr-1",
+      }),
+      ITEM({ __typename: "LeavesSwapRequest", leaves_swap_request_id: "swap-1" }),
+      ITEM(null),
+      ITEM({ __typename: "UnfamiliarRequest" }),
+    ],
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  const results = await client.transfers(["tr-1"]);
+  const kinds = results.map(({ request }) => request?.kind);
+  expect(kinds).toStrictEqual([
+    "lightning-send",
+    "lightning-receive",
+    "coop-exit",
+    "static-deposit",
+    "leaves-swap",
+    undefined,
+    undefined,
+  ]);
+  const send = results[0]!.request;
+  // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing guard
+  if (send?.kind !== "lightning-send") {
+    throw new Error("unreachable");
+  }
+  expect(send.feeSats).toBe(11);
+  expect(send.preimage).toBeInstanceOf(Uint8Array);
+  const exit = results[2]!.request;
+  // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing guard
+  if (exit?.kind !== "coop-exit") {
+    throw new Error("unreachable");
+  }
+  expect(exit.txid).toBe(TXID);
+  const deposit = results[3]!.request;
+  // oxlint-disable-next-line vitest/no-conditional-in-test -- narrowing guard
+  if (deposit?.kind !== "static-deposit") {
+    throw new Error("unreachable");
+  }
+  expect(deposit).toMatchObject({ txid: TXID, vout: 1, creditAmountSats: 5000 });
+});
+
+test("ssp transfers surfaces a malformed request item as SparkRequestError", async () => {
+  const { fetchImpl } = fakeSsp({
+    transfers: [ITEM({ __typename: "LightningSendRequest", lightning_send_request_id: 7 })],
+  });
+  const client = createSspClient({ ...SSP_OPTS, signer: SIGNER, fetch: fetchImpl });
+  await expect(client.transfers(["tr-1"])).rejects.toBeInstanceOf(SparkRequestError);
 });

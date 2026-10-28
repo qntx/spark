@@ -262,6 +262,7 @@ async function swapContext(options?: {
       inboundTargets.set(inboundId, [...request.targetAmountsSats]);
       return Promise.resolve({ status: "SUCCEEDED", inboundTransferId: inboundId, feeSats: 0 });
     },
+    transfers: async () => Promise.resolve([]),
     requestLightningReceive: async () =>
       Promise.reject(new Error("requestLightningReceive not stubbed")),
     requestLightningSend: async () => Promise.reject(new Error("requestLightningSend not stubbed")),

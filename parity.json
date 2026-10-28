@@ -322,6 +322,15 @@
         }
       },
       "vectors": ["vectors/optimize.json"]
+    },
+    {
+      "id": "transfer-history",
+      "implementations": {
+        "ts": {
+          "module": "packages/spark/src/transfer/payment.ts",
+          "tests": ["packages/spark/tests/payment.test.ts", "packages/spark/tests/ssp.test.ts"]
+        }
+      }
     }
   ]
 }

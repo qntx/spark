@@ -719,3 +719,95 @@ fragment UserRequestFragment on UserRequest {
         lightning_send_request_payment_preimage: payment_preimage
     }
 }`;
+
+// Query documents copied verbatim (selections, aliases, operation names) from upstream
+// sdks/js/packages/spark-sdk/src/graphql/queries/Transfers.ts (buildonspark/spark@0b3a32a),
+// trimmed to the fields we parse — the fragments keep their upstream aliasing.
+export const TRANSFERS = `
+query Transfers($transfer_spark_ids: [UUID!]!) {
+  transfers(transfer_spark_ids: $transfer_spark_ids) {
+    ...TransferFragment
+    transfer_user_request: user_request {
+      ...UserRequestFragment
+    }
+  }
+}
+
+fragment TransferFragment on Transfer {
+  __typename
+  transfer_spark_id: spark_id
+}
+
+fragment CurrencyAmountFragment on CurrencyAmount {
+  __typename
+  currency_amount_original_value: original_value
+  currency_amount_original_unit: original_unit
+}
+
+fragment TransferSparkIdFragment on Transfer {
+  __typename
+  transfer_spark_id: spark_id
+}
+
+fragment UserRequestFragment on UserRequest {
+  __typename
+  ... on ClaimStaticDeposit {
+    claim_static_deposit_id: id
+    claim_static_deposit_deposit_amount: deposit_amount {
+      ...CurrencyAmountFragment
+    }
+    claim_static_deposit_credit_amount: credit_amount {
+      ...CurrencyAmountFragment
+    }
+    claim_static_deposit_max_fee: max_fee {
+      ...CurrencyAmountFragment
+    }
+    claim_static_deposit_status: status
+    claim_static_deposit_transaction_id: transaction_id
+    claim_static_deposit_output_index: output_index
+    claim_static_deposit_transfer_spark_id: transfer_spark_id
+  }
+  ... on CoopExitRequest {
+    coop_exit_request_id: id
+    coop_exit_request_fee: fee {
+      ...CurrencyAmountFragment
+    }
+    coop_exit_request_l1_broadcast_fee: l1_broadcast_fee {
+      ...CurrencyAmountFragment
+    }
+    coop_exit_request_status: status
+    coop_exit_request_coop_exit_txid: coop_exit_txid
+    coop_exit_request_transfer: transfer {
+      ...TransferSparkIdFragment
+    }
+  }
+  ... on LeavesSwapRequest {
+    leaves_swap_request_id: id
+    leaves_swap_request_status: status
+  }
+  ... on LightningReceiveRequest {
+    lightning_receive_request_id: id
+    lightning_receive_request_invoice: invoice {
+      __typename
+      invoice_encoded_invoice: encoded_invoice
+      invoice_payment_hash: payment_hash
+    }
+    lightning_receive_request_status: status
+    lightning_receive_request_transfer: transfer {
+      ...TransferSparkIdFragment
+    }
+    lightning_receive_request_payment_preimage: payment_preimage
+  }
+  ... on LightningSendRequest {
+    lightning_send_request_id: id
+    lightning_send_request_encoded_invoice: encoded_invoice
+    lightning_send_request_fee: fee {
+      ...CurrencyAmountFragment
+    }
+    lightning_send_request_status: status
+    lightning_send_request_transfer: transfer {
+      ...TransferSparkIdFragment
+    }
+    lightning_send_request_payment_preimage: payment_preimage
+  }
+}`;

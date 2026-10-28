@@ -21,7 +21,7 @@ export {
 export type { LightningAddressStatement } from "./lightning-address.ts";
 export type { SparkNetwork, SparkNetworkConfig, SparkOperatorConfig } from "./network.ts";
 export type { SparkAddress } from "./address.ts";
-export type { SparkInvoiceFields, SparkPayment } from "./invoice.ts";
+export type { SparkInvoiceFields, SparkInvoicePayment } from "./invoice.ts";
 export type {
   Bolt11Invoice,
   Bolt11Network,

@@ -347,6 +347,7 @@ function fakeSsp(handlers: {
   const ssp: SspClient = {
     swapFeeEstimate: async () => Promise.reject(new Error("unstubbed")),
     requestSwap: async () => Promise.reject(new Error("unstubbed")),
+    transfers: async () => Promise.resolve([]),
     requestLightningReceive: async () => Promise.reject(new Error("unstubbed")),
     requestLightningSend: async () => Promise.reject(new Error("unstubbed")),
     lightningSendFeeEstimate: async () => Promise.reject(new Error("unstubbed")),

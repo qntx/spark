@@ -68,6 +68,13 @@ those inputs once. Retrying without it would select different outputs and pay tw
 Offline receive: once a transfer commits, the sender cannot cancel it and its expiry does not
 return it — `transfers.claim(transferId)`/`claimPending` can pick it up at any later time.
 
+Transaction history: `transfers.history({ limit?, offset? })` pages transfers newest-first
+(`TRANSFER`, `PREIMAGE_SWAP`, `COOPERATIVE_EXIT`, `UTXO_SWAP`), folding each entry with its SSP
+`user_request` when the counterparty is the SSP — lightning invoices, payment hashes and
+preimages, coop-exit fees and payout txids, static-deposit credits. Entries surface as
+`SparkPayment` (`send`/`receive`, `pending`/`completed`/`failed`, `spark`/`lightning`/`deposit`/
+`withdraw`); `nextOffset` is `undefined` at the end.
+
 Unilateral exit: each pre-signed transaction carries a hard deadline — once its parent confirms
 and its relative timelock passes, it must confirm within 50 blocks; otherwise the operators'
 watchtower may publish a self-fee variant instead. For intermediate nodes this strands

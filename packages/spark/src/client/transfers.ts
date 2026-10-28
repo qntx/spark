@@ -4,6 +4,7 @@ import { defaultSleep } from "../core/time.ts";
 import { uuidv7 } from "../core/uuid.ts";
 import { SparkError, SparkInputError } from "../errors/index.ts";
 import { TransferType } from "../proto/gen/spark_pb.ts";
+import type { SspUserRequest } from "../ssp/types.ts";
 import {
   assertCommittedTransfer,
   assertLiveTransfer,
@@ -15,9 +16,15 @@ import {
   queryPendingTransfers,
   queryTransferById,
   sendTransfer,
+  sspCounterparty,
+  toSparkPayment,
   verifyTransferAcrossOperators,
 } from "../transfer/index.ts";
-import type { CommittedTransferExpectation, SparkTransfer } from "../transfer/index.ts";
+import type {
+  CommittedTransferExpectation,
+  SparkPayment,
+  SparkTransfer,
+} from "../transfer/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import type { ClientContext } from "./context.ts";
 import type { SparkClient } from "./index.ts";
@@ -177,14 +184,61 @@ export function createTransfers(context: ClientContext): SparkClient["transfers"
       });
       return pending.transfers;
     },
-    list: async (listOptions) =>
-      queryAllTransfers({
+    history: async (historyOptions) => {
+      const limit = historyOptions?.limit ?? 20;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw new SparkInputError("history: limit must be an integer in 1–100");
+      }
+      const offset = historyOptions?.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw new SparkInputError("history: offset must be a non-negative integer");
+      }
+      const identityPublicKey = await signer.identityPublicKey();
+      const sspIdentityPublicKey = context.config.ssp.identityPublicKey;
+      const { transfers, nextOffset } = await queryAllTransfers({
+        spark,
+        identityPublicKey,
+        network,
+        limit,
+        offset,
+        types: [
+          TransferType.TRANSFER,
+          TransferType.PREIMAGE_SWAP,
+          TransferType.COOPERATIVE_EXIT,
+          TransferType.UTXO_SWAP,
+        ],
+      });
+      // One batched SSP call per page: only transfers whose counterparty is the SSP carry a
+      // user_request worth fetching.
+      const sspIds = transfers
+        .filter((transfer) => sspCounterparty(transfer, identityPublicKey, sspIdentityPublicKey))
+        .map((transfer) => transfer.id);
+      const requests = new Map<string, SspUserRequest>();
+      for (const result of await context.sspClient.transfers(sspIds)) {
+        if (result.request !== undefined) {
+          requests.set(result.transferId, result.request);
+        }
+      }
+      const payments: SparkPayment[] = transfers.map((transfer) =>
+        toSparkPayment({
+          transfer,
+          request: requests.get(transfer.id),
+          identityPublicKey,
+          sspIdentityPublicKey,
+        }),
+      );
+      return { payments, nextOffset };
+    },
+    list: async (listOptions) => {
+      const { transfers } = await queryAllTransfers({
         spark,
         identityPublicKey: await signer.identityPublicKey(),
         network,
         ...(listOptions?.limit === undefined ? {} : { limit: listOptions.limit }),
         ...(listOptions?.offset === undefined ? {} : { offset: listOptions.offset }),
-      }),
+      });
+      return transfers;
+    },
     send: async (sendOptions) =>
       sendSats(context, {
         receivers: [

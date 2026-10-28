@@ -26,7 +26,7 @@ import type { SparkWalletSettings } from "../settings/index.ts";
 import type { SparkSigner } from "../signer/types.ts";
 import { createSspClient } from "../ssp/index.ts";
 import type { SparkTokenBalance, SparkTokenOutput } from "../tokens/index.ts";
-import type { SparkTransfer } from "../transfer/index.ts";
+import type { SparkPayment, SparkTransfer } from "../transfer/index.ts";
 import { leavesBalance } from "../tree/index.ts";
 import type { SparkLeaf } from "../tree/index.ts";
 import { createClientContext } from "./context.ts";
@@ -81,6 +81,16 @@ export type SparkClient = {
       readonly limit?: number;
       readonly offset?: number;
     }) => Promise<ReadonlyArray<SparkTransfer>>;
+    /**
+     * Transfer history as wallet-facing payments: TRANSFER, PREIMAGE_SWAP, COOPERATIVE_EXIT and
+     * UTXO_SWAP records (newest first) folded with their SSP user requests when the counterparty is
+     * the SSP — one batched SSP call per page. `limit` is 1–100 (default 20); `nextOffset` is the
+     * offset of the next page, `undefined` at the end.
+     */
+    readonly history: (options?: { readonly limit?: number; readonly offset?: number }) => Promise<{
+      readonly payments: ReadonlyArray<SparkPayment>;
+      readonly nextOffset: number | undefined;
+    }>;
     /**
      * Sends exactly `amountSats` to `receiver` (a `spark1…`/`sparkrt1…` address string or a 33-byte
      * identity public key) via `start_transfer_v2` — selecting exact leaves, or swapping with the
