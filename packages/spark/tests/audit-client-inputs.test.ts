@@ -82,6 +82,7 @@ describe("d4: lightning.pay validates maxFeeSats before any SSP call", () => {
       ssp: {
         swapFeeEstimate: unstubbed,
         requestSwap: unstubbed,
+        transfers: async () => Promise.resolve([]),
         requestLightningReceive: unstubbed,
         requestLightningSend: unstubbed,
         lightningSendFeeEstimate: async () => {

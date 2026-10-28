@@ -2,6 +2,13 @@ import type { SparkNetwork } from "../core/network.ts";
 import type { SparkSigner } from "../signer/types.ts";
 
 export type SspClient = {
+  /**
+   * `transfers` — transfer records by Spark transfer id, each carrying its `user_request` when one
+   * exists. At most 100 ids per call; an empty list returns empty without a request.
+   */
+  readonly transfers: (
+    transferIds: ReadonlyArray<string>,
+  ) => Promise<ReadonlyArray<SspTransferResult>>;
   /** `leaves_swap_fee_estimate` — the sats fee the SSP quotes for swapping `amountSats`. */
   readonly swapFeeEstimate: (amountSats: number) => Promise<number>;
   /** `request_swap` — submits the adaptor-signed leaves swap; resolves to the inbound transfer. */
@@ -171,6 +178,47 @@ export type SspClaimStaticDepositRequest = {
 export type SspClaimStaticDepositResult = {
   /** The SSP → wallet transfer id, once the claim created it. */
   readonly transferId?: string;
+};
+
+/**
+ * The SSP `user_request` variants the SDK parses, discriminated on `kind`. An unknown `__typename`
+ * parses to `undefined`, never an error.
+ */
+export type SspUserRequest =
+  | {
+      readonly kind: "lightning-send";
+      readonly status: string;
+      readonly invoice: string;
+      readonly feeSats: number;
+      readonly preimage?: Uint8Array;
+    }
+  | {
+      readonly kind: "lightning-receive";
+      readonly status: string;
+      readonly invoice: string;
+      readonly preimage?: Uint8Array;
+    }
+  | {
+      readonly kind: "coop-exit";
+      readonly status: string;
+      /** `fee` + `l1_broadcast_fee`. */
+      readonly feeSats: number;
+      readonly txid?: string;
+    }
+  | {
+      readonly kind: "static-deposit";
+      readonly txid: string;
+      readonly vout: number;
+      /** Sats the on-chain UTXO carried before the SSP's fee. */
+      readonly depositAmountSats: number;
+      /** Sats the SSP credited for the claim — the fee is `depositAmountSats` minus this. */
+      readonly creditAmountSats: number;
+    }
+  | { readonly kind: "leaves-swap" };
+
+export type SspTransferResult = {
+  readonly transferId: string;
+  readonly request: SspUserRequest | undefined;
 };
 
 export type SspDeps = {

@@ -21,7 +21,7 @@ const TOKEN_IDENTIFIER_LENGTH = 32;
 const MAX_TOKEN_AMOUNT_BYTES = 16; // uint128, big-endian
 
 /** Payment carried by a Spark invoice: satoshis or BTKN tokens. */
-export type SparkPayment =
+export type SparkInvoicePayment =
   | { readonly type: "sats"; readonly amount?: number | undefined }
   | {
       readonly type: "tokens";
@@ -36,7 +36,7 @@ export type SparkInvoiceFields = {
   readonly version: number;
   /** UUID identifying the invoice (canonical lowercase form). */
   readonly id: string;
-  readonly payment?: SparkPayment | undefined;
+  readonly payment?: SparkInvoicePayment | undefined;
   /** At most 120 UTF-8 bytes. */
   readonly memo?: string | undefined;
   /** 33-byte compressed secp256k1 public key. */

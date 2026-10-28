@@ -98,15 +98,20 @@ export async function queryTransfersByIds(options: {
   return response.transfers;
 }
 
-/** `query_all_transfers` — transfers where the identity is sender or receiver. */
+/**
+ * `query_all_transfers` — transfers where the identity is sender or receiver. `types` filters on
+ * the server side (empty means all). `nextOffset` is the offset of the following page — `undefined`
+ * when the SO reports `-1` (a short page ends the listing).
+ */
 export async function queryAllTransfers(options: {
   readonly spark: Client<typeof SparkService>;
   readonly identityPublicKey: Uint8Array;
   readonly network: SparkNetwork;
   readonly limit?: number;
   readonly offset?: number;
+  readonly types?: ReadonlyArray<TransferType>;
   readonly call?: CallOptions;
-}): Promise<SparkTransfer[]> {
+}): Promise<{ readonly transfers: SparkTransfer[]; readonly nextOffset: number | undefined }> {
   const response = await options.spark.query_all_transfers(
     {
       participant: {
@@ -116,10 +121,15 @@ export async function queryAllTransfers(options: {
       network: sparkNetworkProto(options.network),
       limit: BigInt(options.limit ?? 100),
       offset: BigInt(options.offset ?? 0),
+      types: [...(options.types ?? [])],
     },
     options.call,
   );
-  return response.transfers.map(mapTransfer);
+  const nextOffset = Number(response.offset);
+  return {
+    transfers: response.transfers.map(mapTransfer),
+    nextOffset: nextOffset < 0 ? undefined : nextOffset,
+  };
 }
 
 /** The terms a recovered or probed transfer must carry to be the one we signed for. */

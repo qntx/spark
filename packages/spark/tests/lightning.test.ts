@@ -236,6 +236,7 @@ function fakeSpark(handlers: {
 }
 
 function fakeSsp(handlers: {
+  transfers?: SspClient["transfers"];
   requestLightningReceive?: (req: SspLightningReceiveRequest) => {
     id?: string;
     status?: string;
@@ -257,6 +258,7 @@ function fakeSsp(handlers: {
   const ssp: SspClient = {
     swapFeeEstimate: async () => Promise.reject(new Error("unstubbed")),
     requestSwap: async () => Promise.reject(new Error("unstubbed")),
+    transfers: async () => Promise.resolve([]),
     requestLightningReceive: async (req) => {
       receiveRequests.push(req);
       const result = required(
@@ -389,6 +391,7 @@ describe("createLightningInvoice", () => {
     const stored = { count: 0 };
     const { spark } = fakeSpark({ store_preimage_share_v2: () => stored.count++ });
     const { ssp, receiveRequests } = fakeSsp({
+      transfers: async () => Promise.resolve([]),
       requestLightningReceive: (req) => ({
         invoice: sspInvoice(req, identityPublicKey, mutate),
       }),
@@ -500,6 +503,7 @@ describe("createLightningInvoice", () => {
     });
     const { ssp, receiveRequests } = fakeSsp({
       // The SSP embeds the PAYEE's spark address — the invoice routes payment to the payee.
+      transfers: async () => Promise.resolve([]),
       requestLightningReceive: (req) => ({
         invoice: sspInvoice(req, req.receiverIdentityPublicKey),
       }),
@@ -526,6 +530,7 @@ describe("createLightningInvoice", () => {
     const { spark } = fakeSpark({ store_preimage_share_v2: () => stored.count++ });
     const { ssp } = fakeSsp({
       // The SSP answers with OUR spark address — it must be the payee's instead.
+      transfers: async () => Promise.resolve([]),
       requestLightningReceive: (req) => ({ invoice: sspInvoice(req, ownIdentity) }),
     });
     const deps = await lightningDeps({ ssp, spark });

@@ -7,6 +7,8 @@ import type {
   SspCoopExitStatus,
   SspLightningReceiveResult,
   SspLightningSendResult,
+  SspTransferResult,
+  SspUserRequest,
 } from "./types.ts";
 
 export type JsonObject = Record<string, unknown>;
@@ -48,6 +50,14 @@ export function asSats(value: unknown, field: string): number {
     throw unexpectedResponse(field, "is not a non-negative integer");
   }
   return n;
+}
+
+/** A GraphQL Int field used as an array/output index — a number, not a decimal string. */
+export function asIndex(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw unexpectedResponse(field, "is not a non-negative integer");
+  }
+  return value;
 }
 
 /** CurrencyAmount in SATOSHI → sats; any other unit is an unexpected response. */
@@ -259,6 +269,114 @@ export function parseCoopExitResult(request: JsonObject, field: string): SspCoop
     rawConnectorTransaction: asHexBytes(
       request["coop_exit_request_raw_connector_transaction"],
       `${field}.coop_exit_request_raw_connector_transaction`,
+    ),
+  };
+}
+
+function optionalTxidHex(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return asTxidHex(value, field);
+}
+
+/** The `transfers` query's per-item parse: id plus its user_request union member (or none). */
+export function parseTransfersResponse(data: JsonObject): ReadonlyArray<SspTransferResult> {
+  const items = data["transfers"];
+  if (!Array.isArray(items)) {
+    throw unexpectedResponse("transfers", "is not an array");
+  }
+  return items.map((item, index) => {
+    const field = `transfers[${index}]`;
+    const entry = asObject(item, field);
+    const request = entry["transfer_user_request"];
+    return {
+      transferId: asString(entry["transfer_spark_id"], `${field}.transfer_spark_id`),
+      request:
+        request === undefined || request === null
+          ? undefined
+          : parseUserRequest(
+              asObject(request, `${field}.transfer_user_request`),
+              `${field}.transfer_user_request`,
+            ),
+    };
+  });
+}
+
+/**
+ * Discriminated `user_request` parse. An unknown `__typename` is a variant we do not model, not a
+ * malformed response.
+ */
+export function parseUserRequest(request: JsonObject, field: string): SspUserRequest | undefined {
+  switch (request["__typename"]) {
+    case "LightningSendRequest": {
+      const send = parseLightningSend(request, field);
+      return {
+        kind: "lightning-send",
+        status: send.status,
+        invoice: send.encodedInvoice,
+        feeSats: send.feeSats,
+        ...(send.paymentPreimage === undefined ? {} : { preimage: send.paymentPreimage }),
+      };
+    }
+    case "LightningReceiveRequest": {
+      const receive = parseLightningReceive(request, field);
+      return {
+        kind: "lightning-receive",
+        status: receive.status,
+        invoice: receive.invoice,
+        ...(receive.paymentPreimage === undefined ? {} : { preimage: receive.paymentPreimage }),
+      };
+    }
+    case "CoopExitRequest":
+      return parseCoopExitRequest(request, field);
+    case "ClaimStaticDeposit":
+      return parseStaticDepositRequest(request, field);
+    case "LeavesSwapRequest":
+      return { kind: "leaves-swap" };
+    default:
+      return undefined;
+  }
+}
+
+/** `coop_exit` for history: fee = `fee` + `l1_broadcast_fee`, status and payout txid. */
+function parseCoopExitRequest(request: JsonObject, field: string): SspUserRequest {
+  const txid = optionalTxidHex(
+    request["coop_exit_request_coop_exit_txid"],
+    `${field}.coop_exit_request_coop_exit_txid`,
+  );
+  return {
+    kind: "coop-exit",
+    status: asString(request["coop_exit_request_status"], `${field}.coop_exit_request_status`),
+    feeSats:
+      currencyAmountSats(request["coop_exit_request_fee"], `${field}.coop_exit_request_fee`) +
+      currencyAmountSats(
+        request["coop_exit_request_l1_broadcast_fee"],
+        `${field}.coop_exit_request_l1_broadcast_fee`,
+      ),
+    ...(txid === undefined ? {} : { txid }),
+  };
+}
+
+/** `claim_static_deposit` for history: the claim's txid, vout and credited amount. */
+function parseStaticDepositRequest(request: JsonObject, field: string): SspUserRequest {
+  return {
+    kind: "static-deposit",
+    txid: asTxidHex(
+      request["claim_static_deposit_transaction_id"],
+      `${field}.claim_static_deposit_transaction_id`,
+    ),
+    vout: asIndex(
+      request["claim_static_deposit_output_index"],
+      `${field}.claim_static_deposit_output_index`,
+    ),
+    depositAmountSats: currencyAmountSats(
+      request["claim_static_deposit_deposit_amount"],
+      `${field}.claim_static_deposit_deposit_amount`,
+    ),
+    creditAmountSats: currencyAmountSats(
+      request["claim_static_deposit_credit_amount"],
+      `${field}.claim_static_deposit_credit_amount`,
     ),
   };
 }

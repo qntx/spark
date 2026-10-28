@@ -22,6 +22,7 @@ import {
   SWAP_FAILED,
   USER_REQUEST,
   VERIFY_CHALLENGE,
+  TRANSFERS,
 } from "./documents.ts";
 import {
   asObject,
@@ -35,6 +36,7 @@ import {
   parseLightningReceive,
   parseLightningSend,
   unexpectedResponse,
+  parseTransfersResponse,
 } from "./parse.ts";
 import type { JsonObject } from "./parse.ts";
 import type {
@@ -52,6 +54,7 @@ import type {
   SspStaticDepositQuote,
   SspSwapRequest,
   SspSwapResult,
+  SspTransferResult,
 } from "./types.ts";
 
 export type {
@@ -291,6 +294,18 @@ export function createSspClient(options: {
   }
 
   return {
+    async transfers(transferIds: ReadonlyArray<string>): Promise<ReadonlyArray<SspTransferResult>> {
+      if (transferIds.length === 0) {
+        return [];
+      }
+      if (transferIds.length > 100) {
+        throw new SparkInputError("transfers: at most 100 ids per call");
+      }
+      const data = await readPost("Transfers", TRANSFERS, {
+        transfer_spark_ids: [...transferIds],
+      });
+      return parseTransfersResponse(asObject(data, "transfers"));
+    },
     async swapFeeEstimate(amountSats: number): Promise<number> {
       if (!Number.isSafeInteger(amountSats) || amountSats <= 0) {
         throw new SparkInputError("amount sats must be a positive integer");

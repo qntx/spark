@@ -17,6 +17,8 @@ export {
   verifyTransferAcrossOperators,
 } from "./query.ts";
 export type { CommittedTransferExpectation } from "./query.ts";
+export { sspCounterparty, toSparkPayment } from "./payment.ts";
+export type { SparkPayment } from "./payment.ts";
 export { prepareTransferPackage, sendTransfer } from "./send.ts";
 export type { SendAllocation, SendLeafInput } from "./send.ts";
 export { swapLeaves } from "./swap.ts";

@@ -585,6 +585,7 @@ describe("H-02: swap claims from coordinator-only data", () => {
           feeSats: 0,
         });
       },
+      transfers: async () => Promise.resolve([]),
       requestLightningReceive: async () => Promise.reject(new Error("not stubbed")),
       requestLightningSend: async () => Promise.reject(new Error("not stubbed")),
       lightningSendFeeEstimate: async () => Promise.reject(new Error("not stubbed")),

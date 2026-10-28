@@ -31,7 +31,7 @@ const PREFIX_TO_NETWORK: Record<string, SparkNetwork> = {
   sprt: "regtest",
 };
 
-export type { SparkInvoiceFields, SparkPayment } from "./invoice.ts";
+export type { SparkInvoiceFields, SparkInvoicePayment } from "./invoice.ts";
 
 /**
  * Plain-TypeScript mirror of `spark.SparkAddress`. `signature` is the 64-byte schnorr signature

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed
+
+- **BREAKING:** the invoice-payload type `SparkPayment` is renamed `SparkInvoicePayment`; the
+  name now denotes the wallet-facing history entry.
+
+### Added
+
+- `client.transfers.history({ limit?, offset? })`: paged transfer history as `SparkPayment`
+  entries — direction, method (`spark`/`lightning`/`deposit`/`withdraw`), status, sats and fees —
+  folded with the SSP `user_request` (BOLT-11 details, coop-exit fee and payout txid,
+  static-deposit credit) via the new `SspClient.transfers(ids)` batch query;
+  `queryAllTransfers` gained a `types` filter and reports `nextOffset`.
+
 ## 0.3.0
 
 ### Changed

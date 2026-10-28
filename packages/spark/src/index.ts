@@ -22,7 +22,7 @@ export type {
   SparkOperatorConfig,
   SparkAddress,
   SparkInvoiceFields,
-  SparkPayment,
+  SparkInvoicePayment,
   SparkTokenIdentifierData,
 } from "./core/index.ts";
 export type { Bolt11Invoice, Bolt11Network } from "./core/index.ts";
@@ -59,7 +59,7 @@ export { createMemorySparkStore } from "./exit/store.ts";
 export type { SparkExitChain, SparkStore } from "./exit/store.ts";
 export type { SparkWalletSettings } from "./settings/index.ts";
 export type { SparkLeaf } from "./tree/index.ts";
-export type { SparkTransfer, SparkTransferLeaf } from "./transfer/index.ts";
+export type { SparkPayment, SparkTransfer, SparkTransferLeaf } from "./transfer/index.ts";
 export type {
   LightningInvoice,
   LightningPayment,
