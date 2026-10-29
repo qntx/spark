@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- `@qntx/spark-native` did not link from C++ consumers: `qntx_spark.h` was generated without an
+  `extern "C"` guard, so references were emitted under mangled names. cbindgen now emits the
+  guard (`cpp_compat`), and the ffi-host check compiles and links a C++ TU against the header.
+- The Android `libqntx_spark.so` carried no `DT_SONAME`, so consumers recorded the build path
+  in `DT_NEEDED` and the loader failed at runtime. The Android build now links with
+  `-Wl,-soname,libqntx_spark.so` and asserts the soname with `llvm-readelf`.
+- Removed `spark-native`'s broken prefab publishing (`../../include` did not exist and an
+  IMPORTED target cannot be prefab-published). Consumers link the shipped `.so` directly.
+
 ## 0.5.0
 
 ## 0.4.0

@@ -294,7 +294,11 @@ function buildAndroid(): void {
     sh("cargo", ["build", "--release", "-p", "spark-ffi", "--target", target], {
       [`${envKey}_LINKER`]: linker,
       [`${envKey}_AR`]: join(bin, "llvm-ar"),
-      [`${envKey}_RUSTFLAGS`]: "-C link-arg=-Wl,-z,max-page-size=16384",
+      // The soname lands in DT_SONAME: consumers linking the prebuilt record
+      // "libqntx_spark.so" in DT_NEEDED — without it they record the build
+      // path and the loader fails at runtime.
+      [`${envKey}_RUSTFLAGS`]:
+        "-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,libqntx_spark.so",
     });
     const built = join(REPO, "target", target, "release", "libspark_ffi.so");
     if (!existsSync(built)) {
@@ -305,6 +309,10 @@ function buildAndroid(): void {
     const dest = join(destDir, "libqntx_spark.so");
     copyFileSync(built, dest);
     sh(llvmStrip, ["--strip-unneeded", dest]);
+    const sonames = sh(join(bin, "llvm-readelf"), ["-d", dest]);
+    if (!sonames.includes("Library soname: [libqntx_spark.so]")) {
+      fail(`android ${abi}: missing SONAME in ${dest}:\n${sonames}`);
+    }
     const exports = listExports(llvmNm, ["-D", "--defined-only"], dest);
     checkExports(exports, `android ${abi}`);
     report(

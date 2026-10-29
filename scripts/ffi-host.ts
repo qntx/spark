@@ -142,3 +142,26 @@ run("cc", [
   binary,
 ]);
 run(binary, []);
+
+// C++ linkage guard: the ABI header must declare extern "C" (cbindgen
+// cpp_compat) — without it a C++ TU references mangled symbols and this
+// link fails even though the C build above passed.
+const cppSource = `#include "qntx_spark.h"
+int main() { return static_cast<int>(qs_abi_version()) == 1 ? 0 : 1; }
+`;
+writeFileSync(join(work, "linkage.cpp"), cppSource);
+run("c++", [
+  "-std=c++17",
+  "-O0",
+  "-Wall",
+  "-Werror",
+  "-I",
+  "crates/spark-ffi/include",
+  join(work, "linkage.cpp"),
+  staticlib,
+  ...platformLibs,
+  "-o",
+  join(work, "ffi-linkage"),
+]);
+run(join(work, "ffi-linkage"), []);
+console.log("ffi-linkage: c++ consumer linked and ran");
