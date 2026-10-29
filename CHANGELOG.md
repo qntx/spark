@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.1
+
 ### Fixed
 
 - `@qntx/spark-native` did not link from C++ consumers: `qntx_spark.h` was generated without an
