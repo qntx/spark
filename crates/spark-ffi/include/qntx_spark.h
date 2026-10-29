@@ -19,6 +19,10 @@
  */
 #define qs_ABI_VERSION 1
 
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
 /**
  * Returns the C ABI version implemented by this library (`crate::ABI_VERSION`).
  */
@@ -150,3 +154,7 @@ int32_t qs_split_secret_with_proofs(const uint8_t *secret,
                                     size_t random_len,
                                     uint8_t **out,
                                     size_t *out_len);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus

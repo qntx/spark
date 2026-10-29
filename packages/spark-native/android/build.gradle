@@ -90,17 +90,11 @@ android {
 
   buildFeatures {
     buildConfig = true
-    // Publishes `qntx_spark` as a prefab module inside the AAR (headers from
-    // ../include, libs from jniLibs) so sibling packages like
-    // @qntx/wallet-native can link the same prebuilt later.
+    // Consumes dependency prefabs (fbjni/ReactAndroid/Nitro) only. The
+    // prebuilt libqntx_spark.so ships from jniLibs — an IMPORTED target
+    // cannot be prefab-published, so there is nothing to publish.
     prefab = true
-    prefabPublishing = true
-  }
-
-  prefab {
-    qntx_spark {
-      headers "../../include"
-    }
+    prefabPublishing = false
   }
 
   buildTypes {
