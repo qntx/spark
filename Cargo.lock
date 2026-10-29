@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "spark-crypto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "aes-gcm",
  "frost-core",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "spark-ffi"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "hex",
  "prost",

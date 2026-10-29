@@ -1,6 +1,6 @@
 {
   "name": "@qntx/spark-native",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Native qntx_spark (Nitro) SparkCrypto backend for @qntx/spark on React Native",
   "keywords": [
     "bitcoin",
