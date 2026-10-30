@@ -1,6 +1,6 @@
 {
   "name": "@qntx/spark",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Spark Bitcoin L2 protocol for TypeScript: platform-neutral client, signer and crypto-backend interfaces.",
   "keywords": [
     "bitcoin",
