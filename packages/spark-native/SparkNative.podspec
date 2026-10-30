@@ -22,6 +22,8 @@ Pod::Spec.new do |s|
 
   # Prebuilt spark-ffi cdylib (aarch64 device + arm64/x86_64 simulator), built by
   # `bun run build:native` at the repository root.
+  s.public_header_files = "include/qntx_spark.h"
+
   s.vendored_frameworks = "ios/QntxSpark.xcframework"
 
   load 'nitrogen/generated/ios/SparkNative+autolinking.rb'
