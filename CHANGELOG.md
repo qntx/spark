@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- `@qntx/spark-native` did not declare `qntx_spark.h` as a public pod header, so dependents
+  could not include it through the pod's public headers (`Headers/Public/SparkNative`).
+
 ## 0.5.1
 
 ### Fixed
