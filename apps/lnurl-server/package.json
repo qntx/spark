@@ -15,11 +15,11 @@
     "@qntx/nostr": "0.15.0",
     "@qntx/spark": "workspace:*",
     "@qntx/spark-wasm": "workspace:*",
-    "hono": "4.13.13",
+    "hono": "4.13.14",
     "pg": "8.23.1"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.10",
+    "@electric-sql/pglite": "0.5.11",
     "@types/pg": "8.23.1"
   },
   "engines": {
