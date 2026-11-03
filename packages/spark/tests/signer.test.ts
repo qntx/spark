@@ -950,7 +950,7 @@ describe("FROST sign + aggregate round trip", () => {
 /** Narrows a thrown value to {@link SparkCryptoError} so its ABI code can be asserted. */
 function cryptoCode(error: unknown): number {
   if (!(error instanceof SparkCryptoError)) {
-    throw new Error("expected a SparkCryptoError");
+    throw new TypeError("expected a SparkCryptoError");
   }
   return error.code;
 }

@@ -5,6 +5,6 @@ const CONTROL = /[\u0000-\u001F\u007F-\u009F]/g;
 
 /** Server-supplied error text made safe to embed in an error message. */
 export function serverErrorText(text: string): string {
-  const cleaned = text.replace(CONTROL, "");
+  const cleaned = text.replaceAll(CONTROL, "");
   return cleaned.length <= 256 ? cleaned : `${cleaned.slice(0, 256)}\u2026`;
 }
