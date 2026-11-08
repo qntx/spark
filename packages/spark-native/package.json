@@ -65,7 +65,7 @@
     "@arethetypeswrong/cli": "0.18.5",
     "@qntx/spark": "0.1.0",
     "@qntx/tsconfig": "1.0.1",
-    "@types/node": "26.6.5",
+    "@types/node": "26.6.6",
     "nitrogen": "0.37.1",
     "publint": "0.3.25",
     "react-native-nitro-modules": "0.37.1",
