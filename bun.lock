@@ -11,7 +11,7 @@
         "@qntx/oxlint": "1.1.1",
         "@qntx/tsconfig": "1.0.1",
         "@taplo/cli": "0.7.0",
-        "@types/node": "26.6.5",
+        "@types/node": "26.6.6",
         "bumpp": "12.3.0",
         "typescript": "7.0.2",
         "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0",
@@ -23,14 +23,14 @@
       "version": "0.0.0",
       "dependencies": {
         "@hono/node-server": "2.1.5",
-        "@qntx/nostr": "0.15.0",
+        "@qntx/nostr": "0.15.3",
         "@qntx/spark": "workspace:*",
         "@qntx/spark-wasm": "workspace:*",
-        "hono": "4.13.14",
+        "hono": "4.13.16",
         "pg": "8.23.1",
       },
       "devDependencies": {
-        "@electric-sql/pglite": "0.5.11",
+        "@electric-sql/pglite": "0.5.14",
         "@types/pg": "8.23.1",
       },
     },
@@ -52,7 +52,7 @@
         "@arethetypeswrong/cli": "0.18.5",
         "@qntx/spark-wasm": "0.1.0",
         "@qntx/tsconfig": "1.0.1",
-        "@types/node": "26.6.5",
+        "@types/node": "26.6.6",
         "publint": "0.3.25",
         "typescript": "7.0.2",
         "undici": "8.12.3",
@@ -66,7 +66,7 @@
         "@arethetypeswrong/cli": "0.18.5",
         "@qntx/spark": "0.1.0",
         "@qntx/tsconfig": "1.0.1",
-        "@types/node": "26.6.5",
+        "@types/node": "26.6.6",
         "nitrogen": "0.37.1",
         "publint": "0.3.25",
         "react-native-nitro-modules": "0.37.1",
@@ -86,7 +86,7 @@
         "@arethetypeswrong/cli": "0.18.5",
         "@qntx/spark": "0.1.0",
         "@qntx/tsconfig": "1.0.1",
-        "@types/node": "26.6.5",
+        "@types/node": "26.6.6",
         "publint": "0.3.25",
         "typescript": "7.0.2",
         "vite-plus": "1.4.0",
@@ -172,7 +172,7 @@
 
     "@connectrpc/connect-web": ["@connectrpc/connect-web@2.2.0", "", { "peerDependencies": { "@bufbuild/protobuf": "^2.7.0", "@connectrpc/connect": "2.2.0" } }, "sha512-uuBUcBTYfb/r1o98LzCCZk1H90yx0vmZ5m21dpw/q4EUwsKwkCDGI8H0aEdjcZld+Q2jJ5A5ADvPqfb6lzQ/sg=="],
 
-    "@electric-sql/pglite": ["@electric-sql/pglite@0.5.11", "", {}, "sha512-SWuqsTjA4DDWqgZ05PC1RJaq8e00p5KACxbqaikDFQ8dIGA0SLRzuPniky7IW+q/c5RDNMdEXwv7mFBWIx9Hxw=="],
+    "@electric-sql/pglite": ["@electric-sql/pglite@0.5.14", "", {}, "sha512-aAQe7iArcFB2w1xtx91l3l9trxhMzD6aZf+WnosSHNhwgp70EJz80Igw/bHnW14fUEFYWPBoQ1sGom8Xc0Jttg=="],
 
     "@hono/node-server": ["@hono/node-server@2.1.5", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q=="],
 
@@ -302,7 +302,7 @@
 
     "@qntx/lnurl-server": ["@qntx/lnurl-server@workspace:apps/lnurl-server"],
 
-    "@qntx/nostr": ["@qntx/nostr@0.15.0", "", { "dependencies": { "@noble/ciphers": "^2.4.0", "@noble/curves": "^2.4.0", "@noble/hashes": "^2.4.0", "@scure/base": "^2.4.0" }, "peerDependencies": { "ws": "^8.18.0" }, "optionalPeers": ["ws"] }, "sha512-bXgvNSlj4p/uw996x8rlB9bI50wcY+uH9rq+2lJBn6hZAUetBrf6ujTrKRQCpzg5DS2MwBWl4kmV4aXLzPUFRQ=="],
+    "@qntx/nostr": ["@qntx/nostr@0.15.3", "", { "dependencies": { "@noble/ciphers": "^2.4.0", "@noble/curves": "^2.4.0", "@noble/hashes": "^2.4.0", "@scure/base": "^2.4.0" }, "peerDependencies": { "ws": "^8.18.0" }, "optionalPeers": ["ws"] }, "sha512-AefcRXe/3basIgDA0gBGzzQ2Y9k131SfrU0hZ+eJqfLzCSzsVJyum5XKzffJ74VU6FroQPbS/fSS7W5mGd22ow=="],
 
     "@qntx/oxfmt": ["@qntx/oxfmt@1.1.1", "", { "peerDependencies": { "oxfmt": ">=0.66.0 <1.0.0" }, "optionalPeers": ["oxfmt"] }, "sha512-i/+3GBLZlwDNW6gT1Z76LKEfPBm4LMSjee0URPRn5YeILbEtGQtMuUNNLcfabYpGPZI4wGL3YyPjdD3/Abf9Kw=="],
 
@@ -368,7 +368,7 @@
 
     "@types/istanbul-reports": ["@types/istanbul-reports@3.0.4", "", { "dependencies": { "@types/istanbul-lib-report": "*" } }, "sha512-pk2B1NWalF9toCRu6gjBzR69syFjP4Od8WRAX+0mmf9lAjCRicLOWc+ZrxZHx/0XRjotgkF9t6iaMJ+aXcOdZQ=="],
 
-    "@types/node": ["@types/node@26.6.5", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg=="],
+    "@types/node": ["@types/node@26.6.6", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog=="],
 
     "@types/pg": ["@types/pg@8.23.1", "", { "dependencies": { "@types/node": "*", "pg-protocol": "*", "pg-types": "^2.2.0" } }, "sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A=="],
 
@@ -638,7 +638,7 @@
 
     "highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
-    "hono": ["hono@4.13.14", "", {}, "sha512-yhRLQ21U6qa9Hsu2N7Qcbh8tE+WKEcoErjIo56LeSGiGXGp9sA7UpE86Ui9uexb61KakiGwuHMn2QdV7w6i6kQ=="],
+    "hono": ["hono@4.13.16", "", {}, "sha512-AOLOEhvrV+iH92xXCnFr/5+3KjPKcI3xP63XJtX5spAnkznPdHijlIsUTpi7/9EhWqrTCekw5c5zh1K+YsVw7A=="],
 
     "http-errors": ["http-errors@2.0.1", "", { "dependencies": { "depd": "~2.0.0", "inherits": "~2.0.4", "setprototypeof": "~1.2.0", "statuses": "~2.0.2", "toidentifier": "~1.0.1" } }, "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ=="],
 
