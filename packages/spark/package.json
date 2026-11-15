@@ -84,8 +84,8 @@
     "@types/node": "26.6.6",
     "publint": "0.3.25",
     "typescript": "7.0.2",
-    "undici": "8.12.3",
-    "vite-plus": "1.4.0"
+    "undici": "8.12.4",
+    "vite-plus": "1.5.0"
   },
   "devEngines": {
     "packageManager": {

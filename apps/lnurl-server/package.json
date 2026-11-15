@@ -11,15 +11,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@hono/node-server": "2.1.5",
-    "@qntx/nostr": "0.15.3",
+    "@hono/node-server": "2.1.6",
+    "@qntx/nostr": "0.15.4",
     "@qntx/spark": "workspace:*",
     "@qntx/spark-wasm": "workspace:*",
-    "hono": "4.13.16",
+    "hono": "4.13.17",
     "pg": "8.23.1"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.14",
+    "@electric-sql/pglite": "0.5.15",
     "@types/pg": "8.23.1"
   },
   "engines": {
