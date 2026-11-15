@@ -8,7 +8,7 @@
         "@bufbuild/buf": "1.73.0",
         "@bufbuild/protoc-gen-es": "2.16.0",
         "@qntx/oxfmt": "1.1.1",
-        "@qntx/oxlint": "1.1.1",
+        "@qntx/oxlint": "2.0.0",
         "@qntx/tsconfig": "1.0.1",
         "@taplo/cli": "0.7.0",
         "@types/node": "26.6.6",
@@ -306,7 +306,7 @@
 
     "@qntx/oxfmt": ["@qntx/oxfmt@1.1.1", "", { "peerDependencies": { "oxfmt": ">=0.66.0 <1.0.0" }, "optionalPeers": ["oxfmt"] }, "sha512-i/+3GBLZlwDNW6gT1Z76LKEfPBm4LMSjee0URPRn5YeILbEtGQtMuUNNLcfabYpGPZI4wGL3YyPjdD3/Abf9Kw=="],
 
-    "@qntx/oxlint": ["@qntx/oxlint@1.1.1", "", { "peerDependencies": { "oxlint": "^1.82.0", "oxlint-tsgolint": ">=7.0.2001" }, "optionalPeers": ["oxlint", "oxlint-tsgolint"] }, "sha512-zvn9BENK1Ly1GmxwVYEDZJOCm7koW2Cji3l+M1i19gLpcTqmatvtWBEtBRNc6rPxfVRNz0mhc+6z76iTKuNFqw=="],
+    "@qntx/oxlint": ["@qntx/oxlint@2.0.0", "", { "peerDependencies": { "oxlint": "^1.89.0", "oxlint-tsgolint": ">=7.0.2004" }, "optionalPeers": ["oxlint", "oxlint-tsgolint"] }, "sha512-vp7/BfhtgiWLB+SVko9SVNYrT625imrQ20KgvfZuwW7uk2jCONDtHgAPdhrwWyjL3ZDmXh9b0s66Mk9xfXEqow=="],
 
     "@qntx/spark": ["@qntx/spark@workspace:packages/spark"],
 
