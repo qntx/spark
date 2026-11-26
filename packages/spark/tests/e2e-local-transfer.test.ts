@@ -117,13 +117,12 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO transfer flow"
     await expect(clientB.balance()).resolves.toBe(100_000);
     await expect(clientA.balance()).resolves.toBe(0);
 
-    // A second claim of the same transfer hits the SO's already_exists path and
-    // recovers the same leaves instead of failing.
-    const recovered = await clientB.transfers.claim(requiredTransfer(pendingTransfer).id);
-    expect(recovered.map((l) => l.id).toSorted()).toStrictEqual(
-      claimedByB.map((l) => l.id).toSorted(),
-    );
-    console.log("B recovered leaves on re-claim:", recovered.map((l) => l.id).join(", "));
+    // Re-claiming a transfer whose receiver leg already completed is a no-op: claim re-queries
+    // the coordinator, sees it COMPLETED and returns [] without crediting B twice.
+    await expect(
+      clientB.transfers.claim(requiredTransfer(pendingTransfer).id),
+    ).resolves.toStrictEqual([]);
+    await expect(clientB.balance()).resolves.toBe(100_000);
 
     // B's store holds the claimed exit chain; replaying it yields the same
     // transactions the SO query path returns.

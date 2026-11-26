@@ -3,9 +3,20 @@
 # a 0-value P2A anchor (added in Bitcoin Core 29; lncm/bitcoind:v28.0 rejects
 # them as dust). Only the daemon image is replaced; bitcoin-init/bitcoin-miner
 # stay on lncm v28 since they only drive bitcoin-cli over RPC.
-# Index digest pinned from `docker buildx imagetools inspect bitcoin/bitcoin:31.0`.
+# Every image the stack pulls is pinned by multi-arch index digest (from
+# `docker buildx imagetools inspect <image:tag>`) so an upstream image change
+# shows up as a deliberate bump; the operator image is built from source at
+# the lock.json commit.
 services:
   bitcoind:
     image: bitcoin/bitcoin:31.0@sha256:a1d05be6939b5c85132a761d2b795f5b8a2612ce53782263da4939778e461792
     environment:
       BITCOIN_DATA: /data/.bitcoin
+  cert-init:
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+  postgres:
+    image: postgres:16-bookworm@sha256:cd0e9518bda5f2ea667ff84d22795d089720c883f288e215d97ce57437e8ef37
+  bitcoin-init:
+    image: lncm/bitcoind:v28.0@sha256:1d335a5adbfac6d66cee20b62b339385819dc75f8cb60c6c5773922cec4c25ef
+  bitcoin-miner:
+    image: lncm/bitcoind:v28.0@sha256:1d335a5adbfac6d66cee20b62b339385819dc75f8cb60c6c5773922cec4c25ef

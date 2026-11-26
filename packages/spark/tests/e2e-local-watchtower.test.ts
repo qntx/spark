@@ -7,6 +7,7 @@ import { txId } from "../src/core/bitcoin/index.ts";
 import type { WatchtowerExitedLeaf } from "../src/exit/watchtower.ts";
 import {
   bitcoinRpc,
+  broadcastUntil,
   chainAncestors,
   CLAIM_DEADLINE_MS,
   claimUntilAccepted,
@@ -18,29 +19,33 @@ import {
   pingPongUntilRenewed,
   refundTimelock,
   required,
+  sleep,
   storedExitChain,
 } from "./support/local.ts";
 
 const SEND_SATS = 100_000;
 const RENEWALS_REQUIRED = 2;
 
-/** Polls the watchtower-exited listing for `leafId`, driving the chain watcher with fresh blocks. */
+/**
+ * Polls the watchtower-exited listing for `leafId` — the SO marks the leaf while handling the block
+ * that confirms the direct tx, asynchronously from bitcoind, so wait instead of mining further.
+ * Throws once `deadline` passes.
+ */
 async function watchtowerExitedUntil(
   client: ReturnType<typeof createSparkClient>,
   leafId: string,
+  deadline: number,
 ): Promise<WatchtowerExitedLeaf> {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    // oxlint-disable-next-line no-await-in-loop -- the chain watcher only acts on a new block
-    const listed = await client.withdrawals.watchtowerExitedLeaves();
-    const entry = listed.find((candidate) => candidate.leafId === leafId);
-    if (entry !== undefined) {
-      return entry;
-    }
-    console.log(`poll ${attempt}: leaf not yet watchtower-exited`);
-    // oxlint-disable-next-line no-await-in-loop -- drive the chain watcher
-    await mine(2);
+  const listed = await client.withdrawals.watchtowerExitedLeaves();
+  const entry = listed.find((candidate) => candidate.leafId === leafId);
+  if (entry !== undefined) {
+    return entry;
   }
-  throw new Error("leaf never reached a watchtower-exited status");
+  if (Date.now() > deadline) {
+    throw new Error("leaf never reached a watchtower-exited status");
+  }
+  await sleep(1000);
+  return watchtowerExitedUntil(client, leafId, deadline);
 }
 
 describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO watchtower exit", () => {
@@ -86,10 +91,17 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO watchtower exi
     await generateBlockWith([bytesToHex(grandparent.nodeTx)]);
     await mine(6);
 
-    // The parent's direct tx unlocks 50 blocks past the grandparent's confirmation; the
-    // SO's watchtower broadcasts it and marks every descendant WATCHTOWER_EXITED.
+    // The parent's direct tx unlocks 50 blocks past the grandparent's confirmation; the SO's
+    // watchtower broadcasts it on its own chain-action pass once unlocked. Wait for that
+    // broadcast, confirm it, then wait for the SO to mark the leaf WATCHTOWER_EXITED.
     await mine(55);
-    const stranded = await watchtowerExitedUntil(holder.client, leafId);
+    await broadcastUntil(parentDirectTxid, Date.now() + CLAIM_DEADLINE_MS);
+    await mine(1);
+    const stranded = await watchtowerExitedUntil(
+      holder.client,
+      leafId,
+      Date.now() + CLAIM_DEADLINE_MS,
+    );
     console.log("watchtower-exited leaf:", stranded.leafId, stranded.status);
     expect(stranded.status).toBe("WATCHTOWER_EXITED");
     expect(stranded.valueSats).toBe(SEND_SATS);
@@ -98,7 +110,7 @@ describe.skipIf(process.env["SPARK_E2E_LOCAL"] !== "1")("local SO watchtower exi
     expect(recovery.valueSats).toBeGreaterThan(0);
 
     // The stranded leaf is out of the spendable pool.
-    const leaves = await leavesUntil(holder.client, Date.now() + CLAIM_DEADLINE_MS);
+    const leaves = await holder.client.leaves();
     expect(leaves.map((entry) => entry.id)).not.toContain(leafId);
 
     const destination = await destinationFor();
