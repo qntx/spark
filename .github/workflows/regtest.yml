@@ -21,6 +21,8 @@ on:
       - ".github/workflows/regtest.yml"
       - "scripts/spark-local.ts"
       - "scripts/spark-local.override.yml"
+      - "packages/spark/tests/e2e-local-*.test.ts"
+      - "packages/spark/tests/support/local.ts"
 
 permissions:
   contents: read
