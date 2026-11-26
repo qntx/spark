@@ -420,6 +420,21 @@ export async function awaitWatchtowerBroadcast(
   return awaitWatchtowerBroadcast(txid, batch, rounds - 1);
 }
 
+/**
+ * Polls bitcoind until it has seen `txid` (mempool or chain) — the SO broadcasts on its own scan
+ * tick, asynchronously from the blocks a test mines. Throws once `deadline` passes.
+ */
+export async function broadcastUntil(txid: string, deadline: number): Promise<void> {
+  if ((await knownConfirmations(txid)) >= 0) {
+    return;
+  }
+  if (Date.now() > deadline) {
+    throw new Error(`${txid} was never broadcast`);
+  }
+  await sleep(1000);
+  return broadcastUntil(txid, deadline);
+}
+
 export type LocalTestWallet = LocalWallet & { readonly identity: Uint8Array };
 
 /** `localWallet` plus the identity public key, the form two-wallet tests pass around. */
