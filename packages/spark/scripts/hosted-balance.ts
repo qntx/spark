@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /// <reference types="node" />
-// Hosted-suite balance guard: prints account 0's spendable balance (sats, one
+// Hosted-suite balance guard: prints account 0's spendable balance after claiming
+// pending transfers (sats, one
 // number) and exits 1 below MIN_BALANCE_SATS with the faucet instructions. The
 // spark address is public; the seed is never logged. .github/workflows/regtest.yml
 // runs this before and after the hosted suite; locally it works the same way
@@ -11,6 +12,7 @@ import { hostedSeed, hostedWallet } from "../tests/support/hosted.ts";
 const MIN_BALANCE_SATS = 100_000;
 
 const wallet = await hostedWallet(hostedSeed(), 0);
+await wallet.client.transfers.claimPending();
 const balance = await wallet.client.balance();
 const address = encodeSparkAddress({
   network: "regtest",
