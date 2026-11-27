@@ -11,4 +11,4 @@
  * `loadSparkWasm()` without `module` loads `spark.wasm` itself and does NOT verify this hash —
  * callers that want SRI enforcement must fetch with `integrity` and pass `module`.
  */
-export const SPARK_WASM_INTEGRITY = "sha256-OBAVP0QjuY/JyeQh6Ay3XnczAKsMYrWoHdCJ73RSPeQ=";
+export const SPARK_WASM_INTEGRITY = "sha256-18ELlMe7X1Mc5s8mN9NtkcRWmNO17G8OATor1rc+6QI=";
