@@ -30,7 +30,7 @@
     "@bufbuild/buf": "1.73.0",
     "@bufbuild/protoc-gen-es": "2.16.0",
     "@qntx/oxfmt": "1.1.1",
-    "@qntx/oxlint": "1.1.1",
+    "@qntx/oxlint": "2.0.0",
     "@qntx/tsconfig": "1.0.1",
     "@taplo/cli": "0.7.0",
     "@types/node": "26.6.6",
