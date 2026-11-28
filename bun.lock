@@ -7,7 +7,7 @@
       "devDependencies": {
         "@bufbuild/buf": "1.73.0",
         "@bufbuild/protoc-gen-es": "2.16.0",
-        "@qntx/oxfmt": "1.1.1",
+        "@qntx/oxfmt": "2.0.0",
         "@qntx/oxlint": "2.0.0",
         "@qntx/tsconfig": "1.0.1",
         "@taplo/cli": "0.7.0",
@@ -304,7 +304,7 @@
 
     "@qntx/nostr": ["@qntx/nostr@0.15.4", "", { "dependencies": { "@noble/ciphers": "^2.4.0", "@noble/curves": "^2.4.0", "@noble/hashes": "^2.4.0", "@scure/base": "^2.4.0" }, "peerDependencies": { "ws": "^8.18.0" }, "optionalPeers": ["ws"] }, "sha512-kxWfN3HxKm7bTDn7Mzd+X80J74fbzNwUHOx8in5qMcb89/FgytR0jXllnF6eqGyO7VYG3pKSj94JnhgbkV73BQ=="],
 
-    "@qntx/oxfmt": ["@qntx/oxfmt@1.1.1", "", { "peerDependencies": { "oxfmt": ">=0.66.0 <1.0.0" }, "optionalPeers": ["oxfmt"] }, "sha512-i/+3GBLZlwDNW6gT1Z76LKEfPBm4LMSjee0URPRn5YeILbEtGQtMuUNNLcfabYpGPZI4wGL3YyPjdD3/Abf9Kw=="],
+    "@qntx/oxfmt": ["@qntx/oxfmt@2.0.0", "", { "peerDependencies": { "oxfmt": ">=0.74.0 <1.0.0" }, "optionalPeers": ["oxfmt"] }, "sha512-68wFtbY19xmFd8wNAnUv1bCrQYM+eZd0sSXIWQuWo6rW/8WrKZNgE3xmuS/VdNUiyHGLX5H6IVUaVSKVThZCmQ=="],
 
     "@qntx/oxlint": ["@qntx/oxlint@2.0.0", "", { "peerDependencies": { "oxlint": "^1.89.0", "oxlint-tsgolint": ">=7.0.2004" }, "optionalPeers": ["oxlint", "oxlint-tsgolint"] }, "sha512-vp7/BfhtgiWLB+SVko9SVNYrT625imrQ20KgvfZuwW7uk2jCONDtHgAPdhrwWyjL3ZDmXh9b0s66Mk9xfXEqow=="],
 
